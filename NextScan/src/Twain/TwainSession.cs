@@ -76,6 +76,20 @@ namespace NextScan.Twain
         public static List<string> FindDsmCandidates()
         {
             List<string> paths = new List<string>();
+
+            // Test harness override (ADR-0002): when NEXTSCAN_TWAIN_DSM is set it is
+            // the ONLY candidate, so a fake DSM can be pinned deterministically
+            // instead of depending on the ordering of the real candidates below.
+            // The variable is unset on user machines - production behaviour is
+            // unchanged. A bad path here surfaces as TwainDsmNotFound, which is the
+            // correct diagnosis for a misconfigured harness.
+            try
+            {
+                string pinned = Environment.GetEnvironmentVariable("NEXTSCAN_TWAIN_DSM");
+                if (!string.IsNullOrEmpty(pinned)) { paths.Add(pinned); return paths; }
+            }
+            catch { }
+
             string sys = Environment.GetFolderPath(Environment.SpecialFolder.System);
             string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
 
