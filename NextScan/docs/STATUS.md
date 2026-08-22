@@ -56,10 +56,34 @@ Host32 and Host64. Image content is a deterministic 8-bar colour pattern
 bar colours came back byte-exact, which also proves R/B order through our own
 memory-transfer path (hardware-side confirmation still pending — see §3).
 
-**Not yet built** (the remaining ADR-0002 scope): the fault personalities
-(odd width, 1/8/16-bit, bottom-up/top-down, refuses `ShowUI=FALSE`, lying
-`MSG_SET`, hang, state-7 crash, duplex reversed backs), the golden-image
-harness, and the watchdog/crash-isolation proofs.
+**Personalities, verified** (`NEXTSCAN_SIM_PERSONALITY`): oddwidth (451px at a
+450px request), bw1/gray8/gray16/color48 forced modes (driver "accepts"
+negotiation then delivers its own fixed mode — read-back catches it), bottomup
+and topdown (memory transfer refused → native-DIB fallback, both row orders),
+refusesui (`TwainEnableFailed` with condition code), setlies (SET succeeds,
+device stays at 150 dpi — detected, image consistent with the lie), crash7
+(host dies 0xC0000005 in state 7 → broker reports `HostCrashed`, caller
+survives), duplex (feeder + 2 pages, back side rotated 180°, asserted both
+against references and the rot180 relation).
+
+**Golden harness, verified** (`tests\run_golden.ps1`): 16 cases — pixel-exact
+image comparison (decoded 24bpp rows + dimensions + DPI) against committed
+references in `tests\golden\`, plus behavioural assertions. Full run ≈ 10 s,
+exit code non-zero on any failure. `-Generate` regenerates references;
+`-WithHang` adds the slow watchdog proof.
+
+**Bug the simulator found before any user could:** `DeviceBroker.RunHost`'s
+crash-detection branch was unreachable — a crashed host emits no `result`
+line, so the sentinel `HostPipeBroken` result (Ok=false) kept the branch's
+`Result.Ok` condition false forever. Crashes were reported as pipe breaks with
+no exit code. Fixed by tracking whether a `result` line was seen at all; the
+`crash7_isolation` harness case is its regression test.
+
+**Not yet proven:** the hang personality's full watchdog kill at the broker
+level (timeout is 600 s in the scan path; proof run pending). The eleven
+STATUS §2 traps are now regression-covered on the TWAIN side via the
+personalities above; the WIA-side traps (PRSPEC_PROPID, TYMED ordering) still
+have no simulator coverage.
 
 ### Why the 32-bit host is not optional
 

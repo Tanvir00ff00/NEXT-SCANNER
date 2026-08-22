@@ -287,6 +287,14 @@ namespace NextScan.Core
             public readonly List<JsonObj> Messages = new List<JsonObj>();
             public NsResult Result = NsResult.Fail(NsError.HostPipeBroken, "The scanner host did not respond.", "");
             public int ExitCode = -1;
+            /// <summary>
+            /// True once the host emitted a "result" line. Without this flag a
+            /// crashed host is indistinguishable from a silent one: the crash leaves
+            /// the sentinel Result (Ok=false) in place, which used to make the
+            /// HostCrashed branch below unreachable. The simulator's crash7
+            /// personality (ADR-0002) is the regression test for exactly this.
+            /// </summary>
+            public bool SawResult;
         }
 
         /// <summary>
@@ -336,7 +344,7 @@ namespace NextScan.Core
 
                     lock (run.Messages) { run.Messages.Add(o); }
 
-                    if (type == "result") run.Result = NsResult.FromJson(o);
+                    if (type == "result") { run.Result = NsResult.FromJson(o); run.SawResult = true; }
 
                     if (onMessage != null)
                     {
@@ -379,7 +387,7 @@ namespace NextScan.Core
                 {
                     run.Result = NsResult.Success();
                 }
-                else if (run.ExitCode != 0 && run.Result.Ok)
+                else if (run.ExitCode != 0 && (run.Result.Ok || !run.SawResult))
                 {
                     // Non-zero exit with no reported failure means the host died
                     // rather than returning - almost always a vendor driver fault,

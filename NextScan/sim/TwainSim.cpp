@@ -121,6 +121,7 @@ typedef struct { TW_UINT16 Count; TW_UINT32 EOJ; } TW_PENDINGXFERS;
 
 #define TWCC_SUCCESS        0
 #define TWCC_OPERATIONERROR 5
+#define TWCC_BADPROTOCOL    9
 #define TWCC_BADVALUE       10
 #define TWCC_SEQERROR       11
 #define TWCC_CAPUNSUPPORTED 13
@@ -171,9 +172,24 @@ typedef struct { TW_UINT16 Count; TW_UINT32 EOJ; } TW_PENDINGXFERS;
 #define SIM_WAKEUP_MSG (WM_APP + 0x450)
 
 // ------------------------------------------------------------------ personality / pattern
+// NEXTSCAN_SIM_PERSONALITY selects which driver misbehaviour to reproduce.
+// Every personality below is a behaviour observed in a real shipping driver;
+// they exist so the failure paths can be exercised without hardware.
 enum SimPersonality
 {
     PERS_WELLBEHAVED = 0,
+    PERS_ODDWIDTH,       // forces an odd pixel width: 24-bit stride/padding stressor
+    PERS_BW1,            // delivers 1-bit no matter what pixel type was negotiated
+    PERS_GRAY8,          // delivers 8-bit grey regardless of negotiation
+    PERS_GRAY16,         // delivers 16-bit grey regardless of negotiation
+    PERS_COLOR48,        // delivers 48-bit colour regardless of negotiation
+    PERS_BOTTOMUP,       // memory transfer refused -> native DIB, bottom-up rows
+    PERS_TOPDOWN,        // memory transfer refused -> native DIB, negative height
+    PERS_REFUSESUI,      // rejects ShowUI=FALSE (CAP_UICONTROLLABLE = 0)
+    PERS_SETLIES,        // MSG_SET on resolution succeeds, value silently ignored
+    PERS_HANG,           // never returns from MSG_ENABLEDS (watchdog test)
+    PERS_CRASH7,         // access violation on the first DAT_IMAGEMEMXFER (state 7)
+    PERS_DUPLEX,         // feeder+duplex: two pages, back side rotated 180 degrees
 };
 
 enum SimPattern
@@ -216,6 +232,8 @@ static struct SimState
 
     SimPersonality personality;
     SimPattern pattern;
+    int forcedType;           // -1, or a TWPT_* the device delivers regardless of SET
+    int forcedDepth;          // bits per pixel that goes with forcedType
     TW_UINT16 lastCC;
 
     FILE* log;
@@ -233,10 +251,28 @@ static void Logf(const char* fmt, ...)
 
 static void ReadConfig()
 {
-    const char* pers = getenv("NEXTSCAN_SIM_PERSONALITY");
     S.personality = PERS_WELLBEHAVED;
-    if (pers && _stricmp(pers, "wellbehaved") != 0 && pers[0] != '\0')
-        Logf("unknown personality '%s', using wellbehaved", pers);
+    S.forcedType = -1;
+    S.forcedDepth = 0;
+
+    const char* pers = getenv("NEXTSCAN_SIM_PERSONALITY");
+    if (pers && pers[0])
+    {
+        if      (!_stricmp(pers, "wellbehaved")) S.personality = PERS_WELLBEHAVED;
+        else if (!_stricmp(pers, "oddwidth"))   S.personality = PERS_ODDWIDTH;
+        else if (!_stricmp(pers, "bw1"))     { S.personality = PERS_BW1;     S.forcedType = TWPT_BW;   S.forcedDepth = 1;  }
+        else if (!_stricmp(pers, "gray8"))   { S.personality = PERS_GRAY8;   S.forcedType = TWPT_GRAY; S.forcedDepth = 8;  }
+        else if (!_stricmp(pers, "gray16"))  { S.personality = PERS_GRAY16;  S.forcedType = TWPT_GRAY; S.forcedDepth = 16; }
+        else if (!_stricmp(pers, "color48")) { S.personality = PERS_COLOR48; S.forcedType = TWPT_RGB;  S.forcedDepth = 48; }
+        else if (!_stricmp(pers, "bottomup")) S.personality = PERS_BOTTOMUP;
+        else if (!_stricmp(pers, "topdown"))  S.personality = PERS_TOPDOWN;
+        else if (!_stricmp(pers, "refusesui")) S.personality = PERS_REFUSESUI;
+        else if (!_stricmp(pers, "setlies"))   S.personality = PERS_SETLIES;
+        else if (!_stricmp(pers, "hang"))      S.personality = PERS_HANG;
+        else if (!_stricmp(pers, "crash7"))    S.personality = PERS_CRASH7;
+        else if (!_stricmp(pers, "duplex"))    S.personality = PERS_DUPLEX;
+        else Logf("unknown personality '%s', using wellbehaved", pers);
+    }
 
     const char* img = getenv("NEXTSCAN_SIM_IMAGE");
     S.pattern = PAT_BARS;
@@ -371,6 +407,7 @@ static void ComputeImageSize()
     if (S.imageHeight < 1) S.imageHeight = 1;
     if (S.imageWidth > 20000) S.imageWidth = 20000;
     if (S.imageHeight > 20000) S.imageHeight = 20000;
+    if (S.personality == PERS_ODDWIDTH && (S.imageWidth % 2) == 0) S.imageWidth += 1;
 }
 
 static int SamplesPerPixel()
@@ -427,6 +464,20 @@ static double Pattern(int x, int y, int ch)
     }
 }
 
+// Pattern with duplex flip applied: the back side arrives rotated 180 degrees,
+// which is how several ADF drivers actually deliver it (and the reason the
+// regression list in plan section 18.2 calls out "duplex back-side ordering
+// and 180 rotation").
+static double Pat(int x, int y, int ch)
+{
+    if (S.pageIndex & 1)
+    {
+        x = S.imageWidth - 1 - x;
+        y = S.imageHeight - 1 - y;
+    }
+    return Pattern(x, y, ch);
+}
+
 // Fills one row into dst in memory-transfer order (RGB, row-packed).
 static void FillRow(unsigned char* dst, int y)
 {
@@ -435,7 +486,7 @@ static void FillRow(unsigned char* dst, int y)
     {
         memset(dst, 0, BytesPerRowPacked());
         for (int x = 0; x < S.imageWidth; x++)
-            if (Pattern(x, y, 0) >= 0.5)
+            if (Pat(x, y, 0) >= 0.5)
                 dst[x >> 3] |= (unsigned char)(0x80 >> (x & 7));
         return;
     }
@@ -445,12 +496,12 @@ static void FillRow(unsigned char* dst, int y)
         unsigned short* p = (unsigned short*)dst;
         for (int x = 0; x < S.imageWidth; x++)
             for (int c = 0; c < spp; c++)
-                *p++ = (unsigned short)floor(Pattern(x, y, c) * 65535.0 + 0.5);
+                *p++ = (unsigned short)floor(Pat(x, y, c) * 65535.0 + 0.5);
         return;
     }
     for (int x = 0; x < S.imageWidth; x++)
         for (int c = 0; c < spp; c++)
-            *dst++ = (unsigned char)floor(Pattern(x, y, c) * 255.0 + 0.5);
+            *dst++ = (unsigned char)floor(Pat(x, y, c) * 255.0 + 0.5);
 }
 
 // ------------------------------------------------------------------ capability handling
@@ -538,16 +589,31 @@ static bool CapGet(unsigned short cap, unsigned short msg, TW_CAPABILITY* pCap)
         h = BuildOneU16(TWTY_INT16, (unsigned short)S.xferCount);
         break;
     case CAP_UICONTROLLABLE:
-        h = BuildOneU16(TWTY_BOOL, 1);   // hidden UI works on this device
+        // The refuses-UI personality advertises that hidden UI is impossible,
+        // which is how the UI learns to show the vendor dialog instead.
+        h = BuildOneU16(TWTY_BOOL, (S.personality == PERS_REFUSESUI) ? 0 : 1);
         break;
     case CAP_INDICATORS:
         h = BuildOneU16(TWTY_BOOL, 1);
         break;
     case CAP_FEEDERENABLED:
-        // Advertised, like the LiDE 400, but this flatbed refuses to be
-        // switched on - the honest behaviour the capability reader tests for.
-        if (msg == MSG_GET) { unsigned int v = 0; h = BuildEnumU16(TWTY_BOOL, &v, 1, 0, 0); con = TWON_ENUMERATION; }
-        else h = BuildOneU16(TWTY_BOOL, 0);
+        // Advertised, like the LiDE 400, but a flatbed refuses to be switched
+        // on - the honest behaviour the capability reader tests for. The duplex
+        // personality has real (simulated) feeder hardware and accepts it.
+        if (msg == MSG_GET)
+        {
+            unsigned int vals[2] = { 0, 1 };
+            int cur = S.feederEnabled ? 1 : 0;
+            h = BuildEnumU16(TWTY_BOOL, vals, 2, cur, 0);
+            con = TWON_ENUMERATION;
+        }
+        else h = BuildOneU16(TWTY_BOOL, S.feederEnabled ? 1 : 0);
+        break;
+    case CAP_DUPLEX:
+        // Only the duplex personality has duplex hardware to report; anything
+        // else leaves the capability unsupported, as a flatbed should.
+        if (S.personality == PERS_DUPLEX) h = BuildOneU16(TWTY_UINT16, 1);   // TWDX_1PASSDUPLEX
+        else { S.lastCC = TWCC_CAPUNSUPPORTED; return false; }
         break;
     case CAP_DUPLEXENABLED:
         h = BuildOneU16(TWTY_BOOL, 0);
@@ -576,14 +642,28 @@ static bool CapSet(unsigned short cap, TW_CAPABILITY* pCap)
 
     switch (cap)
     {
-    case ICAP_XRESOLUTION: S.xRes = FixToDouble(*(TW_FIX32*)&item); break;
-    case ICAP_YRESOLUTION: S.yRes = FixToDouble(*(TW_FIX32*)&item); break;
+    case ICAP_XRESOLUTION:
+    case ICAP_YRESOLUTION:
+        // The set-lies personality accepts MSG_SET and then ignores it, staying
+        // at 150 dpi forever - exactly the "returns a resolution it was not
+        // asked for" trap. The session's read-back verification is the defence.
+        if (S.personality != PERS_SETLIES)
+        {
+            if (cap == ICAP_XRESOLUTION) S.xRes = FixToDouble(*(TW_FIX32*)&item);
+            else S.yRes = FixToDouble(*(TW_FIX32*)&item);
+        }
+        break;
     case ICAP_PIXELTYPE:
     {
         unsigned short pt = (unsigned short)item;
         if (pt != TWPT_BW && pt != TWPT_GRAY && pt != TWPT_RGB) { S.lastCC = TWCC_BADVALUE; return false; }
-        S.pixelType = pt;
-        S.bitDepth = (pt == TWPT_RGB) ? 24 : (pt == TWPT_GRAY ? 8 : 1);
+        // A forced-mode personality swallows the SET without applying it; the
+        // device keeps delivering what its "firmware" is stuck in.
+        if (S.forcedType < 0)
+        {
+            S.pixelType = pt;
+            S.bitDepth = (pt == TWPT_RGB) ? 24 : (pt == TWPT_GRAY ? 8 : 1);
+        }
         break;
     }
     case ICAP_BITDEPTH:
@@ -596,7 +676,7 @@ static bool CapSet(unsigned short cap, TW_CAPABILITY* pCap)
                   (S.pixelType == TWPT_GRAY && (d == 8 || d == 16)) ||
                   (S.pixelType == TWPT_BW && d == 1);
         if (!ok) { S.lastCC = TWCC_BADVALUE; return false; }
-        S.bitDepth = (unsigned short)d;
+        if (S.forcedType < 0) S.bitDepth = (unsigned short)d;
         break;
     }
     case ICAP_UNITS:
@@ -622,7 +702,13 @@ static bool CapSet(unsigned short cap, TW_CAPABILITY* pCap)
     case CAP_DUPLEXENABLED:
         break;   // accepted but there is no duplex hardware
     case CAP_FEEDERENABLED:
-        if (item != 0) { S.lastCC = TWCC_BADVALUE; return false; }   // flatbed: refuses the feeder
+        if (item != 0)
+        {
+            // Flatbeds refuse the feeder; only the duplex personality has one.
+            if (S.personality != PERS_DUPLEX) { S.lastCC = TWCC_BADVALUE; return false; }
+            S.feederEnabled = true;
+        }
+        else S.feederEnabled = false;
         break;
     case ICAP_BRIGHTNESS: S.brightness = FixToDouble(*(TW_FIX32*)&item); break;
     case ICAP_CONTRAST:   S.contrast   = FixToDouble(*(TW_FIX32*)&item); break;
@@ -676,11 +762,16 @@ static HANDLE BuildNativeDib()
     memset(&bh, 0, sizeof(bh));
     bh.biSize = sizeof(BITMAPINFOHEADER);
     bh.biWidth = w;
-    bh.biHeight = h;
+    // Positive height = bottom-up rows (the DIB default); the top-down
+    // personality ships the negative-height variant, which DibDecoder must
+    // accept. Both exist in real drivers.
+    bh.biHeight = (S.personality == PERS_TOPDOWN) ? -h : h;
     bh.biPlanes = 1;
     bh.biBitCount = 24;
     bh.biCompression = BI_RGB;
     bh.biSizeImage = (DWORD)(stride * h);
+    bh.biXPelsPerMeter = (DWORD)(S.xRes * 10000.0 / 254.0 + 0.5);
+    bh.biYPelsPerMeter = (DWORD)(S.yRes * 10000.0 / 254.0 + 0.5);
 
     HANDLE hDib = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(bh) + (SIZE_T)stride * h);
     if (!hDib) return NULL;
@@ -688,13 +779,15 @@ static HANDLE BuildNativeDib()
     memcpy(base, &bh, sizeof(bh));
     for (int y = 0; y < h; y++)
     {
-        unsigned char* row = base + sizeof(bh) + (SIZE_T)(h - 1 - y) * stride;   // bottom-up
+        // Bottom-up DIBs store the last image row first.
+        int dibRow = (S.personality == PERS_TOPDOWN) ? y : (h - 1 - y);
+        unsigned char* row = base + sizeof(bh) + (SIZE_T)dibRow * stride;
         for (int x = 0; x < w; x++)
         {
             // DIBs are BGR; the pattern function speaks RGB.
-            row[x * 3 + 0] = (unsigned char)floor(Pattern(x, y, 2) * 255.0 + 0.5);
-            row[x * 3 + 1] = (unsigned char)floor(Pattern(x, y, 1) * 255.0 + 0.5);
-            row[x * 3 + 2] = (unsigned char)floor(Pattern(x, y, 0) * 255.0 + 0.5);
+            row[x * 3 + 0] = (unsigned char)floor(Pat(x, y, 2) * 255.0 + 0.5);
+            row[x * 3 + 1] = (unsigned char)floor(Pat(x, y, 1) * 255.0 + 0.5);
+            row[x * 3 + 2] = (unsigned char)floor(Pat(x, y, 0) * 255.0 + 0.5);
         }
     }
     GlobalUnlock(hDib);
@@ -721,9 +814,14 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
         S.xRes = S.yRes = 300;
         S.pixelType = TWPT_RGB;
         S.bitDepth = 24;
+        // A forced-mode personality is stuck from the moment the source opens,
+        // the way a driver with a firmware-fixed mode is.
+        if (S.forcedType >= 0) { S.pixelType = (unsigned short)S.forcedType; S.bitDepth = (unsigned short)S.forcedDepth; }
+        // The set-lies personality scans at 150 dpi no matter what was asked.
+        if (S.personality == PERS_SETLIES) S.xRes = S.yRes = 150;
         S.xferMech = TWSX_MEMORY;
         S.frameSet = false;
-        Logf("OPENDSM parent=%p", (void*)S.parent);
+        Logf("OPENDSM parent=%p personality=%d", (void*)S.parent, (int)S.personality);
         return TWRC_SUCCESS;
     }
     if (DAT_ == DAT_PARENT && MSG_ == MSG_CLOSEDSM)
@@ -816,11 +914,32 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
         TW_USERINTERFACE* ui = (TW_USERINTERFACE*)pData;
         if (ui && ui->hParent) S.parent = ui->hParent;
 
+        // refuses-ShowUI=FALSE is a documented real-driver behaviour; the DSM
+        // reports OPERATIONERROR and the session surfaces TwainEnableFailed.
+        if (S.personality == PERS_REFUSESUI && ui && ui->ShowUI == 0)
+        {
+            S.lastCC = TWCC_OPERATIONERROR;
+            Logf("ENABLEDS refused (ShowUI=0, personality=refusesui)");
+            return TWRC_FAILURE;
+        }
+
+        // The hang personality never comes back. Nothing in-process can save
+        // the caller; this is what the broker's watchdog exists for.
+        if (S.personality == PERS_HANG)
+        {
+            Logf("ENABLEDS hanging forever (personality=hang)");
+            Sleep(INFINITE);
+        }
+
         S.enabled = true;
         S.imageReady = true;
         S.xferReadyReported = false;
         S.pageIndex = 0;
-        S.pendingPages = (S.xferCount == -1) ? 1 : (S.xferCount < 1 ? 1 : S.xferCount);
+        // Natural page count: front+back for a duplex feeder, one otherwise.
+        // CAP_XFERCOUNT caps it when the application asked for fewer.
+        int natural = (S.personality == PERS_DUPLEX && S.feederEnabled) ? 2 : 1;
+        S.pendingPages = natural;
+        if (S.xferCount >= 1 && S.xferCount < natural) S.pendingPages = S.xferCount;
         ComputeImageSize();
         S.rowsSent = 0;
 
@@ -952,6 +1071,27 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
     if (DAT_ == DAT_IMAGEMEMXFER && MSG_ == MSG_GET)
     {
         if (!S.imageReady) { S.lastCC = TWCC_SEQERROR; return TWRC_FAILURE; }
+
+        // Sources that implement TWSX_MEMORY badly or not at all force the
+        // session onto its native-DIB fallback - that fallback is the code the
+        // bottom-up/top-down personalities exist to cover.
+        if (S.personality == PERS_BOTTOMUP || S.personality == PERS_TOPDOWN)
+        {
+            S.lastCC = TWCC_BADPROTOCOL;
+            Logf("IMAGEMEMXFER refused (native-only personality)");
+            return TWRC_FAILURE;
+        }
+
+        // The crash personality faults on the first strip call, in state 7 -
+        // the moment a vendor driver is most likely to die. The host process
+        // is expected to vanish; the point of the test is that nothing else
+        // does.
+        if (S.personality == PERS_CRASH7)
+        {
+            Logf("IMAGEMEMXFER crashing deliberately (personality=crash7)");
+            *(volatile int*)0 = 0x0BADF00D;
+        }
+
         TW_IMAGEMEMXFER* mx = (TW_IMAGEMEMXFER*)pData;
         if (!mx || !mx->Memory.TheMem) { S.lastCC = TWCC_BADVALUE; return TWRC_FAILURE; }
 
