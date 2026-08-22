@@ -102,6 +102,25 @@ projection and Hough estimators carry the small-angle work — which is why
 the per-estimator tolerance matters: without it those two floors veto every
 small-angle page, the exact failure section 3.5 was written to fix.
 
+### App switched onto engine imaging (HANDOFF section 8.5)
+
+`scanhelper.cs` now runs document detection through
+`NextScan.Core.DocumentDetector` with the §3.5 deskew policy overlaid on the
+primary box (AI DocAligner cascade still runs first, unchanged). The
+in-process pipeline stays compiled in as the fallback (`detect=legacy` in
+scan.ini disables the engine path; any engine exception falls back
+automatically).
+
+**A/B verified on real hardware data** (full-bed LiDE 400 scan, 1276×1754 @
+150 dpi, AI disabled to compare the classic paths): engine and legacy
+returned **bit-identical** results — same 2 objects, same primary box
+`W=121.6 H=1003 AABB=(0,215,122,1003)`, same background estimate
+`bg=(234,232,233) noise=3`, and a zero-delta normalized crop rect. The
+deskew policy ran and correctly stayed in the dead zone for that scene.
+Note: `-nodialog` scans crop from scan.ini and never call detection (true of
+the legacy path as well); the switch affects the interactive preview flow.
+
+
 
 ### TWAIN simulator (ADR-0002)
 
