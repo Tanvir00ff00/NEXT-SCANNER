@@ -1,4 +1,0 @@
-﻿twain|Color Network ScanGear 2
-twain|CanoScan LiDE 400
-wia|Color Network ScanGear 2
-wia|CanoScan LiDE 400
