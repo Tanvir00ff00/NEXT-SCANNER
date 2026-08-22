@@ -29,6 +29,7 @@ Network ScanGear 2**.
 | `nsprobe` CLI (§12.3, §13.8) | ✅ **verified** | `list` / `caps` / `scan` |
 | Integration into the existing Photoshop helper | ✅ **verified** | `scan engine: native (NextScan)`, NAPS2 unused |
 | TWAIN simulator skeleton, well-behaved personality (§18.3, ADR-0002) | ✅ **verified** | `nsprobe` enumerates + scans it end-to-end on both hosts |
+| Imaging core port onto `RawImage` (§9, HANDOFF §8.5) | ✅ **verified** | detection + 16-bit curves, `nsimgtest` 10/10 |
 
 **The headline result: NAPS2 is no longer required.** The existing
 `scanhelper.exe` UI now acquires images through the native engine, and falls back
@@ -44,7 +45,37 @@ WIA   scan wall time, 150 dpi preview region     ->  2.7 s
 simulator scan, same region                      ->  450x300, 0.2 s, all 8 colour bars byte-exact
 ```
 
+### Imaging core on RawImage (HANDOFF section 8.5, first increment)
+
+`src/Core/Imaging.cs` ports the proven scanhelper detection pipeline onto
+`RawImage` input (any depth: 1/8/16-bit, gray or BGR): ring-median background
+estimation with MAD noise, colour-distance + gradient foreground, measured
+edge-strip guard, 8px block grid, per-blob connected components with hole
+filling, exact minimum-area rectangle via hull edge alignment, projection-
+profile refinement, full-page handling. Every evidence comment from the
+original was carried over. Curves are now **native 16-bit**
+(Fritsch–Carlson monotone spline, 65536-entry LUT, `Curves.BuildLut16`).
+
+Verified by `nsimgtest` (10/10) on synthetic flatbed previews with exact
+geometry: flat and 5.5° documents detected with IoU ≥ 0.90; 16-bit input
+produces the identical box; curves are exact (identity, invert, monotone,
+16-bit apply with zero rounding drift).
+
+**Known limitation, documented in the test:** at small angles (≈3°) the 8px
+block staircase hides the rotation from the minimum-area rectangle and the
+legacy guard reports 0° with the box still correct (IoU 0.98). The original
+behaves identically; resolving small angles is the job of plan §3.5's
+confidence-scored estimators — **not yet implemented**. The
+`DeskewGuard.StrictFlatbedGuard` preset preserves the legacy [0.6°, 6.0°]
+rule meanwhile.
+
+**Not yet done:** scanhelper still runs its own in-process copy — this engine
+port is not wired into the app yet (deliberately: switch after the §3.5
+policy lands, then remove the duplication); per-channel curve LUTs; deskew
+confidence policy; whitening/deskew application on 16-bit data.
+
 ### TWAIN simulator (ADR-0002)
+
 
 A fake `TWAINDSM.DLL` (`sim\TwainSim.cpp`, built x86 + x64 to `bin\sim\`), loaded
 by setting `NEXTSCAN_TWAIN_DSM` to its path — no admin rights, nothing written

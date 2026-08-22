@@ -104,6 +104,10 @@ Build-Target -Name "NextScan.Host32" -Out "$bin\NextScan.Host32.exe" -Platform "
 Build-Target -Name "nsprobe"         -Out "$bin\nsprobe.exe"         -Platform "anycpu" -Kind "exe" `
              -Sources ($engine + @("Tools\NsProbe.cs")) -EntryPoint "NextScan.Tools.NsProbe"
 
+# Imaging tests (plan 18.1): detection on synthetic previews + curve LUTs.
+Build-Target -Name "nsimgtest"       -Out "$bin\nsimgtest.exe"       -Platform "anycpu" -Kind "exe" `
+             -Sources ($engine + @("Tools\NsImgTest.cs")) -EntryPoint "NextScan.Tools.NsImgTest"
+
 # Library form, so the existing Photoshop bridge (scanhelper.exe) can drop NAPS2
 # and drive the native engine instead.
 Build-Target -Name "NextScan.Engine" -Out "$bin\NextScan.Engine.dll" -Platform "anycpu" -Kind "library" -Sources $engine
