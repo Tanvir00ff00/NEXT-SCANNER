@@ -1,0 +1,39 @@
+# --- build output / runtime data ---
+bin/
+out/
+scans/
+tmp/
+__pycache__/
+scan_log.txt
+
+# compiled binaries anywhere in the tree
+*.exe
+*.dll
+*.obj
+*.pdb
+
+# --- credentials & session state: never commit ---
+keys.txt
+keystate.txt
+puter_token.txt
+setup_puter.bat
+chrome_profile/
+
+# --- bulky / re-downloadable runtime assets ---
+node/
+models/
+profiles/
+Cdp/
+queue/
+fixqueue/
+debug/
+backup/
+
+# personal photos processed by the fix tools; keep only the source snapshot
+backup_original/*
+!backup_original/scanhelper.cs.pre-native
+
+# --- logs & generated diagnostics ---
+*_log.txt
+exe_log.txt
+diag_report.txt

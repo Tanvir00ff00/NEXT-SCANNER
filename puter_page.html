@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<!--
+  PS_Fix - Puter backend page.
+
+  The bridge loads this from its own local server (http://127.0.0.1:<port>/puter)
+  rather than from a file:// path, because puter.js needs a real origin for
+  sign-in and storage to work.
+
+  You only ever touch this page once, to sign in. After that the bridge drives it
+  through window.psfix and you never need to look at it again.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>PS_Fix - Puter</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; margin: 40px; color: #222; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #666; margin-bottom: 24px; }
+  #who { font-weight: bold; }
+  button { font-size: 15px; padding: 8px 18px; cursor: pointer; }
+  .box { border: 1px solid #ddd; border-radius: 6px; padding: 16px; max-width: 620px; }
+  .ok { color: #197a33; }
+  .bad { color: #b3261e; }
+  #log { margin-top: 18px; font-family: Consolas, monospace; font-size: 12px;
+         color: #555; white-space: pre-wrap; max-width: 620px; }
+</style>
+</head>
+<body>
+
+<h1>PS_Fix &mdash; Puter backend</h1>
+<div class="sub">This page is used by the Photoshop bridge. You can leave it alone.</div>
+
+<div class="box">
+  <p>Signed in as: <span id="who">checking...</span></p>
+  <button id="signin">Sign in to Puter</button>
+  <button id="signout">Sign out</button>
+  <p class="sub" style="margin-top:14px;margin-bottom:0">
+    Sign in once. The bridge then works on its own, with the window hidden.
+  </p>
+</div>
+
+<div id="log"></div>
+
+<script src="https://js.puter.com/v2/"></script>
+<script>
+(function () {
+    var logEl = document.getElementById('log');
+    function log(m) {
+        var t = new Date().toTimeString().substring(0, 8);
+        logEl.textContent = t + '  ' + m + '\n' + logEl.textContent;
+    }
+
+    window.psfix = {
+        ready: false,
+
+        // Returns the signed-in username, or '-' when nobody is signed in.
+        whoami: function () {
+            try {
+                if (!puter.auth.isSignedIn()) return '-';
+                var u = puter.auth.getUser();
+                if (u && typeof u.then === 'function') return 'yes';   // still resolving
+                return (u && u.username) ? u.username : 'yes';
+            } catch (e) { return '-'; }
+        },
+
+        // The bridge calls this. Always resolves to a string: a data URL on success,
+        // or "ERR: ..." on failure. Never rejects, so a thrown error can't leave the
+        // bridge waiting for a promise that never settles.
+        restore: function (opts) {
+            return new Promise(function (resolve) {
+                try {
+                    log('generating: ' + (opts.model || 'default'));
+                    puter.ai.txt2img(opts).then(function (img) {
+                        try {
+                            var src = (img && (img.src || img.currentSrc)) || '';
+                            if (!src) { resolve('ERR: the model returned no image'); return; }
+
+                            if (src.indexOf('data:') === 0) {
+                                log('done, ' + Math.round(src.length / 1365) + ' KB');
+                                resolve(src);
+                                return;
+                            }
+
+                            // blob: or http: - pull the bytes and hand back a data URL
+                            fetch(src).then(function (r) { return r.blob(); }).then(function (b) {
+                                var fr = new FileReader();
+                                fr.onload = function () {
+                                    log('done, ' + Math.round(b.size / 1024) + ' KB');
+                                    resolve(String(fr.result));
+                                };
+                                fr.onerror = function () { resolve('ERR: could not read the image'); };
+                                fr.readAsDataURL(b);
+                            }).catch(function (e) {
+                                resolve('ERR: could not fetch the image: ' + e);
+                            });
+                        } catch (e) { resolve('ERR: ' + e); }
+                    }).catch(function (e) {
+                        var msg = (e && (e.message || e.error || e.code)) ? (e.message || e.error || e.code) : e;
+                        try { if (typeof msg === 'object') msg = JSON.stringify(msg); } catch (_) { }
+                        log('failed: ' + msg);
+                        resolve('ERR: ' + msg);
+                    });
+                } catch (e) { resolve('ERR: ' + e); }
+            });
+        }
+    };
+
+    function refresh() {
+        var el = document.getElementById('who');
+        try {
+            if (!puter.auth.isSignedIn()) {
+                el.textContent = 'nobody';
+                el.className = 'bad';
+                return;
+            }
+            el.textContent = 'signed in';
+            el.className = 'ok';
+            puter.auth.getUser().then(function (u) {
+                if (u && u.username) el.textContent = u.username;
+            }).catch(function () { });
+        } catch (e) {
+            el.textContent = 'puter.js not loaded';
+            el.className = 'bad';
+        }
+    }
+
+    document.getElementById('signin').onclick = function () {
+        puter.auth.signIn().then(function () { log('signed in'); refresh(); })
+                           .catch(function (e) { log('sign in cancelled: ' + e); });
+    };
+    document.getElementById('signout').onclick = function () {
+        try { puter.auth.signOut(); } catch (e) { }
+        setTimeout(refresh, 300);
+    };
+
+    // Wait for the library, then declare ourselves ready.
+    var tries = 0;
+    var t = setInterval(function () {
+        tries++;
+        if (typeof puter !== 'undefined' && puter.ai && puter.auth) {
+            clearInterval(t);
+            window.psfix.ready = true;
+            refresh();
+            log('puter.js loaded');
+        } else if (tries > 100) {
+            clearInterval(t);
+            log('puter.js did not load - check the internet connection');
+        }
+    }, 100);
+})();
+</script>
+</body>
+</html>

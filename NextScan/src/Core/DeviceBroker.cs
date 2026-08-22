@@ -1,0 +1,415 @@
+// =============================================================================
+// NextScan Studio - Device broker (parent side of the host protocol)
+// Plan ref: MASTER_PLAN section 5.1, 6.2, 7.1.
+//
+// Spawns and supervises the two host processes, merges their device lists, and
+// reads acquired frames out of shared memory. This is the only place in the UI
+// process that knows a scanner exists - and it never loads a vendor driver.
+// =============================================================================
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.IO.MemoryMappedFiles;
+using System.Text;
+using System.Threading;
+
+namespace NextScan.Core
+{
+    /// <summary>One physical scanner, with every way we can reach it.</summary>
+    public class ScannerEntry
+    {
+        public string DisplayName = "";
+        public readonly List<DeviceDescriptor> Connections = new List<DeviceDescriptor>();
+
+        /// <summary>
+        /// Best available connection. TWAIN first (richest capabilities), then eSCL,
+        /// then WIA, then WSD - the ranking from plan section 6.2.
+        /// </summary>
+        public DeviceDescriptor Preferred
+        {
+            get
+            {
+                DeviceDescriptor best = null;
+                int bestRank = int.MaxValue;
+                foreach (DeviceDescriptor d in Connections)
+                {
+                    int rank;
+                    switch (d.Transport)
+                    {
+                        case Transport.Twain: rank = 0; break;
+                        case Transport.Escl: rank = 1; break;
+                        case Transport.Wia: rank = 2; break;
+                        case Transport.Wsd: rank = 3; break;
+                        default: rank = 9; break;
+                    }
+                    if (rank < bestRank) { bestRank = rank; best = d; }
+                }
+                return best ?? (Connections.Count > 0 ? Connections[0] : null);
+            }
+        }
+
+        public override string ToString() { return DisplayName; }
+    }
+
+    public class DeviceBroker
+    {
+        public Action<string> Log = delegate { };
+
+        /// <summary>Directory holding NextScan.Host32.exe / NextScan.Host64.exe.</summary>
+        public string HostDirectory;
+
+        public DeviceBroker()
+        {
+            HostDirectory = ResolveHostDirectory();
+        }
+
+        static string ResolveHostDirectory()
+        {
+            List<string> candidates = new List<string>();
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                candidates.Add(baseDir);
+                candidates.Add(Path.Combine(baseDir, "bin"));
+                candidates.Add(Path.Combine(baseDir, "NextScan\\bin"));
+            }
+            catch { }
+            candidates.Add(@"C:\PS_Fix\NextScan\bin");
+            candidates.Add(@"C:\Program Files\NextScanner");
+
+            foreach (string c in candidates)
+            {
+                try { if (File.Exists(Path.Combine(c, "NextScan.Host32.exe"))) return c; }
+                catch { }
+            }
+            return candidates.Count > 0 ? candidates[0] : ".";
+        }
+
+        public string Host32Path { get { return Path.Combine(HostDirectory, "NextScan.Host32.exe"); } }
+        public string Host64Path { get { return Path.Combine(HostDirectory, "NextScan.Host64.exe"); } }
+
+        // ---------------------------------------------------------------- probe
+        /// <summary>
+        /// Enumerates every device on both hosts and groups them by physical scanner.
+        /// Both bitnesses are always probed: a 32-bit-only TWAIN driver is invisible
+        /// to the 64-bit host and vice versa (plan section 3.1).
+        /// </summary>
+        public List<ScannerEntry> Probe()
+        {
+            List<DeviceDescriptor> all = new List<DeviceDescriptor>();
+
+            // 32-bit first: it is where legacy TWAIN data sources live, and it is the
+            // one most likely to find something on an older machine.
+            all.AddRange(ProbeHost(Host32Path, 32));
+            all.AddRange(ProbeHost(Host64Path, 64));
+
+            return GroupByScanner(all);
+        }
+
+        List<DeviceDescriptor> ProbeHost(string exe, int bitness)
+        {
+            List<DeviceDescriptor> found = new List<DeviceDescriptor>();
+            if (!File.Exists(exe)) { Log("host missing: " + exe); return found; }
+
+            HostRun run = RunHost(exe, "probe", 45000, null);
+            foreach (JsonObj o in run.Messages)
+            {
+                if (o.Str("type", "") != "device") continue;
+                DeviceDescriptor d = DeviceDescriptor.FromJson(o);
+                d.HostBitness = bitness;
+                found.Add(d);
+            }
+            Log("host" + bitness + " reported " + found.Count + " device(s)");
+            return found;
+        }
+
+        /// <summary>
+        /// Collapses the same physical scanner reached over several transports into
+        /// one entry, so the user sees one card per device rather than four.
+        /// </summary>
+        static List<ScannerEntry> GroupByScanner(List<DeviceDescriptor> all)
+        {
+            List<ScannerEntry> entries = new List<ScannerEntry>();
+
+            foreach (DeviceDescriptor d in all)
+            {
+                string key = NormalizeName(d.FriendlyName);
+                ScannerEntry match = null;
+                foreach (ScannerEntry e in entries)
+                {
+                    if (NormalizeName(e.DisplayName) == key) { match = e; break; }
+                }
+                if (match == null)
+                {
+                    match = new ScannerEntry();
+                    match.DisplayName = d.FriendlyName;
+                    entries.Add(match);
+                }
+                match.Connections.Add(d);
+            }
+            return entries;
+        }
+
+        static string NormalizeName(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            StringBuilder sb = new StringBuilder(s.Length);
+            foreach (char c in s.ToLowerInvariant())
+                if (char.IsLetterOrDigit(c)) sb.Append(c);
+            return sb.ToString();
+        }
+
+        // ---------------------------------------------------------------- capabilities
+        public NsResult GetCapabilities(DeviceDescriptor device, out DeviceCapabilities caps)
+        {
+            caps = new DeviceCapabilities();
+            if (device == null)
+                return NsResult.Fail(NsError.HostProtocolViolation, "No device selected.", "");
+
+            string exe = (device.HostBitness == 32) ? Host32Path : Host64Path;
+            string args = "caps --device \"" + Escape(device.NativeId) + "\" --transport " + device.Transport.ToString().ToLowerInvariant();
+
+            HostRun run = RunHost(exe, args, 60000, null);
+            foreach (JsonObj o in run.Messages)
+                if (o.Str("type", "") == "caps") caps = DeviceCapabilities.FromJson(o);
+
+            return run.Result;
+        }
+
+        // ---------------------------------------------------------------- scan
+        /// <summary>
+        /// Runs an acquisition. onFrame is called per page on a background thread.
+        /// Return false from it to stop the batch.
+        /// </summary>
+        public NsResult Scan(DeviceDescriptor device, ScanSettings settings,
+                             Func<RawImage, bool> onFrame, Action<string, int> onProgress)
+        {
+            if (device == null)
+                return NsResult.Fail(NsError.HostProtocolViolation, "No device selected.", "");
+
+            string exe = (device.HostBitness == 32) ? Host32Path : Host64Path;
+            if (!File.Exists(exe))
+                return NsResult.Fail(NsError.HostSpawnFailed, "Scanner host program is missing: " + exe,
+                                     "Reinstall NextScan Studio.");
+
+            string json = Json.Write(settings.ToJson());
+            string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
+
+            string args = "scan --device \"" + Escape(device.NativeId) + "\"" +
+                          " --transport " + device.Transport.ToString().ToLowerInvariant() +
+                          " --settings " + b64;
+
+            int pages = 0;
+            // Vendor drivers are slow and a network copier can take minutes; the host
+            // has its own watchdog, this is the outer backstop.
+            int timeout = settings.IsPreview ? 180000 : 600000;
+
+            HostRun run = RunHost(exe, args, timeout, delegate (JsonObj o)
+            {
+                string type = o.Str("type", "");
+                if (type == "frame")
+                {
+                    AcquiredFrame f = AcquiredFrame.FromJson(o);
+                    if (onProgress != null)
+                        onProgress("Receiving page " + (f.PageIndex + 1) + "...", 70);
+
+                    RawImage img = ReadFrame(f);
+                    if (img == null) { Log("could not map frame " + f.ShmName); return true; }
+
+                    pages++;
+                    if (onFrame != null)
+                    {
+                        try { return onFrame(img); }
+                        catch (Exception ex) { Log("onFrame threw: " + ex.Message); }
+                    }
+                }
+                else if (type == "progress" && onProgress != null)
+                {
+                    onProgress(o.Str("message", ""), o.Int("percent", 50));
+                }
+                return true;
+            });
+
+            if (run.Result.Ok && pages == 0)
+                return NsResult.Fail(NsError.HostProtocolViolation,
+                    "The scanner host finished without delivering a page.", "Try scanning again.");
+
+            return run.Result;
+        }
+
+        /// <summary>Maps a published frame out of shared memory into a RawImage.</summary>
+        RawImage ReadFrame(AcquiredFrame f)
+        {
+            if (string.IsNullOrEmpty(f.ShmName)) return null;
+            try
+            {
+                using (MemoryMappedFile mmf = MemoryMappedFile.OpenExisting(f.ShmName))
+                using (MemoryMappedViewAccessor view = mmf.CreateViewAccessor(0, f.ShmSize, MemoryMappedFileAccess.Read))
+                {
+                    byte m0 = view.ReadByte(0), m1 = view.ReadByte(1), m2 = view.ReadByte(2), m3 = view.ReadByte(3);
+                    if (m0 != 'N' || m1 != 'S' || m2 != 'F' || m3 != '1')
+                    {
+                        Log("frame " + f.ShmName + " has a bad magic header");
+                        return null;
+                    }
+
+                    int pixelOffset = view.ReadInt32(76);
+                    long pixelLength = view.ReadInt64(80);
+                    if (pixelLength <= 0 || pixelLength > int.MaxValue) return null;
+
+                    RawImage img = new RawImage();
+                    img.Width = f.Width;
+                    img.Height = f.Height;
+                    img.Stride = f.Stride;
+                    img.Channels = f.Channels;
+                    img.BitsPerChannel = f.BitsPerChannel;
+                    img.XDpi = f.XDpi;
+                    img.YDpi = f.YDpi;
+                    img.PageIndex = f.PageIndex;
+                    img.Side = f.Side;
+                    img.Pixels = new byte[pixelLength];
+                    view.ReadArray(pixelOffset, img.Pixels, 0, (int)pixelLength);
+                    return img;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("ReadFrame(" + f.ShmName + ") failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        // ---------------------------------------------------------------- host runner
+        class HostRun
+        {
+            public readonly List<JsonObj> Messages = new List<JsonObj>();
+            public NsResult Result = NsResult.Fail(NsError.HostPipeBroken, "The scanner host did not respond.", "");
+            public int ExitCode = -1;
+        }
+
+        /// <summary>
+        /// Runs a host command, streaming its NDJSON stdout.
+        ///
+        /// stdout and stderr are BOTH read asynchronously. Reading one to completion
+        /// before the other deadlocks as soon as a chatty driver fills the 4 KB pipe
+        /// buffer on the channel we are not reading - a failure this codebase has hit
+        /// before, and one that presents as a scanner that "randomly hangs".
+        /// </summary>
+        HostRun RunHost(string exe, string args, int timeoutMs, Func<JsonObj, bool> onMessage)
+        {
+            HostRun run = new HostRun();
+            if (!File.Exists(exe))
+            {
+                run.Result = NsResult.Fail(NsError.HostSpawnFailed, "Scanner host program is missing: " + exe,
+                                           "Reinstall NextScan Studio.");
+                return run;
+            }
+
+            Process p = null;
+            bool cancelled = false;
+            StringBuilder stderr = new StringBuilder();
+
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(exe, args);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                psi.StandardOutputEncoding = Encoding.UTF8;
+                psi.WorkingDirectory = HostDirectory;
+
+                p = new Process();
+                p.StartInfo = psi;
+
+                p.OutputDataReceived += delegate (object sender, DataReceivedEventArgs e)
+                {
+                    if (e.Data == null || e.Data.Length == 0) return;
+                    JsonObj o;
+                    try { o = Json.Parse(e.Data); }
+                    catch { Log("host emitted unparseable line: " + e.Data); return; }
+
+                    string type = o.Str("type", "");
+                    if (type == "log") { Log("[host] " + o.Str("message", "")); return; }
+
+                    lock (run.Messages) { run.Messages.Add(o); }
+
+                    if (type == "result") run.Result = NsResult.FromJson(o);
+
+                    if (onMessage != null)
+                    {
+                        bool keepGoing;
+                        try { keepGoing = onMessage(o); }
+                        catch (Exception ex) { Log("message handler threw: " + ex.Message); keepGoing = true; }
+                        if (!keepGoing) { cancelled = true; TryKill(p); }
+                    }
+                };
+
+                p.ErrorDataReceived += delegate (object sender, DataReceivedEventArgs e)
+                {
+                    if (!string.IsNullOrEmpty(e.Data)) { lock (stderr) { stderr.AppendLine(e.Data); } }
+                };
+
+                p.Start();
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+
+                if (!p.WaitForExit(timeoutMs))
+                {
+                    Log("host timed out after " + (timeoutMs / 1000) + "s: " + exe + " " + args);
+                    TryKill(p);
+                    run.Result = NsResult.Fail(NsError.HostTimeout,
+                        "The scanner stopped responding after " + (timeoutMs / 1000) + " seconds.",
+                        "Check the scanner is powered on and not showing an error, then try again.");
+                    return run;
+                }
+
+                // WaitForExit(int) does not guarantee the async readers have drained;
+                // the parameterless overload does.
+                p.WaitForExit();
+                run.ExitCode = p.ExitCode;
+
+                string err;
+                lock (stderr) { err = stderr.ToString().Trim(); }
+                if (err.Length > 0) Log("[host stderr] " + err);
+
+                if (cancelled)
+                {
+                    run.Result = NsResult.Success();
+                }
+                else if (run.ExitCode != 0 && run.Result.Ok)
+                {
+                    // Non-zero exit with no reported failure means the host died
+                    // rather than returning - almost always a vendor driver fault,
+                    // which is exactly what running out-of-process protects us from.
+                    run.Result = NsResult.Fail(NsError.HostCrashed,
+                        "The scanner driver stopped unexpectedly (exit code " + run.ExitCode + ").",
+                        "The application is unaffected. Try scanning again, or use a different connection for this scanner.");
+                }
+                return run;
+            }
+            catch (Exception ex)
+            {
+                run.Result = NsResult.Fail(NsError.HostSpawnFailed, "Could not start the scanner host: " + ex.Message, "");
+                return run;
+            }
+            finally
+            {
+                if (p != null) { try { p.Dispose(); } catch { } }
+            }
+        }
+
+        static void TryKill(Process p)
+        {
+            try { if (p != null && !p.HasExited) p.Kill(); }
+            catch { }
+        }
+
+        static string Escape(string s)
+        {
+            return (s ?? "").Replace("\"", "\\\"");
+        }
+    }
+}
