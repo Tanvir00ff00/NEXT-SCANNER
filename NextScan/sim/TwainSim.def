@@ -1,0 +1,6 @@
+; NextScan TWAIN simulator export list.
+; A .def file is used rather than __declspec(dllexport) so the x86 build
+; exports the undecorated name "DSM_Entry" - stdcall decoration would make
+; it "_DSM_Entry@24" and GetProcAddress("DSM_Entry") would fail.
+EXPORTS
+    DSM_Entry

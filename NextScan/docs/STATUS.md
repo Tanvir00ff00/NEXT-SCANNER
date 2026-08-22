@@ -28,6 +28,7 @@ Network ScanGear 2**.
 | Crash/hang isolation + watchdog (§7.7) | ✅ built | host kill/respawn, non-zero exit surfaced |
 | `nsprobe` CLI (§12.3, §13.8) | ✅ **verified** | `list` / `caps` / `scan` |
 | Integration into the existing Photoshop helper | ✅ **verified** | `scan engine: native (NextScan)`, NAPS2 unused |
+| TWAIN simulator skeleton, well-behaved personality (§18.3, ADR-0002) | ✅ **verified** | `nsprobe` enumerates + scans it end-to-end on both hosts |
 
 **The headline result: NAPS2 is no longer required.** The existing
 `scanhelper.exe` UI now acquires images through the native engine, and falls back
@@ -37,10 +38,28 @@ to NAPS2 only if the native path fails and NAPS2 happens to be installed.
 
 ```
 nsprobe scan "LiDE" --dpi 150 --region 0,0,3,2   ->  450x300  @150dpi  (exactly 3.00 x 2.00 in)
-scanhelper -nodialog (crop_h=0.2567)             -> 2481x900  @300dpi  (exactly 8.27 x 3.00 in)
-TWAIN scan wall time, 150 dpi preview region     -> 4.0 s
-WIA   scan wall time, 150 dpi preview region     -> 2.7 s
+scanhelper -nodialog (crop_h=0.2567)             ->  2481x900  @300dpi  (exactly 8.27 x 3.00 in)
+TWAIN scan wall time, 150 dpi preview region     ->  4.0 s
+WIA   scan wall time, 150 dpi preview region     ->  2.7 s
+simulator scan, same region                      ->  450x300, 0.2 s, all 8 colour bars byte-exact
 ```
+
+### TWAIN simulator (ADR-0002)
+
+A fake `TWAINDSM.DLL` (`sim\TwainSim.cpp`, built x86 + x64 to `bin\sim\`), loaded
+by setting `NEXTSCAN_TWAIN_DSM` to its path — no admin rights, nothing written
+to the machine's TWAIN source list. Verified working against the full managed
+stack: enumeration, capability negotiation (ENUM/ONEVALUE/RANGE containers,
+FIX32), region clamping, memory-strip transfer, ENDXFER/RESET teardown, on both
+Host32 and Host64. Image content is a deterministic 8-bar colour pattern
+(`NEXTSCAN_SIM_IMAGE` = bars | gradient | checker | flat); all eight sampled
+bar colours came back byte-exact, which also proves R/B order through our own
+memory-transfer path (hardware-side confirmation still pending — see §3).
+
+**Not yet built** (the remaining ADR-0002 scope): the fault personalities
+(odd width, 1/8/16-bit, bottom-up/top-down, refuses `ShowUI=FALSE`, lying
+`MSG_SET`, hang, state-7 crash, duplex reversed backs), the golden-image
+harness, and the watchdog/crash-isolation proofs.
 
 ### Why the 32-bit host is not optional
 
