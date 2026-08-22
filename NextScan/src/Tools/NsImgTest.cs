@@ -38,6 +38,16 @@ namespace NextScan.Tools
             TestCurveApply16();
             TestCurveIdentity8();
 
+            // ---------------- deskew (plan 3.5) ----------------
+            TestDeskewTextPage(0.0);
+            TestDeskewTextPage(3.0);
+            TestDeskewTextPage(8.0);
+            TestDeskewTextPage(12.0);
+            TestDeskewBeyondHardLimit();
+            TestDeskewDiagonalArtwork();
+            TestDeskewStrictGuardPreset();
+            TestDeskewSourceAwareLimits();
+
             Console.WriteLine();
             if (_failed > 0)
             {
@@ -303,6 +313,218 @@ namespace NextScan.Tools
             bool ok = true;
             for (int i = 0; i < 256; i++) if (lut[i] != i) { ok = false; break; }
             Check("curve_identity8", ok, "8-bit LUT is not the identity");
+        }
+
+        // ---------------------------------------------------------------- deskew tests
+        /// <summary>
+        /// A text page on the flatbed: white document on a grey lid, carrying 10
+        /// rows of ink "text" lines. paperAngle rotates the document; inkAngle
+        /// rotates only the ink frame - the classic "diagonal line in the artwork"
+        /// trap from plan section 3.5 is paperAngle=0 with a nonzero inkAngle.
+        /// The document is kept under 70% of the frame width so the detector's
+        /// full-page rule (which forces angle 0) does not kick in.
+        /// </summary>
+        static RawImage MakeTextPage(int w, int h, double paperAngle, double inkAngle, bool singleBar)
+        {
+            RawImage img = new RawImage();
+            img.Width = w; img.Height = h;
+            img.Channels = 3; img.BitsPerChannel = 8;
+            img.Stride = w * 3;
+            img.XDpi = 150; img.YDpi = 150;
+            img.Pixels = new byte[(long)h * img.Stride];
+
+            Random rng = new Random(777);
+            double cx = w / 2.0, cy = h / 2.0;
+            // Under half the frame width, so the detector's full-page rule (which
+            // forces angle 0 by design) cannot fire and mask the estimators.
+            double halfW = w * 0.25, halfH = h * 0.30;
+            double pRad = paperAngle * Math.PI / 180.0;
+            double pCos = Math.Cos(pRad), pSin = Math.Sin(pRad);
+            double iRad = inkAngle * Math.PI / 180.0;
+            double iCos = Math.Cos(iRad), iSin = Math.Sin(iRad);
+
+            // Ink rows in the INK frame's coordinates.
+            List<RectangleF> ink = new List<RectangleF>();
+            if (singleBar)
+            {
+                ink.Add(new RectangleF((float)-halfW, (float)-6, (float)(2 * halfW), 12f));
+            }
+            else
+            {
+                for (int line = 0; line < 10; line++)
+                {
+                    double ly = -halfH * 0.8 + line * (halfH * 1.6 / 9.0);
+                    double lx = -halfW * 0.75;
+                    while (lx < halfW * 0.75)
+                    {
+                        int wordLen = 14 + rng.Next(0, 30);
+                        ink.Add(new RectangleF((float)lx, (float)ly, wordLen, 5f));
+                        lx += wordLen + 6 + rng.Next(0, 8);
+                    }
+                }
+            }
+
+            // Antialiased rendering: 3x3 supersampling. A hard-threshold renderer
+            // turns a 3 deg edge into a staircase whose segments are 95 percent
+            // axis-aligned, which defeats the Sobel orientation estimator and
+            // poisons the ink mask - real scanners antialias, so the synthetic
+            // scene must too.
+            for (int y = 0; y < h; y++)
+            {
+                int rowBase = y * img.Stride;
+                for (int x = 0; x < w; x++)
+                {
+                    int sum = 0;
+                    for (int sy = 0; sy < 3; sy++)
+                    {
+                        double fy = y + (sy - 1) / 3.0;
+                        for (int sx = 0; sx < 3; sx++)
+                        {
+                            double fx = x + (sx - 1) / 3.0;
+                            double dx = fx - cx, dy = fy - cy;
+                            // paper frame
+                            double lu = dx * pCos + dy * pSin;
+                            double lv = -dx * pSin + dy * pCos;
+                            int v;
+                            if (Math.Abs(lu) <= halfW && Math.Abs(lv) <= halfH)
+                            {
+                                // ink frame, expressed relative to the paper axes
+                                double iu = lu * iCos + lv * iSin;
+                                double iv = -lu * iSin + lv * iCos;
+                                bool isInk = false;
+                                foreach (RectangleF r in ink)
+                                    if (iu >= r.X && iu < r.Right && iv >= r.Y && iv < r.Bottom) { isInk = true; break; }
+                                v = isInk ? 30 : 235;
+                            }
+                            else
+                            {
+                                v = 120 + rng.Next(-2, 3);
+                            }
+                            sum += v;
+                        }
+                    }
+                    int val = sum / 9;
+                    int p = rowBase + x * 3;
+                    img.Pixels[p] = (byte)val;
+                    img.Pixels[p + 1] = (byte)val;
+                    img.Pixels[p + 2] = (byte)val;
+                }
+            }
+            return img;
+        }
+
+        static void RunDeskewCase(string name, double paperAngle, bool expectAuto)
+        {
+            // inkAngle 0: the text is aligned with the paper, both rotated by
+            // paperAngle (inkAngle is RELATIVE to the paper frame).
+            RawImage img = MakeTextPage(400, 300, paperAngle, 0.0, false);
+            List<RotatedBox> boxes = DocumentDetector.Detect(img, DeskewGuard.Off);
+            if (boxes.Count == 0) { Check(name, false, "detection found no document"); return; }
+
+            float[] est = DeskewEstimators.EstimateAll(img, boxes[0]);
+            DeskewResult r = DeskewPolicy.Evaluate(est, DeskewEstimators.Resolutions,
+                                                   PaperSource.Flatbed, DeskewProfileKind.Standard);
+
+            string detail = "skew=" + r.Skew.ToString("0.##") + " (truth " + paperAngle + "), conf=" +
+                            r.Confidence.ToString("0.00") + ", auto=" + r.AutoRotate +
+                            ", review=" + r.NeedsReview + ", est=[" +
+                            est[0].ToString("0.##") + "," + est[1].ToString("0.##") + "," +
+                            est[2].ToString("0.##") + "," + est[3].ToString("0.##") + "] " + r.Notes;
+
+            bool angleOk = Math.Abs(r.Skew - paperAngle) <= 0.75;
+            bool ok = angleOk && r.AutoRotate == expectAuto;
+            Check(name, ok, detail);
+        }
+
+        static void TestDeskewTextPage(double angle)
+        {
+            // Flatbed (soft limit 6 deg). Small angles: projection+Hough resolve,
+            // the two coarse estimators fall inside their measured resolution
+            // floors, so confidence is high and the page rotates - including
+            // angles the legacy guard silently zeroed. Beyond 6 deg on a flatbed
+            // the policy demands HighConfidence (0.90): with the two coarse
+            // estimators out of their depth the honest result is review, which
+            // still beats the legacy silent 0 because the user gets a hint.
+            bool expectAuto = angle <= 6.0;
+            RunDeskewCase("deskew_text_" + angle.ToString("0.#") + "deg", angle, expectAuto);
+        }
+
+        static void TestDeskewBeyondHardLimit()
+        {
+            // 25 deg is beyond the 20 deg hard limit: measured (the sweep reaches
+            // 30 deg) but never auto-rotated; the UI hint is raised instead.
+            RawImage img = MakeTextPage(400, 300, 25.0, 0.0, false);
+            List<RotatedBox> boxes = DocumentDetector.Detect(img, DeskewGuard.Off);
+            if (boxes.Count == 0) { Check("deskew_25deg_needs_review", false, "detection found no document"); return; }
+
+            float[] est = DeskewEstimators.EstimateAll(img, boxes[0]);
+            DeskewResult r = DeskewPolicy.Evaluate(est, DeskewEstimators.Resolutions,
+                                                   PaperSource.Flatbed, DeskewProfileKind.Standard);
+
+            bool ok = !r.AutoRotate && r.NeedsReview && Math.Abs(r.Skew - 25.0) <= 1.5;
+            Check("deskew_25deg_needs_review", ok,
+                  "skew=" + r.Skew.ToString("0.##") + ", conf=" + r.Confidence.ToString("0.00") +
+                  ", auto=" + r.AutoRotate + ", est=[" + est[0].ToString("0.##") + "," +
+                  est[1].ToString("0.##") + "," + est[2].ToString("0.##") + "," + est[3].ToString("0.##") + "]");
+        }
+
+        static void TestDeskewDiagonalArtwork()
+        {
+            // Straight paper, one diagonal bar of "artwork": the ink estimators
+            // see the bar (12 deg), the paper estimators see the truth (0). The
+            // page must NOT be rotated to follow the bar (plan 3.5's case); the
+            // genuinely ambiguous scene lands in review instead.
+            RawImage img = MakeTextPage(400, 300, 0.0, 12.0, true);
+            List<RotatedBox> boxes = DocumentDetector.Detect(img, DeskewGuard.Off);
+            if (boxes.Count == 0) { Check("deskew_diagonal_artwork", false, "detection found no document"); return; }
+
+            float[] est = DeskewEstimators.EstimateAll(img, boxes[0]);
+            DeskewResult r = DeskewPolicy.Evaluate(est, DeskewEstimators.Resolutions,
+                                                   PaperSource.Flatbed, DeskewProfileKind.Standard);
+
+            bool ok = !r.AutoRotate;
+            Check("deskew_diagonal_artwork", ok,
+                  "skew=" + r.Skew.ToString("0.##") + ", conf=" + r.Confidence.ToString("0.00") +
+                  ", auto=" + r.AutoRotate + ", est=[" + est[0].ToString("0.##") + "," +
+                  est[1].ToString("0.##") + "," + est[2].ToString("0.##") + "," + est[3].ToString("0.##") + "]");
+        }
+
+        static void TestDeskewStrictGuardPreset()
+        {
+            // Legacy rule verbatim: 3 deg survives, 8 deg is forced to zero.
+            float[] e3 = { 3f, 3f, 3f, 3f };
+            DeskewResult r3 = DeskewPolicy.Evaluate(e3, PaperSource.Flatbed, DeskewProfileKind.StrictFlatbedGuard);
+            bool ok3 = r3.AutoRotate && Math.Abs(r3.Skew - 3f) < 0.01f;
+
+            float[] e8 = { 8f, 8f, 8f, 8f };
+            DeskewResult r8 = DeskewPolicy.Evaluate(e8, PaperSource.Flatbed, DeskewProfileKind.StrictFlatbedGuard);
+            bool ok8 = r8.AutoRotate && Math.Abs(r8.Skew) < 0.01f;
+
+            Check("deskew_strict_guard_preset", ok3 && ok8,
+                  "3deg skew=" + r3.Skew + ", 8deg skew=" + r8.Skew);
+        }
+
+        static void TestDeskewSourceAwareLimits()
+        {
+            // On a feeder the soft limit is 10 deg: an 8 deg page needs only
+            // MinConfidence, while on film (soft limit 3 deg) even 4 deg requires
+            // HighConfidence.
+            float[] e8 = { 8f, 8f, 8.1f, 7.9f };   // conf = 1.0
+            DeskewResult adf = DeskewPolicy.Evaluate(e8, PaperSource.Feeder, DeskewProfileKind.Standard);
+            bool okAdf = adf.AutoRotate && Math.Abs(adf.Skew - 8f) < 0.2f;
+
+            float[] e4 = { 4f, 4f, 4f, 4f };       // conf = 1.0 -> passes HighConfidence
+            DeskewResult film = DeskewPolicy.Evaluate(e4, PaperSource.Film, DeskewProfileKind.Standard);
+            bool okFilm = film.AutoRotate;
+
+            // Same film case with weak agreement: 4 deg must NOT rotate.
+            float[] e4low = { 4f, 4f, 0f, 0f };    // 2/4 agree -> conf 0.5
+            DeskewResult filmLow = DeskewPolicy.Evaluate(e4low, PaperSource.Film, DeskewProfileKind.Standard);
+            bool okFilmLow = !filmLow.AutoRotate && filmLow.NeedsReview;
+
+            Check("deskew_source_aware_limits", okAdf && okFilm && okFilmLow,
+                  "adf8 auto=" + adf.AutoRotate + ", film4 auto=" + film.AutoRotate +
+                  ", film4low auto=" + filmLow.AutoRotate + " conf=" + filmLow.Confidence.ToString("0.00"));
         }
     }
 }

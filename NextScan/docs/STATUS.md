@@ -30,6 +30,7 @@ Network ScanGear 2**.
 | Integration into the existing Photoshop helper | ✅ **verified** | `scan engine: native (NextScan)`, NAPS2 unused |
 | TWAIN simulator skeleton, well-behaved personality (§18.3, ADR-0002) | ✅ **verified** | `nsprobe` enumerates + scans it end-to-end on both hosts |
 | Imaging core port onto `RawImage` (§9, HANDOFF §8.5) | ✅ **verified** | detection + 16-bit curves, `nsimgtest` 10/10 |
+| Confidence-scored deskew policy (§3.5) | ✅ **verified** | 4 estimators + source-aware limits, `nsimgtest` 18/18 |
 
 **The headline result: NAPS2 is no longer required.** The existing
 `scanhelper.exe` UI now acquires images through the native engine, and falls back
@@ -73,6 +74,34 @@ rule meanwhile.
 port is not wired into the app yet (deliberately: switch after the §3.5
 policy lands, then remove the duplication); per-channel curve LUTs; deskew
 confidence policy; whitening/deskew application on 16-bit data.
+
+### Deskew policy (plan section 3.5)
+
+`src/Core/Deskew.cs`: four independent estimators — text-baseline projection
+variance (±30° at 0.1°), Hough over the paper's own boundary edges, Sobel
+gradient-orientation histogram (folded mod 90°), and the detector's
+pre-guard minimum-area-box angle — combined by a consensus with
+**per-estimator measured resolutions** (0.5°/0.5°/5°/3°). The policy: dead
+zone 0.6°, source-aware soft limits (flatbed 6°, ADF 10°, film 3°), hard
+limit 20° → review, MinConfidence 0.72 / HighConfidence 0.90. The legacy
+[0.6°, 6.0°] rule lives on verbatim as the `StrictFlatbedGuard` preset.
+
+Verified (`nsimgtest`, synthetic antialiased text pages): 0°/3° auto-rotate
+with correct angle; 8°/12° flatbed honestly land in review (the two coarse
+estimators cannot second-guess beyond their resolution, so HighConfidence
+0.90 is unreachable — the same pages rotate on a feeder at MinConfidence via
+the 10° soft limit, per the source-aware unit tests); 25° review; straight
+paper with a diagonal artwork bar is NOT rotated to follow the bar.
+
+Measured limitations, documented in code: gradient-direction voting cannot
+resolve shallow slopes on a pixel grid (a 3° antialiased edge displaces
+~0.1px per kernel span, so Sobel's floor is ~5°); the min-area box inherits
+the 8px block-staircase floor (~3°) and abstains by construction on
+full-page scans (the detector's full-page rule forces angle 0 there). The
+projection and Hough estimators carry the small-angle work — which is why
+the per-estimator tolerance matters: without it those two floors veto every
+small-angle page, the exact failure section 3.5 was written to fix.
+
 
 ### TWAIN simulator (ADR-0002)
 

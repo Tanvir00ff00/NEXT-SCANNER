@@ -25,6 +25,7 @@ namespace NextScan.Core
     public class RotatedBox
     {
         public float Angle;          // degrees, normalised to [-45, 45]
+        public float RawAngle;       // degrees, before any deskew guard touched it (plan 3.5 estimator input)
         public float Width, Height;  // along the box's own axes
         public PointF Center;
         public PointF[] Corners = new PointF[4];
@@ -631,6 +632,7 @@ namespace NextScan.Core
                 best.Width = best.Height;
                 best.Height = tmp;
             }
+            best.RawAngle = best.Angle;
 
             // Strict Flatbed Angle Safety Guard (legacy preset, HANDOFF section 8.5):
             // On flatbed scanners, authentic human placement skew is always small (<= 6.0 deg).
