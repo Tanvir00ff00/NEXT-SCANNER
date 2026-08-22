@@ -79,11 +79,12 @@ line, so the sentinel `HostPipeBroken` result (Ok=false) kept the branch's
 no exit code. Fixed by tracking whether a `result` line was seen at all; the
 `crash7_isolation` harness case is its regression test.
 
-**Not yet proven:** the hang personality's full watchdog kill at the broker
-level (timeout is 600 s in the scan path; proof run pending). The eleven
-STATUS §2 traps are now regression-covered on the TWAIN side via the
-personalities above; the WIA-side traps (PRSPEC_PROPID, TYMED ordering) still
-have no simulator coverage.
+**Hang watchdog, proven:** with the `hang` personality the host never returns
+from `MSG_ENABLEDS`; the broker killed it at the 600 s scan timeout, the
+caller survived and reported `HostTimeout` with a remedy (exit 1, no orphan
+host process left behind). The harness's `-WithHang` switch asserts the same
+output but re-runs the full 10-minute wait, so it is excluded from the default
+fast pass.
 
 ### Why the 32-bit host is not optional
 
