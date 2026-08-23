@@ -121,6 +121,17 @@ namespace NextScan.Core
         }
 
         /// <summary>
+        /// Hosts being spawned right now. When Probe() runs its two host probes
+        /// in parallel, one RunHost's stale-kill pass would race the other's
+        /// spawn (a host is only tracked as OUR child after Process.Start
+        /// returns) and could kill a perfectly fresh sibling. So the stale sweep
+        /// only runs when no other spawn is in flight - the sequential Scan/Caps
+        /// paths always qualify, and Probe() does its own sweep up front before
+        /// opening the parallel window.
+        /// </summary>
+        static int _spawnsInFlight;
+
+        /// <summary>
         /// Kills every NextScan.Host32/64 process this broker did not spawn itself.
         /// Called before each host run: hosts are stateless one-shot workers, so a
         /// foreign instance can only be garbage from an earlier run - usually one
@@ -191,20 +202,33 @@ namespace NextScan.Core
         {
             List<DeviceDescriptor> all = new List<DeviceDescriptor>();
 
-            // 32-bit first: it is where legacy TWAIN data sources live, and it is the
-            // one most likely to find something on an older machine.
-            all.AddRange(ProbeHost(Host32Path, 32));
-            all.AddRange(ProbeHost(Host64Path, 64));
+            // Sweep for leftovers BEFORE opening the parallel window, so the two
+            // host probes and the mDNS browse below never race the killer.
+            KillStaleHosts();
 
-            // eSCL is pure managed and network-only, so it probes in-process
-            // (plan section 5.1) - no host process, no isolation needed.
-            try
-            {
-                NextScan.Net.EsclDriver escl = new NextScan.Net.EsclDriver();
-                escl.Log = Log;
-                all.AddRange(escl.Probe());
-            }
-            catch (Exception ex) { Log("eSCL probe failed: " + ex.Message); }
+            // All three transports probe in parallel: the two host processes
+            // (~0.4 s each, serial before) and the mDNS listen window used to add
+            // up to ~2 s; overlapped, the whole probe takes as long as the slowest
+            // single probe (plan NFR2: full list well under the 3.5 s budget).
+            System.Threading.Tasks.Task<List<DeviceDescriptor>> t32 =
+                System.Threading.Tasks.Task.Run(delegate { return ProbeHost(Host32Path, 32); });
+            System.Threading.Tasks.Task<List<DeviceDescriptor>> t64 =
+                System.Threading.Tasks.Task.Run(delegate { return ProbeHost(Host64Path, 64); });
+            System.Threading.Tasks.Task<List<DeviceDescriptor>> escl =
+                System.Threading.Tasks.Task.Run(delegate
+                {
+                    try
+                    {
+                        NextScan.Net.EsclDriver esclDriver = new NextScan.Net.EsclDriver();
+                        esclDriver.Log = Log;
+                        return esclDriver.Probe();
+                    }
+                    catch (Exception ex) { Log("eSCL probe failed: " + ex.Message); return new List<DeviceDescriptor>(); }
+                });
+
+            try { all.AddRange(t32.Result); } catch (Exception ex) { Log("host32 probe failed: " + ex.Message); }
+            try { all.AddRange(t64.Result); } catch (Exception ex) { Log("host64 probe failed: " + ex.Message); }
+            try { all.AddRange(escl.Result); } catch (Exception ex) { Log("eSCL probe failed: " + ex.Message); }
 
             return GroupByScanner(all);
         }
@@ -434,8 +458,17 @@ namespace NextScan.Core
 
             // A leftover host from an earlier run may still hold the driver; clear
             // it before spawning so this run cannot lose the race for the device.
-            KillStaleHosts();
-
+            // The FIRST spawn of a wave does the sweep WHILE HOLDING THE LOCK:
+            // releasing between "decide to sweep" and "sweep done" let a sibling
+            // thread spawn + get killed by the still-running sweep (found as a
+            // flaky 1-in-5 missing device on the parallel probe, 2026-08-23).
+            lock (ChildLock)
+            {
+                _spawnsInFlight++;
+                if (_spawnsInFlight == 1) KillStaleHosts();
+            }
+            try
+            {
             Process p = null;
             bool cancelled = false;
             StringBuilder stderr = new StringBuilder();
@@ -532,6 +565,11 @@ namespace NextScan.Core
                     UntrackChild(p);
                     try { p.Dispose(); } catch { }
                 }
+            }
+            }
+            finally
+            {
+                lock (ChildLock) { _spawnsInFlight--; }
             }
         }
 

@@ -79,19 +79,33 @@ namespace NextScan.Net
                 Dictionary<string, string> addrs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
                 DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
-                while (DateTime.UtcNow < deadline)
+                // Quiet-period early exit: once at least one SRV has answered, a
+                // 500 ms silence means the LAN has said all it is going to. Without
+                // this the fixed listen window dominates the whole Probe() budget
+                // on networks with no eSCL devices at all.
+                DateTime lastPacket = DateTime.UtcNow;
+                bool quietBreak = false;
+                while (!quietBreak && DateTime.UtcNow < deadline)
                 {
-                    int remaining = (int)Math.Max(50, (deadline - DateTime.UtcNow).TotalMilliseconds);
-                    udp.Client.ReceiveTimeout = remaining;
+                    int remaining = (int)Math.Max(20, (deadline - DateTime.UtcNow).TotalMilliseconds);
+                    // Once a service has answered, listen in 500 ms slices so the
+                    // quiet period actually fires on time instead of after the
+                    // full window.
+                    int slice = srvs.Count > 0 ? Math.Min(500, remaining) : remaining;
+                    udp.Client.ReceiveTimeout = slice;
                     byte[] data;
                     IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
                     try
                     {
                         data = udp.Receive(ref from);
+                        lastPacket = DateTime.UtcNow;
                     }
                     catch (SocketException)
                     {
-                        break;   // timeout - collection window over
+                        // Receive timed out. With services already in hand the
+                        // 500 ms quiet period has elapsed - stop early.
+                        if (srvs.Count > 0) quietBreak = true;
+                        continue;
                     }
 
                     if (data.Length < 12 || (data[2] & 0x80) == 0) continue;   // queries only, thanks

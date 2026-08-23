@@ -219,6 +219,19 @@ host process left behind). The harness's `-WithHang` switch asserts the same
 output but re-runs the full 10-minute wait, so it is excluded from the default
 fast pass.
 
+**Parallel probe (2026-08-23).** `DeviceBroker.Probe` now runs the two host
+probes and the eSCL/mDNS browse concurrently (three `Task.Run`s joined on
+`.Result`); `MdnsDiscovery` got a 1500 ms window with quiet-period early exit.
+Measured on this machine: full `nsprobe list` 1.9 s → 1.6 s with real devices
+attached. The parallel spawn exposed a race in the stale-host sweep: the first
+spawner released the lock between deciding to sweep and finishing the sweep,
+so a sibling's fresh host could be enumerated before being tracked and killed
+as garbage — symptom was a flaky 1-in-5 missing device (the simulator vanished
+from `nsprobe list` 2/10 runs; `busy_retry` failed intermittently in the
+golden harness). Fix: the sweep now runs while holding the child lock.
+After the fix: 0/15 missed probes, golden 17/17 twice in a row, eSCL 9/9,
+imaging 18/18.
+
 ### Why the 32-bit host is not optional
 
 On this machine:
