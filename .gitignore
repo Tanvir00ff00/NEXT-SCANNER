@@ -1,4 +1,18 @@
-# --- build output / runtime data ---
+# =============================================================================
+# This repository tracks ONLY the NextScan/ engine tree (user decision,
+# 2026-08-22). Everything else in the working directory stays on disk but is
+# deliberately outside version control.
+#
+# Whitelist approach: ignore every root entry, then re-allow NextScan/ and
+# this file. The exclusions further down still apply INSIDE NextScan/ (they
+# are unanchored patterns), which keeps build output out of the repo.
+# =============================================================================
+
+/*
+!/.gitignore
+!/NextScan/
+
+# --- build output / runtime data (applies inside NextScan/ too) ---
 bin/
 out/
 scans/
@@ -12,14 +26,20 @@ scan_log.txt
 *.obj
 *.pdb
 
-# --- credentials & session state: never commit ---
+# --- logs & generated diagnostics ---
+*_log.txt
+exe_log.txt
+diag_report.txt
+
+# --- credentials & session state: never commit, in any tree ---
 keys.txt
 keystate.txt
 puter_token.txt
 setup_puter.bat
 chrome_profile/
 
-# --- bulky / re-downloadable runtime assets ---
+# --- bulky / re-downloadable runtime assets (relevant only if the
+#     whitelist is ever widened again) ---
 node/
 models/
 profiles/
@@ -32,8 +52,3 @@ backup/
 # personal photos processed by the fix tools; keep only the source snapshot
 backup_original/*
 !backup_original/scanhelper.cs.pre-native
-
-# --- logs & generated diagnostics ---
-*_log.txt
-exe_log.txt
-diag_report.txt
