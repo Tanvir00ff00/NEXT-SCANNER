@@ -339,12 +339,36 @@ namespace NextScan.Twain
             if (rc != TWRC.SUCCESS)
             {
                 ushort cc = GetStatus();
-                FreeIdentity(ref _dsIdPtr);
-                return NsResult.Fail(NsError.TwainOpenDsFailed,
-                    "MSG_OPENDS failed for '" + match.ProductName + "' (rc " + rc + ", " + TWCC.Describe(cc) + ")",
-                    cc == TWCC.MAXCONNECTIONS
-                        ? "Another program is already using this scanner. Close it and try again."
-                        : "Check the scanner is powered on and connected.");
+
+                // TWCC_MAXCONNECTIONS after a previous host died mid-session is the
+                // classic TWAIN zombie-lock: the vendor DS keeps the device claimed
+                // for a moment after its owning process is gone. Seen in the field as
+                // "another program is already using this scanner" that only a reboot
+                // seemed to clear. Wait briefly and retry before giving up - measured
+                // cases recover in well under a second once the OS reaps the dead
+                // process's handles.
+                if (cc == TWCC.MAXCONNECTIONS)
+                {
+                    for (int attempt = 1; attempt <= 2; attempt++)
+                    {
+                        Log("MSG_OPENDS got MAXCONNECTIONS - waiting 1.5s for the driver lock to clear (attempt " + (attempt + 1) + ")");
+                        System.Threading.Thread.Sleep(1500);
+                        rc = _dsmEntry(_appIdPtr, IntPtr.Zero, DG.CONTROL, DAT.IDENTITY, MSG.OPENDS, _dsIdPtr);
+                        if (rc == TWRC.SUCCESS) break;
+                        cc = GetStatus();
+                        if (cc != TWCC.MAXCONNECTIONS) break;
+                    }
+                }
+
+                if (rc != TWRC.SUCCESS)
+                {
+                    FreeIdentity(ref _dsIdPtr);
+                    return NsResult.Fail(NsError.TwainOpenDsFailed,
+                        "MSG_OPENDS failed for '" + match.ProductName + "' (rc " + rc + ", " + TWCC.Describe(cc) + ")",
+                        cc == TWCC.MAXCONNECTIONS
+                            ? "Another program is already using this scanner. Close it and try again."
+                            : "Check the scanner is powered on and connected.");
+                }
             }
 
             _state = TwainState.SourceOpen;

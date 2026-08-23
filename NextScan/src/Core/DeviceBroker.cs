@@ -60,9 +60,100 @@ namespace NextScan.Core
         /// <summary>Directory holding NextScan.Host32.exe / NextScan.Host64.exe.</summary>
         public string HostDirectory;
 
+        /// <summary>
+        /// Host processes this broker spawned. Hosts are one-shot by design, so any
+        /// NextScan.Host32/64 process that this broker did NOT spawn is a leftover
+        /// from a previous (crashed, killed, or orphaned) run - and a leftover that
+        /// still holds a TWAIN data source open keeps the scanner locked for every
+        /// later attempt, which in the field looks like "scanner in use by another
+        /// program" until a reboot. Children are also killed when THIS process
+        /// exits, because Windows does not reap child processes on parent death.
+        /// </summary>
+        static readonly List<int> ChildPids = new List<int>();
+        static readonly object ChildLock = new object();
+        static bool _exitHookRegistered;
+
         public DeviceBroker()
         {
             HostDirectory = ResolveHostDirectory();
+            RegisterExitHook();
+        }
+
+        static void RegisterExitHook()
+        {
+            lock (ChildLock)
+            {
+                if (_exitHookRegistered) return;
+                _exitHookRegistered = true;
+            }
+            AppDomain.CurrentDomain.ProcessExit += delegate { KillChildren("process exit"); };
+        }
+
+        static void TrackChild(Process p)
+        {
+            lock (ChildLock) { ChildPids.Add(p.Id); }
+        }
+
+        static void UntrackChild(Process p)
+        {
+            lock (ChildLock) { ChildPids.Remove(p.Id); }
+        }
+
+        static void KillChildren(string reason)
+        {
+            int[] pids;
+            lock (ChildLock) { pids = ChildPids.ToArray(); ChildPids.Clear(); }
+            foreach (int pid in pids)
+            {
+                try
+                {
+                    Process p = Process.GetProcessById(pid);
+                    if (!p.HasExited) { p.Kill(); Log0("killed child host " + pid + " (" + reason + ")"); }
+                }
+                catch { }
+            }
+        }
+
+        static void Log0(string msg)
+        {
+            // Static-context logging without needing an instance delegate.
+            try { System.Diagnostics.Debug.WriteLine("[DeviceBroker] " + msg); } catch { }
+        }
+
+        /// <summary>
+        /// Kills every NextScan.Host32/64 process this broker did not spawn itself.
+        /// Called before each host run: hosts are stateless one-shot workers, so a
+        /// foreign instance can only be garbage from an earlier run - usually one
+        /// that was watchdog-killed mid-transfer (TerminateProcess never runs the
+        /// vendor driver's CloseDS) and whose driver-side lock is exactly what
+        /// blocks the next scan with TWCC_MAXCONNECTIONS.
+        /// </summary>
+        void KillStaleHosts()
+        {
+            int[] ours;
+            lock (ChildLock) { ours = ChildPids.ToArray(); }
+
+            foreach (string name in new string[] { "NextScan.Host32", "NextScan.Host64" })
+            {
+                Process[] procs;
+                try { procs = Process.GetProcessesByName(name); }
+                catch { continue; }
+                foreach (Process p in procs)
+                {
+                    bool isOurs = false;
+                    foreach (int pid in ours) if (pid == p.Id) { isOurs = true; break; }
+                    if (isOurs) continue;
+
+                    try
+                    {
+                        Log("killing stale host process " + name + " (pid " + p.Id + ") left over from an earlier run");
+                        p.Kill();
+                        p.WaitForExit(3000);
+                    }
+                    catch { }
+                    finally { try { p.Dispose(); } catch { } }
+                }
+            }
         }
 
         static string ResolveHostDirectory()
@@ -315,6 +406,10 @@ namespace NextScan.Core
                 return run;
             }
 
+            // A leftover host from an earlier run may still hold the driver; clear
+            // it before spawning so this run cannot lose the race for the device.
+            KillStaleHosts();
+
             Process p = null;
             bool cancelled = false;
             StringBuilder stderr = new StringBuilder();
@@ -361,6 +456,7 @@ namespace NextScan.Core
                 };
 
                 p.Start();
+                TrackChild(p);
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
 
@@ -405,7 +501,11 @@ namespace NextScan.Core
             }
             finally
             {
-                if (p != null) { try { p.Dispose(); } catch { } }
+                if (p != null)
+                {
+                    UntrackChild(p);
+                    try { p.Dispose(); } catch { }
+                }
             }
         }
 

@@ -118,6 +118,7 @@ $cases = @(
     @{ Name="setlies_dpi";          Pers="setlies";    Img="";       Args=@("--dpi","300","--region","0,0,3,2");              Check="text:450x300 3ch 8bpc @ 150dpi" }
     @{ Name="refusesui";            Pers="refusesui";  Img="";       Args=@("--dpi","150","--region","0,0,3,2");              Check="fail:TwainEnableFailed" }
     @{ Name="crash7_isolation";     Pers="crash7";     Img="";       Args=@("--dpi","150","--region","0,0,3,2");              Check="fail:HostCrashed" }
+    @{ Name="busy_retry";           Pers="busy";       Img="";       Args=@("--dpi","150","--region","0,0,3,2");              Check="text:450x300 3ch 8bpc @ 150dpi" }
 )
 if ($WithHang) {
     $cases += @{ Name="hang_watchdog"; Pers="hang"; Img=""; Args=@("--dpi","150","--region","0,0,1,1"); Check="fail:HostTimeout" }

@@ -120,6 +120,7 @@ typedef struct { TW_UINT16 Count; TW_UINT32 EOJ; } TW_PENDINGXFERS;
 #define TWRC_ENDOFLIST     7
 
 #define TWCC_SUCCESS        0
+#define TWCC_MAXCONNECTIONS 4
 #define TWCC_OPERATIONERROR 5
 #define TWCC_BADPROTOCOL    9
 #define TWCC_BADVALUE       10
@@ -190,6 +191,7 @@ enum SimPersonality
     PERS_HANG,           // never returns from MSG_ENABLEDS (watchdog test)
     PERS_CRASH7,         // access violation on the first DAT_IMAGEMEMXFER (state 7)
     PERS_DUPLEX,         // feeder+duplex: two pages, back side rotated 180 degrees
+    PERS_BUSY,           // first OPENDS refuses with TWCC_MAXCONNECTIONS, retry wins
 };
 
 enum SimPattern
@@ -234,6 +236,7 @@ static struct SimState
     SimPattern pattern;
     int forcedType;           // -1, or a TWPT_* the device delivers regardless of SET
     int forcedDepth;          // bits per pixel that goes with forcedType
+    int opendsAttempts;       // busy personality: refuse the first OPENDS
     TW_UINT16 lastCC;
 
     FILE* log;
@@ -271,6 +274,7 @@ static void ReadConfig()
         else if (!_stricmp(pers, "hang"))      S.personality = PERS_HANG;
         else if (!_stricmp(pers, "crash7"))    S.personality = PERS_CRASH7;
         else if (!_stricmp(pers, "duplex"))    S.personality = PERS_DUPLEX;
+        else if (!_stricmp(pers, "busy"))      S.personality = PERS_BUSY;
         else Logf("unknown personality '%s', using wellbehaved", pers);
     }
 
@@ -833,6 +837,18 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
 
     if (!S.dsmOpen) { S.lastCC = TWCC_SEQERROR; return TWRC_FAILURE; }
 
+    // ---- DSM-level status: legal before any data source opens, and the ONLY
+    // way the application learns WHY OPENDS refused (a real DSM answers it at
+    // this level too), so it must sit above the dsOpen gate ----
+    if (DAT_ == DAT_STATUS && MSG_ == MSG_GET)
+    {
+        TW_STATUS* st = (TW_STATUS*)pData;
+        if (st) { st->ConditionCode = S.lastCC; st->Data = 0; }
+        TW_UINT16 cc = S.lastCC;
+        S.lastCC = TWCC_SUCCESS;   // reading status clears it, as real DSMs do
+        return TWRC_SUCCESS;
+    }
+
     // ---- DSM-level: source enumeration ----
     if (DAT_ == DAT_IDENTITY && (MSG_ == MSG_GETFIRST || MSG_ == MSG_GETNEXT))
     {
@@ -848,6 +864,20 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
     if (DAT_ == DAT_IDENTITY && MSG_ == MSG_OPENDS)
     {
         if (!pData) { S.lastCC = TWCC_BADVALUE; return TWRC_FAILURE; }
+
+        // The busy personality reproduces the field failure that forced a reboot:
+        // a previous host died holding the data source, so the first OPENDS gets
+        // TWCC_MAXCONNECTIONS ("another program is using the scanner") and only a
+        // patient retry succeeds. The session's retry-with-backoff is the fix.
+        if (S.personality == PERS_BUSY && S.opendsAttempts == 0)
+        {
+            S.opendsAttempts++;
+            S.lastCC = TWCC_MAXCONNECTIONS;
+            Logf("OPENDS refused with MAXCONNECTIONS (personality=busy)");
+            return TWRC_FAILURE;
+        }
+        S.opendsAttempts++;
+
         FillIdentity((TW_IDENTITY*)pData);
         S.dsOpen = true;
         Logf("OPENDS");
@@ -863,15 +893,6 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
 
     // ---- everything below is a data-source triplet ----
     if (!S.dsOpen) { S.lastCC = TWCC_SEQERROR; return TWRC_FAILURE; }
-
-    if (DAT_ == DAT_STATUS && MSG_ == MSG_GET)
-    {
-        TW_STATUS* st = (TW_STATUS*)pData;
-        if (st) { st->ConditionCode = S.lastCC; st->Data = 0; }
-        TW_UINT16 cc = S.lastCC;
-        S.lastCC = TWCC_SUCCESS;   // reading status clears it, as real DSMs do
-        return TWRC_SUCCESS;
-    }
 
     if (DAT_ == DAT_CAPABILITY)
     {

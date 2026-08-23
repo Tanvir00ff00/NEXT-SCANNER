@@ -158,6 +158,32 @@ line, so the sentinel `HostPipeBroken` result (Ok=false) kept the branch's
 no exit code. Fixed by tracking whether a `result` line was seen at all; the
 `crash7_isolation` harness case is its regression test.
 
+**Zombie-host lock recovery (field incident 2026-08-23, fixed same day).**
+Symptom in the field: after a driver glitch mid-work, every later scan failed
+with "another program is already using this scanner" (TWCC_MAXCONNECTIONS)
+until a Windows reboot. Root cause in our architecture: a host process left
+holding the TWAIN data source — Windows does not reap children when the app
+exits, and a watchdog-killed host dies by TerminateProcess, which never runs
+the vendor driver's CloseDS. Three-part fix, all engine-side so every client
+benefits:
+
+1. `DeviceBroker` now kills every `NextScan.Host32/64` process it did not
+   spawn itself, before each host run (hosts are stateless one-shot workers;
+   a foreign instance can only be garbage).
+2. `DeviceBroker` tracks its children and kills them on process exit — the
+   app can close or crash without orphaning a host.
+3. `TwainSession.OpenSource` retries OPENDS twice with a 1.5 s backoff on
+   TWCC_MAXCONNECTIONS, because the lock of a just-dead holder typically
+   clears within seconds.
+
+Verified: the simulator's `busy` personality (first OPENDS refused with
+MAXCONNECTIONS, retry wins) is a permanent harness case; a deliberately
+spawned hung host was detected and killed by the next `nsprobe list` (log
+line + process gone); real-hardware scan unaffected (2481 px wide @ 300 dpi,
+no leftover hosts). The simulator also moved DAT_STATUS above its data-source
+gate to match real DSMs — an application can only learn *why* OPENDS refused
+by asking status before any source is open.
+
 **Hang watchdog, proven:** with the `hang` personality the host never returns
 from `MSG_ENABLEDS`; the broker killed it at the 600 s scan timeout, the
 caller survived and reported `HostTimeout` with a remedy (exit 1, no orphan
