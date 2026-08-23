@@ -232,6 +232,32 @@ golden harness). Fix: the sweep now runs while holding the child lock.
 After the fix: 0/15 missed probes, golden 17/17 twice in a row, eSCL 9/9,
 imaging 18/18.
 
+**USB wedge auto-recovery (2026-08-23).** Second field incident with the
+LiDE 400: the carriage sticks at the bottom of the glass and Canon ScanGear
+itself gives up with "Detach the USB cable and reconnect. Code:2,250,4" —
+the only cure was physically re-plugging the cable, sometimes several times.
+The software equivalent is `pnputil /restart-device` on the PARENT composite
+USB node (not the MI_ interfaces), which re-enumerates the whole device like
+a re-plug does. It needs elevation, so it runs through a one-time-registered
+scheduled task (`NextScan_UsbReset`, RunLevel Highest, registered with a
+single consent via `tools\setup_usb_reset_task.ps1`); later triggers need no
+prompt (`schtasks /run` from the unelevated app). `DeviceBroker.Scan` fires
+it on exactly the failure codes a wedge produces (open/enable/transfer
+failure, WIA offline) — narrow by design, a paper jam or user cancel must
+never power-cycle — then retries the scan once after an 8 s settle window
+(field evidence: the node returns in ~2 s but the Canon driver needs several
+more before a retry can succeed). Kill switch: `NEXTSCAN_USB_RESET=0`.
+
+Verified live on the real scanner: unelevated trigger → pnputil restart of
+`USB\VID_04A9&PID_1912\4C24A8` → device back OK in 2 s (helper log with the
+attempt/success trail); during the same session an actual scanhelper run hit
+`TwainTransferFailed`, the engine reset the node automatically and retried —
+the recovery path fires end-to-end without any user action. A later 300 dpi
+`-nodialog` run completed normally (2481x600, 13 s). The wedge state itself
+refuses to clear in software sometimes, matching Canon's own "re-plug
+several times" advice; when one reset is not enough the engine reports the
+original failure plus a human remedy message.
+
 ### Why the 32-bit host is not optional
 
 On this machine:

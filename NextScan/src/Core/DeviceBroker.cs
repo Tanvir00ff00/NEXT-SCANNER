@@ -377,7 +377,66 @@ namespace NextScan.Core
                 return NsResult.Fail(NsError.HostProtocolViolation,
                     "The scanner host finished without delivering a page.", "Try scanning again.");
 
+            // Device-wedge recovery (field incident: Canon carriage stuck at the
+            // bottom, ScanGear Code 2,250,4, cable re-plug was the only cure).
+            // On the failure codes a wedged device produces, power-cycle the USB
+            // node through the elevated helper task and try ONCE more. Disable
+            // with NEXTSCAN_USB_RESET=0.
+            if (!run.Result.Ok && LooksLikeDeviceWedge(run.Result) && UsbResetEnabled())
+            {
+                Log("scan failed with " + run.Result.Code + " - attempting USB device reset");
+                UsbReset.Log = Log;
+                if (UsbReset.TryReset(device.FriendlyName))
+                {
+                    // Field evidence (2026-08-23, LiDE 400): the USB node is back
+                    // after ~2s but the Canon driver needs several more seconds to
+                    // finish re-initialising - a retry fired immediately failed in
+                    // under a second. Give it a settle window first.
+                    Log("device reset succeeded - settling 8s, then retrying the scan once");
+                    Thread.Sleep(8000);
+                    NsResult retry = Scan(device, settings, onFrame, onProgress);
+                    if (retry.Ok) return retry;
+                    Log("scan still failing after reset: " + retry.Message);
+                    return retry;
+                }
+                Log("USB reset could not run or the device did not return");
+                run.Result = NsResult.Fail(run.Result.Code,
+                    run.Result.Message,
+                    "The scanner stopped responding and automatic recovery did not succeed. " +
+                    "Unplug the scanner's cable, wait a moment, and reconnect it, then try again.");
+            }
+
             return run.Result;
+        }
+
+        /// <summary>
+        /// The failure codes a physically wedged scanner produces: the device
+        /// refuses to open, refuses to enable, dies mid-transfer, or WIA reports
+        /// it offline. Deliberately narrow - a paper jam or a user cancel must
+        /// NOT trigger a USB power-cycle.
+        /// </summary>
+        static bool LooksLikeDeviceWedge(NsResult r)
+        {
+            switch (r.Code)
+            {
+                case NsError.TwainOpenDsFailed:
+                case NsError.TwainEnableFailed:
+                case NsError.TwainTransferFailed:
+                case NsError.WiaOffline:
+                case NsError.WiaTransferFailed:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        static bool UsbResetEnabled()
+        {
+            try
+            {
+                return Environment.GetEnvironmentVariable("NEXTSCAN_USB_RESET") != "0";
+            }
+            catch { return true; }
         }
 
         /// <summary>Maps a published frame out of shared memory into a RawImage.</summary>
