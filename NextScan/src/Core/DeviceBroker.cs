@@ -196,6 +196,16 @@ namespace NextScan.Core
             all.AddRange(ProbeHost(Host32Path, 32));
             all.AddRange(ProbeHost(Host64Path, 64));
 
+            // eSCL is pure managed and network-only, so it probes in-process
+            // (plan section 5.1) - no host process, no isolation needed.
+            try
+            {
+                NextScan.Net.EsclDriver escl = new NextScan.Net.EsclDriver();
+                escl.Log = Log;
+                all.AddRange(escl.Probe());
+            }
+            catch (Exception ex) { Log("eSCL probe failed: " + ex.Message); }
+
             return GroupByScanner(all);
         }
 
@@ -259,6 +269,14 @@ namespace NextScan.Core
             if (device == null)
                 return NsResult.Fail(NsError.HostProtocolViolation, "No device selected.", "");
 
+            // eSCL runs in-process (pure managed, plan 5.1).
+            if (device.Transport == Transport.Escl)
+            {
+                NextScan.Net.EsclDriver escl = new NextScan.Net.EsclDriver();
+                escl.Log = Log;
+                return escl.GetCapabilities(device.NativeId, out caps);
+            }
+
             string exe = (device.HostBitness == 32) ? Host32Path : Host64Path;
             string args = "caps --device \"" + Escape(device.NativeId) + "\" --transport " + device.Transport.ToString().ToLowerInvariant();
 
@@ -279,6 +297,14 @@ namespace NextScan.Core
         {
             if (device == null)
                 return NsResult.Fail(NsError.HostProtocolViolation, "No device selected.", "");
+
+            // eSCL runs in-process; no host spawn, no shared-memory hop.
+            if (device.Transport == Transport.Escl)
+            {
+                NextScan.Net.EsclDriver escl = new NextScan.Net.EsclDriver();
+                escl.Log = Log;
+                return escl.Scan(device.NativeId, settings, onFrame);
+            }
 
             string exe = (device.HostBitness == 32) ? Host32Path : Host64Path;
             if (!File.Exists(exe))

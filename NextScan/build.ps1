@@ -94,7 +94,7 @@ function Build-Target {
     Write-Host "  ok" -ForegroundColor Green
 }
 
-$engine = @("Core\*.cs", "Twain\*.cs", "Wia\*.cs")
+$engine = @("Core\*.cs", "Twain\*.cs", "Wia\*.cs", "Net\*.cs")
 $host_  = $engine + @("Host\*.cs")
 
 # The two host processes are the same code compiled for both bitnesses - that is

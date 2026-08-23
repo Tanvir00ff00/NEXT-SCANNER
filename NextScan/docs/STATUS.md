@@ -31,6 +31,7 @@ Network ScanGear 2**.
 | TWAIN simulator skeleton, well-behaved personality (§18.3, ADR-0002) | ✅ **verified** | `nsprobe` enumerates + scans it end-to-end on both hosts |
 | Imaging core port onto `RawImage` (§9, HANDOFF §8.5) | ✅ **verified** | detection + 16-bit curves, `nsimgtest` 10/10 |
 | Confidence-scored deskew policy (§3.5) | ✅ **verified** | 4 estimators + source-aware limits, `nsimgtest` 18/18 |
+| eSCL transport: client + in-process driver + manual add (§7.4) | ✅ **verified** | 9/9 against the eSCL simulator (`tests\run_escl.ps1`) |
 
 **The headline result: NAPS2 is no longer required.** The existing
 `scanhelper.exe` UI now acquires images through the native engine, and falls back
@@ -75,7 +76,34 @@ port is not wired into the app yet (deliberately: switch after the §3.5
 policy lands, then remove the duplication); per-channel curve LUTs; deskew
 confidence policy; whitening/deskew application on 16-bit data.
 
+### eSCL transport (plan section 7.4) — first increment
+
+`src/Net/`: `EsclClient` (raw-socket HTTP/1.1 with the 503 retry policy — 30×1 s
+for NextDocument, 10 for everything else; job URI used verbatim from the
+Location header), `EsclDriver` (capabilities XML → `DeviceCapabilities`, scan
+settings XML in 1/300-inch units, JPEG pages → `RawImage` with the requested
+dpi stamped, job DELETE on cancel/finish), `MdnsDiscovery` (raw mDNS on UDP
+5353 with name-compression parsing, honours the `rs=` TXT key). eSCL runs
+**in-process** in the broker (pure managed, plan §5.1); `NEXTSCAN_ESCL_URL`
+pins a manual device, which also disables the 1.5 s mDNS listen window.
+
+**Verified against the simulator** (`tests/escl_sim.py` + `tests/run_escl.ps1`,
+9/9): probe/caps/scan through the real nsprobe→broker→driver path; caps decode
+(8.5×11.7 bed, three colour modes, 75/150/300 dpi); two-page jobs; a 503 storm
+survived at the documented ~1 s-per-retry cost; UUID and integer job ids.
+
+**Not verified / not built — honest gaps:** no real eSCL device was available:
+the two printers on this LAN carry `/eSCL/*` endpoints (everything else 404s)
+but currently answer HTTP 500 to every eSCL request — service present, not
+serving; re-test when they are in a scanning-ready state. mDNS discovery is
+untested against a real responder (no `_uscan._tcp` advertiser on this LAN)
+and its 1.5 s window still runs serially inside `Probe()` — parallelising it
+with the host probes is the next optimisation. Not started: `octet-stream`
+raw transfer (needs a real device to pin the vendor-specific pixel layout),
+WSD, TLS pinning UI, HTTPS self-signed confirmation flow.
+
 ### Deskew policy (plan section 3.5)
+
 
 `src/Core/Deskew.cs`: four independent estimators — text-baseline projection
 variance (±30° at 0.1°), Hough over the paper's own boundary edges, Sobel
