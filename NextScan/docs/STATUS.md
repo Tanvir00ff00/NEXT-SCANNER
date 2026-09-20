@@ -2505,11 +2505,11 @@ someone looks for a scanner.
 | BGR to RGB, and 65535 to 32768 | `--ps-selftest`, on a known frame |
 | Pixels, size, orientation, resolution | the owner, in Photoshop, on a real scan |
 | Page by page turn taking | `--ps-selftest`, against the real publisher |
-| **Several items into several documents** | **not yet, in Photoshop** |
+| Several items into several documents | the owner, in Photoshop, four items at once |
 
-The last row matters. Everything below the line about multiple pages is tested
-against a stand in for the plug-in, not against Photoshop, for a reason given at
-the end.
+Photoshop 2026 does honour `acquireAgain`: four items on the glass opened as four
+documents. Worth recording, because Adobe permits a host to ignore it and there
+was no way to find out from this end.
 
 ### Photoshop 16 bit is 0..32768
 
@@ -2589,13 +2589,33 @@ confirmed to fail when the thing they test is removed:
   reader now records what went wrong and releases the publisher either way, so
   a broken turn reads as one line instead of hanging the next ten minutes.
 
+### The first band, and how the arithmetic found it
+
+Every document opened with a white strip across the top and the top of the item
+simply missing. The proportions gave it away before the code did: the strip was
+about 43% and 38% of the two small photographs, but only about 14% of a passport
+page. A fixed fraction would have meant a scaling fault. A fraction that shrinks
+as the item grows means a fixed number of rows -- and the band is 256 rows.
+
+Start was calling Deliver. Photoshop reads the description at Start, builds the
+document, and asks for rows through Continue; a band handed over at Start is
+dropped, and the cursor it moved meant the first Continue began one band in. So
+the top 256 rows of every page were never written, which is what an untouched
+Photoshop canvas looks like.
+
+Adobe's own import sample ends its Start handler with `gStuff->data = NULL`
+(`samplecode/import/gradientimport`, `DoStart`). `Deliver` now has exactly one
+caller, in Continue, and the reason is written where the next person will
+change it.
+
+This was present in the single page handover too, and passed as working. One
+page gives nothing to compare against; four items of different heights side by
+side made the ratio visible. The lesson is the one from section 11 in a new
+costume: a measurement that varies with something is worth more than a
+measurement that only looks wrong.
+
 ### Still outstanding
 
-- **Multiple items have not been through Photoshop.** The turn taking is
-  tested, `acquireAgain` is not, and it cannot be tested from this end: Adobe
-  permits a host to ignore it. It needs a bed with several documents on it and
-  someone watching how many windows open. If Photoshop declines, the fallback
-  is one document carrying every item, which is a larger change than this one.
 - **No ICC profile.** The frame reserves room and the plug-in assigns rather
   than converts, which is the right behaviour once there is something to
   assign. The capture does not carry a profile yet; pulling one from WIA or

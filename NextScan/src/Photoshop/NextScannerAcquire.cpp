@@ -420,7 +420,20 @@ DLLExport MACPASCAL void PluginMain(const int16 selector,
             if (!RangeAgrees()) { EndSession(true); *result = errPlugInHostInsufficient; return; }
 
             Describe(acquireRecord);
-            Deliver(acquireRecord);
+
+            /* Start describes the image and hands over no pixels. Photoshop
+               reads the description here, builds the document, and then asks
+               for the rows through Continue -- so a band delivered at Start is
+               dropped, and the cursor it moved means the first Continue starts
+               one band in. That cost the top 256 rows of every page: the
+               document opened with a white strip and the top of the item
+               simply missing.
+
+               Adobe's own import sample ends its Start handler with
+               gStuff->data = NULL for this reason (samplecode/import/
+               gradientimport, DoStart). Deliver is called from Continue and
+               from nowhere else. */
+            acquireRecord->data = NULL;
             break;
         }
 
