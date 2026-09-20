@@ -2715,3 +2715,110 @@ dragging a corner, clicking to probe for an item -- also assume. If
 drawn outlines still follow it correctly, but those two helpers would be measured
 against the wrong rectangle. The same gap already existed on the scan path; it
 has not been closed, only written down.
+
+## 14. The installer, 2026-09-20 night
+
+`NextScanSetup-<version>.exe`, one file, built by `build_installer.ps1`. It
+carries the application, both scanner hosts, the ONNX runtime, the two
+segmentation models and the Photoshop connector, and it is also its own
+uninstaller.
+
+### Why it is not NSIS
+
+It was NSIS first, and that version worked. It was replaced because the default
+chrome cannot be animated without fighting Win32 dialogs for every pixel, and a
+stock installer shell would be the one screen that looks like something else --
+and it is the screen everybody sees first.
+
+The application already owns a control library: `StudioTheme.cs`,
+`StudioIcons.cs` and `StudioControls.cs`, with a shared 60 Hz `Animator`. Those
+three files were checked and they **compile standalone** -- nothing in them
+reaches back into the shell -- so the installer is built from the same Theme,
+the same pills and toggles, and the same ticker. The look is not imitated; it is
+the same code.
+
+The trade is real and worth stating: an NSIS installer runs anywhere, and this
+one needs the .NET Framework 4.8 before it can draw anything. That is the same
+thing the application needs, so it costs nothing in practice, and the check runs
+before a single file is written rather than surfacing as a crash.
+
+### The window
+
+The motif is the product: a sheet on the glass with the sensor line travelling
+down it, trailing a gradient, which is the same idea as the scan animation in
+the canvas. The marks on the sheet are deliberately uneven -- evenly spaced bars
+read as a loading placeholder, which is the one thing an installer must not look
+like.
+
+Borderless, with Windows 11 asked to round the corners through
+`DWMWA_WINDOW_CORNER_PREFERENCE` (older Windows ignores it and stays square, as
+it does everywhere else on those versions). The progress bar carries a sheen on
+its leading edge tied to the same sweep as the sensor line, so the two read as
+one mechanism. The finishing tick is drawn on rather than faded in: the stroke
+is what says finished.
+
+The window cannot be closed while it is working. Stopping halfway through
+writing fifty-eight megabytes into Program Files leaves something that is
+neither installed nor absent.
+
+### One binary, two jobs
+
+Running it installs; running it with `--uninstall` removes. A second binary
+would drift out of step with the first, which is the usual way an uninstaller
+comes to leave things behind. Because a program cannot delete the file it is
+running from, an uninstall started from inside the installation folder copies
+itself to the temporary folder and continues from there, so the folder can go
+whole.
+
+Scans, settings and crop diagnostics are left alone. An uninstaller that takes
+someone's scans with it is a worse fault than one that leaves a folder behind.
+
+### The part that is mostly checks
+
+Most of `build_installer.ps1` verifies rather than builds, and that is the
+reason it exists. The models and `onnxruntime.dll` are gitignored. Nothing in
+the ordinary build fails without them. An installer built without them does not
+fail either -- it produces a working application that detects worse on every
+machine it reaches, with nothing on screen to say why.
+
+So the payload is checked by name and by size before anything is packaged. The
+sizes are floors rather than equalities: they catch a truncated download, an
+empty placeholder or a Git LFS pointer, without breaking every time something is
+legitimately rebuilt a few bytes larger. Confirmed by removing the encoder and
+watching the build refuse.
+
+`sam_mask_decoder_single.onnx` is not shipped: nothing in the code opens it.
+That is 16.5 MB saved. The file list is written out rather than globbed from
+`bin\`, which also keeps the test programs, the TWAIN simulator and the stray
+build leftovers in that folder out of the payload.
+
+### Registry, and the hive that matters
+
+The installer runs elevated, so anything it writes to HKCU lands in the
+elevating administrator's hive rather than the operator's. It writes
+`HKLM\Software\NextScan\AppPath`, and the acquire module now reads HKCU first
+and HKLM second: HKCU is rewritten by the application on every run so it follows
+a rebuild or a move, while HKLM is the answer before the application has ever
+been started -- and picking Next Scanner from Photoshop's Import menu is an
+ordinary first thing to do after installing.
+
+HKLM is read from the 64-bit view explicitly, because a value written on one
+side of the registry redirector is invisible from the other.
+
+### What was verified, and how
+
+| | |
+| --- | --- |
+| The payload is embedded and intact | loaded the resource out of the built exe and extracted it: nine files, byte-exact, `models\` layout preserved |
+| The window renders | compiled a preview build from the same sources and screenshotted it |
+| The sensor line actually moves | two captures 900 ms apart, compared: frames differ |
+| Version resource | `NextScan Studio`, `1.0.0.0` |
+| Install, registry, shortcuts, Photoshop | the owner, by running it |
+
+### Still outstanding
+
+- **Not code signed.** SmartScreen warns until it is, and that warning is what a
+  buyer sees before anything else. `build_installer.ps1` prints the `signtool`
+  line; the certificate has to be bought.
+- **No upgrade path.** Installing over an existing installation overwrites it,
+  which works, but nothing checks versions or offers to repair.

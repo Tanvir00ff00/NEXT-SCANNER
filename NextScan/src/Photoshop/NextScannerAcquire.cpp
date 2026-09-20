@@ -84,26 +84,53 @@ namespace
        means the plug-in keeps working when the application is moved and needs
        no installer step of its own. The sweep afterwards is only for the case
        where the application has never been run on this machine. */
-    std::wstring FindApplication()
+    /* Reads Software\NextScan\AppPath from one hive, and only accepts it if
+       what it names is actually there. */
+    bool AppPathFrom(HKEY hive, std::wstring& found)
     {
         HKEY key;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\NextScan", 0, KEY_READ, &key) == ERROR_SUCCESS)
-        {
-            wchar_t buffer[MAX_PATH]; DWORD size = sizeof(buffer); DWORD type = 0;
-            LONG got = RegQueryValueExW(key, L"AppPath", NULL, &type,
-                                        reinterpret_cast<LPBYTE>(buffer), &size);
-            RegCloseKey(key);
-            if (got == ERROR_SUCCESS && type == REG_SZ)
-            {
-                buffer[min(size / sizeof(wchar_t), (DWORD)(MAX_PATH - 1))] = 0;
-                if (GetFileAttributesW(buffer) != INVALID_FILE_ATTRIBUTES) return buffer;
-            }
-        }
+        if (RegOpenKeyExW(hive, L"Software\\NextScan", 0, KEY_READ | KEY_WOW64_64KEY, &key)
+            != ERROR_SUCCESS) return false;
 
+        wchar_t buffer[MAX_PATH];
+        DWORD size = sizeof(buffer) - sizeof(wchar_t);   /* room to terminate */
+        DWORD type = 0;
+        LONG got = RegQueryValueExW(key, L"AppPath", NULL, &type,
+                                    reinterpret_cast<LPBYTE>(buffer), &size);
+        RegCloseKey(key);
+
+        if (got != ERROR_SUCCESS || type != REG_SZ) return false;
+        buffer[size / sizeof(wchar_t)] = 0;
+        if (GetFileAttributesW(buffer) == INVALID_FILE_ATTRIBUTES) return false;
+
+        found = buffer;
+        return true;
+    }
+
+    std::wstring FindApplication()
+    {
+        /* Two hives, in this order, for two different reasons.
+
+           The application rewrites its own path under HKCU on every run, so
+           that one follows a rebuild or a move and is the more current answer.
+           The installer writes HKLM for every user on the machine, which is
+           what answers before the application has ever been started -- and
+           picking Next Scanner from Photoshop's Import menu is a perfectly
+           ordinary first thing to do after installing.
+
+           HKLM is read from the 64 bit view explicitly. This module is 64 bit
+           but the installer that wrote the value need not have been, and a
+           value written on one side of the registry redirector is invisible
+           from the other. */
+        std::wstring found;
+        if (AppPathFrom(HKEY_CURRENT_USER, found)) return found;
+        if (AppPathFrom(HKEY_LOCAL_MACHINE, found)) return found;
+
+        /* Last resort, for a copy that was never installed and never run. */
         const wchar_t* guesses[] =
         {
-            L"C:\\PS_Fix\\NextScan\\bin\\NextScanner.exe",
-            L"C:\\Program Files\\NextScan\\NextScanner.exe"
+            L"C:\\Program Files\\NextScan Studio\\NextScanner.exe",
+            L"C:\\PS_Fix\\NextScan\\bin\\NextScanner.exe"
         };
         for (int i = 0; i < _countof(guesses); i++)
             if (GetFileAttributesW(guesses[i]) != INVALID_FILE_ATTRIBUTES) return guesses[i];
