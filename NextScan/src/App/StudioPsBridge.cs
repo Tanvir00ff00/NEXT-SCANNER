@@ -98,7 +98,7 @@ namespace NextScan.App
         /// Returns false when there is nobody to hand them to, which is the
         /// ordinary case: the application is usually started by a person.
         /// </summary>
-        internal static bool PublishAll(IList<RawImage> pages, Action<string> log)
+        internal static bool PublishAll(IList<RawImage> pages, byte[] icc, Action<string> log)
         {
             if (!Serving || pages == null || pages.Count == 0) return false;
 
@@ -123,7 +123,7 @@ namespace NextScan.App
                             return i > 0;
                         }
 
-                        if (!Publish(pages[i], i + 1, pages.Count, ready, done, cancel, log))
+                        if (!Publish(pages[i], i + 1, pages.Count, icc, ready, done, cancel, log))
                             return i > 0;
                     }
                 }
@@ -144,7 +144,7 @@ namespace NextScan.App
         /// while the plug-in may still hold the last one open, and two mappings
         /// cannot share a name.
         /// </summary>
-        static bool Publish(RawImage page, int pageIndex, int pageCount,
+        static bool Publish(RawImage page, int pageIndex, int pageCount, byte[] icc,
                             EventWaitHandle ready, EventWaitHandle done, EventWaitHandle cancel,
                             Action<string> log)
         {
@@ -157,7 +157,9 @@ namespace NextScan.App
                 int sampleBytes = bits / 8;
                 int stride = page.Width * channels * sampleBytes;
 
-                byte[] icc = null;                 // reserved: the capture carries none yet
+                // Carried on every page rather than once per scan: each page is
+                // its own mapping and its own document, and a few kilobytes is
+                // nothing beside the pixels.
                 int iccBytes = icc == null ? 0 : icc.Length;
 
                 long pixelBytes = (long)stride * page.Height;
@@ -249,7 +251,7 @@ namespace NextScan.App
                        false, EventResetMode.ManualReset, CancelPrefix + Session))
             {
                 done.Set();                     // nobody is reading; do not wait for them
-                Publish(page, 1, 1, ready, done, cancel, null);
+                Publish(page, 1, 1, Fake(), ready, done, cancel, null);
             }
 
             // Publish disposes the mapping on the way out, so the check runs on
@@ -275,6 +277,7 @@ namespace NextScan.App
                     check("pixelBytes", view.ReadInt32(48), page.Stride * H);
                     check("iccBytes", view.ReadInt32(52), 0);
                     check("pixelOffset", view.ReadInt32(56), HeaderBytes);
+                    check("iccOffset when none", view.ReadInt32(60), 0);
                     check("pageIndex", view.ReadInt32(64), 1);
                     check("pageCount", view.ReadInt32(68), 1);
 
@@ -291,6 +294,38 @@ namespace NextScan.App
             }
 
             // Sixteen bit has to land in Photoshop's range, not the capture's.
+            // A frame that carries a profile. Until now iccBytes was always
+            // zero, so neither the writer nor the plug-in had ever run this
+            // path -- and a profile written to the wrong offset arrives as a
+            // document that claims to know what its colours mean.
+            byte[] fake = Fake();
+            long withIcc = HeaderBytes + (long)page.Stride * H + fake.Length;
+            using (MemoryMappedFile map = MemoryMappedFile.CreateNew(MappingPrefix + "icc", withIcc))
+            using (MemoryMappedViewAccessor view = map.CreateViewAccessor(0, withIcc))
+            {
+                WriteHeader(view, page, 3, 8, page.Stride, page.Stride * H, fake.Length, 1, 1);
+                WritePixels(view, page, 3, 8, page.Stride);
+                view.WriteArray(HeaderBytes + (long)page.Stride * H, fake, 0, fake.Length);
+
+                check("iccBytes with profile", view.ReadInt32(52), fake.Length);
+                check("iccOffset", view.ReadInt32(60), HeaderBytes + page.Stride * H);
+
+                byte[] back = new byte[fake.Length];
+                view.ReadArray(view.ReadInt32(60), back, 0, back.Length);
+
+                int same = 0;
+                for (int i = 0; i < back.Length; i++) if (back[i] == fake[i]) same++;
+                check("profile read back", same, fake.Length);
+                check("profile still a profile", IccProfile.IsProfile(back) ? 1 : 0, 1);
+            }
+
+            // And the real thing, which is what actually gets sent.
+            byte[] real = IccProfile.Srgb();
+            say(string.Format("  {0,-16} {1,-10} {2}", "sRGB profile",
+                              real == null ? 0 : real.Length,
+                              real == null ? "NOT ON THIS MACHINE - pages go untagged"
+                                           : "ok, " + real.Length + " bytes"));
+
             byte[] row = new byte[4];
             PutSixteen(row, 0, 65535);
             PutSixteen(row, 2, 0);
@@ -408,11 +443,27 @@ namespace NextScan.App
             reader.IsBackground = true;
             reader.Start();
 
-            PublishAll(pages, null);
+            PublishAll(pages, null, null);
             reader.Join(TimeSpan.FromSeconds(20));
 
             Session = null;
             return string.Join(" ", got.ToArray());
+        }
+
+        /// <summary>
+        /// A smallest possible thing that passes for a profile: the right
+        /// length in the right byte order, and the signature at offset 36.
+        /// Used by the self test so the profile path can be exercised without
+        /// depending on what is installed on the machine running it.
+        /// </summary>
+        static byte[] Fake()
+        {
+            byte[] p = new byte[132];
+            p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 132;      // size, big endian
+            p[36] = (byte)'a'; p[37] = (byte)'c';
+            p[38] = (byte)'s'; p[39] = (byte)'p';
+            for (int i = 40; i < p.Length; i++) p[i] = (byte)(i * 7);
+            return p;
         }
 
         /// <summary>Lets the plug-in stop waiting when the operator closes us.</summary>

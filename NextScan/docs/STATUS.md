@@ -2614,11 +2614,44 @@ side made the ratio visible. The lesson is the one from section 11 in a new
 costume: a measurement that varies with something is worth more than a
 measurement that only looks wrong.
 
+### What the colours mean
+
+Pages go across tagged sRGB. Untagged is not neutral: Photoshop reads the
+numbers as whatever its working space happens to be, or stops to ask once per
+document, and the answer changes from one machine to the next.
+
+sRGB is an assumption, so it is logged as one rather than implied. It is a
+defensible one -- eSCL scans are sRGB by specification, and consumer flatbeds
+target it -- but it is not the device's own answer, and the device cannot give
+one yet:
+
+| path | why not |
+| --- | --- |
+| eSCL | nothing to ask: sRGB by specification |
+| WIA | can name a profile (`WIA_IPA_ICM_PROFILE_NAME`, 4120) but runs in the out of process host |
+| TWAIN | `ICAP_ICCPROFILE` is declared in `TwainTypes.cs` and never used; same host boundary |
+
+Both need the host protocol extended, which is why this is the floor rather than
+the finished thing: when a device profile does arrive, it replaces sRGB at one
+call site.
+
+A profile is checked before it is attached, not trusted for having the right
+extension. An ICC header states its own length and carries `acsp` at offset 36;
+anything that fails either is dropped. Something truncated or mistyped, handed
+over as a profile, is worse than no profile at all -- it makes a document that
+claims to know what its colours mean and does not.
+
+`iccBytes` had been zero on every frame ever sent, so neither the writer nor the
+plug-in had run that path once. `--ps-selftest` now writes a profile, checks it
+lands at the offset the header declares, reads it back byte for byte, and
+confirms the real Windows sRGB profile loads.
+
+One trap found while testing it: `RecordLocation` ran before the `--ps-selftest`
+early exit, so any throwaway build pointed the registry -- and therefore the
+acquire module -- at itself for every scan afterwards. The self test now runs
+before anything is recorded anywhere.
+
 ### Still outstanding
 
-- **No ICC profile.** The frame reserves room and the plug-in assigns rather
-  than converts, which is the right behaviour once there is something to
-  assign. The capture does not carry a profile yet; pulling one from WIA or
-  TWAIN is separate work.
 - **Always a new document.** New layer and smart object targets, and the named
   pipe negotiation from the plan, are not implemented.

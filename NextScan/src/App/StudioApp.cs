@@ -42,12 +42,10 @@ namespace NextScan.App
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // The acquire module starts us with a session id when the operator
-            // picks File, Import, Next Scanner. Read before anything else, so
-            // the shell knows from the start that a scan has somewhere to go.
-            StudioPsBridge.ReadCommandLine(args);
-            StudioPsBridge.RecordLocation();
-
+            // Checked before anything is recorded anywhere. The self test is
+            // the one thing a throwaway build gets run for, and recording its
+            // location would point the acquire module at a scratch copy for
+            // every scan afterwards.
             foreach (string a in args)
                 if (string.Equals(a, "--ps-selftest", StringComparison.OrdinalIgnoreCase))
                 {
@@ -55,6 +53,12 @@ namespace NextScan.App
                     Console.WriteLine();
                     return StudioPsBridge.SelfTest(Console.WriteLine);
                 }
+
+            // The acquire module starts us with a session id when the operator
+            // picks File, Import, Next Scanner. Read before the shell is built,
+            // so it knows from the start that a scan has somewhere to go.
+            StudioPsBridge.ReadCommandLine(args);
+            StudioPsBridge.RecordLocation();
 
             StudioSettings settings = StudioSettings.Load();
 

@@ -4559,7 +4559,14 @@ namespace NextScan.App
                     PinStatus(pages.Count == 1
                               ? "Handing the scan to Photoshop…"
                               : "Handing " + pages.Count + " items to Photoshop…");
-                    StudioPsBridge.PublishAll(pages, Log);
+                    // What the numbers mean, said rather than left to whatever
+                    // Photoshop happens to assume. The device has not told us,
+                    // so this is sRGB and is logged as an assumption.
+                    byte[] icc = IccProfile.Srgb();
+                    Log(icc == null
+                        ? "no sRGB profile on this machine; pages go untagged"
+                        : "tagging pages sRGB (" + icc.Length + " bytes)");
+                    StudioPsBridge.PublishAll(pages, icc, Log);
                     BeginInvoke((MethodInvoker)delegate { Close(); });
                 }
                 else if (_settings.OpenInPhotoshop)
