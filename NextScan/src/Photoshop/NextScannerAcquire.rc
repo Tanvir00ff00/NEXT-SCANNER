@@ -1,0 +1,5 @@
+// The PiPL is what tells Photoshop this DLL is a plug-in, what kind it is and
+// where its entry point is. Newer Photoshop reads it straight from a JSON
+// resource, so no separate PiPL compiler is involved -- rc.exe embeds the file
+// as it stands and Photoshop parses it at load time.
+JSON_PIPL JSON "PiPLs.json"
