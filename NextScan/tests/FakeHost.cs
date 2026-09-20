@@ -1,0 +1,1 @@
+using System; using System.Threading; class FakeHost { static void Main(string[] args) { if(args.Length>0) Thread.Sleep(20000); Console.WriteLine("{\"type\":\"result\",\"ok\":true}"); } }

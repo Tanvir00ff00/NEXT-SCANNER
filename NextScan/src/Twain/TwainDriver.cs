@@ -9,6 +9,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
+using System.Text;
 using System.Windows.Forms;
 using NextScan.Core;
 
@@ -17,6 +19,15 @@ namespace NextScan.Twain
     public class TwainDriver
     {
         public Action<string> Log = delegate { };
+
+        /// <summary>
+        /// Polled while waiting for the source and between transfer strips.
+        /// Returning true stops the scan through the TWAIN state machine rather
+        /// than by killing the process, so the data source is disabled and closed
+        /// properly - an abandoned session leaves the lamp on and the next open
+        /// failing with MAXCONNECTIONS.
+        /// </summary>
+        public Func<bool> ShouldCancel;
 
         // ---------------------------------------------------------------- probe
         public List<DeviceDescriptor> Probe()
@@ -78,6 +89,7 @@ namespace NextScan.Twain
         public NsResult GetCapabilities(string productName, out DeviceCapabilities caps)
         {
             caps = new DeviceCapabilities();
+            EnsureCanonScanGearSettings(productName);
             using (TwainSession s = new TwainSession())
             {
                 s.Log = Log;
@@ -230,9 +242,97 @@ namespace NextScan.Twain
                                       ", CAP_DUPLEX: " + caps.SupportsDuplex +
                                       ", ICAP_LIGHTPATH: " + caps.SupportsFilm);
 
+            // ---- supported sizes ----
+            bool sizesIsRange;
+            List<double> rawSizes = s.CapGetValues(ICAP.SUPPORTEDSIZES, out sizesIsRange);
+            caps.RawCapabilityLog.Add("ICAP_SUPPORTEDSIZES: " + Join(rawSizes));
+            foreach (double sv in rawSizes)
+            {
+                string name = TwssToString((ushort)sv);
+                if (name != null && !caps.SupportedSizes.Contains(name))
+                    caps.SupportedSizes.Add(name);
+            }
+
             // ---- bed size ----
             caps.PhysicalWidthIn = s.CapGetCurrent(ICAP.PHYSICALWIDTH, 0);
             caps.PhysicalHeightIn = s.CapGetCurrent(ICAP.PHYSICALHEIGHT, 0);
+            if (caps.PhysicalWidthIn <= 0 || caps.PhysicalHeightIn <= 0)
+            {
+                bool r1, r2;
+                List<double> pwList = s.CapGetValues(ICAP.PHYSICALWIDTH, out r1);
+                List<double> phList = s.CapGetValues(ICAP.PHYSICALHEIGHT, out r2);
+                if (pwList.Count > 0 && pwList[0] > 0) caps.PhysicalWidthIn = pwList[0];
+                if (phList.Count > 0 && phList[0] > 0) caps.PhysicalHeightIn = phList[0];
+            }
+
+            // Try querying the hardware scan layout directly via DAT_IMAGELAYOUT
+            double defLeft, defTop, defRight, defBottom;
+            bool hasDefaultRegion = s.GetDefaultScanRegion(out defLeft, out defTop, out defRight, out defBottom);
+            if (hasDefaultRegion)
+            {
+                double w = Math.Abs(defRight - defLeft);
+                double h = Math.Abs(defBottom - defTop);
+                caps.RawCapabilityLog.Add(string.Format(CultureInfo.InvariantCulture,
+                    "IMAGELAYOUT default frame: {0:0.###} x {1:0.###} in", w, h));
+                if (w > 1.0 && h > 1.0)
+                {
+                    caps.PhysicalWidthIn = Math.Max(caps.PhysicalWidthIn, w);
+                    caps.PhysicalHeightIn = Math.Max(caps.PhysicalHeightIn, h);
+                }
+
+                // Probe whether the scanner hardware allows A3 or Legal
+                if (s.SetScanRegion(0, 0, 11.69, 16.54))
+                {
+                    double testL, testT, testR, testB;
+                    if (s.GetDefaultScanRegion(out testL, out testT, out testR, out testB))
+                    {
+                        double testW = Math.Abs(testR - testL);
+                        double testH = Math.Abs(testB - testT);
+                        caps.RawCapabilityLog.Add(string.Format(CultureInfo.InvariantCulture,
+                            "Probe A3 test region accepted: {0:0.###} x {1:0.###} in", testW, testH));
+                        if (testW >= 11.0 && testH >= 16.0)
+                        {
+                            caps.PhysicalWidthIn = Math.Max(caps.PhysicalWidthIn, testW);
+                            caps.PhysicalHeightIn = Math.Max(caps.PhysicalHeightIn, testH);
+                            if (!caps.SupportedSizes.Contains("A3")) caps.SupportedSizes.Add("A3");
+                            if (!caps.SupportedSizes.Contains("Legal")) caps.SupportedSizes.Add("Legal");
+                            if (!caps.SupportedSizes.Contains("Ledger")) caps.SupportedSizes.Add("Ledger");
+                        }
+                        else if (testH >= 13.5)
+                        {
+                            caps.PhysicalHeightIn = Math.Max(caps.PhysicalHeightIn, testH);
+                            if (!caps.SupportedSizes.Contains("Legal")) caps.SupportedSizes.Add("Legal");
+                        }
+                    }
+                }
+                else if (s.SetScanRegion(0, 0, 8.5, 14.0))
+                {
+                    double testL, testT, testR, testB;
+                    if (s.GetDefaultScanRegion(out testL, out testT, out testR, out testB))
+                    {
+                        double testH = Math.Abs(testB - testT);
+                        if (testH >= 13.5)
+                        {
+                            caps.PhysicalHeightIn = Math.Max(caps.PhysicalHeightIn, testH);
+                            if (!caps.SupportedSizes.Contains("Legal")) caps.SupportedSizes.Add("Legal");
+                        }
+                    }
+                }
+
+                // Restore original default layout
+                s.SetScanRegion(defLeft, defTop, defRight, defBottom);
+            }
+
+            // If the driver advertises larger paper sizes, ensure physical bed reflects it
+            if (caps.SupportedSizes.Contains("A3") || caps.SupportedSizes.Contains("Ledger"))
+            {
+                caps.PhysicalWidthIn = Math.Max(caps.PhysicalWidthIn, 11.69);
+                caps.PhysicalHeightIn = Math.Max(caps.PhysicalHeightIn, 16.54);
+            }
+            else if (caps.SupportedSizes.Contains("Legal"))
+            {
+                caps.PhysicalHeightIn = Math.Max(caps.PhysicalHeightIn, 14.0);
+            }
 
             // A scanner smaller than an inch does not exist. Rather than propagate a
             // nonsense value into the crop UI, fall back to Letter/A4 and say so.
@@ -283,6 +383,7 @@ namespace NextScan.Twain
         /// </summary>
         public NsResult Scan(string productName, ScanSettings settings, Func<RawImage, bool> onImage)
         {
+            EnsureCanonScanGearSettings(productName);
             using (TwainSession s = new TwainSession())
             {
                 s.Log = Log;
@@ -315,6 +416,13 @@ namespace NextScan.Twain
                         {
                             while (!s.XferReady && !s.CloseRequested)
                             {
+                                if (IsCancelled())
+                                {
+                                    Log("cancelled while waiting for the data source");
+                                    s.Cancel();
+                                    return NsResult.Fail(NsError.TwainCancelled, "Scan cancelled.", "");
+                                }
+
                                 Application.DoEvents();
                                 System.Threading.Thread.Sleep(10);
                                 if (sw.ElapsedMilliseconds > timeoutMs)
@@ -334,6 +442,7 @@ namespace NextScan.Twain
                             return NsResult.Fail(NsError.TwainCancelled, "Scan cancelled.", "");
                         }
 
+                        s.ShouldCancel = ShouldCancel;
                         r = s.TransferAll(onImage, settings.PageCount);
 
                         s.DisableSource();
@@ -346,6 +455,13 @@ namespace NextScan.Twain
                     }
                 }
             }
+        }
+
+        bool IsCancelled()
+        {
+            if (ShouldCancel == null) return false;
+            try { return ShouldCancel(); }
+            catch { return false; }
         }
 
         /// <summary>
@@ -422,12 +538,29 @@ namespace NextScan.Twain
             if (settings.UseDeviceAutoDeskew) s.CapSet(ICAP.AUTOMATICDESKEW, TWTY.BOOL, 1);
             if (settings.UseDeviceAutoCrop) s.CapSet(ICAP.AUTOMATICBORDERDETECTION, TWTY.BOOL, 1);
 
-            // 8. Scan region.
+            // 8. Scan region & Paper size.
             if (settings.HasRegion)
             {
                 s.SetScanRegion(settings.RegionLeftIn, settings.RegionTopIn,
                                 settings.RegionLeftIn + settings.RegionWidthIn,
                                 settings.RegionTopIn + settings.RegionHeightIn);
+            }
+            else
+            {
+                // When no explicit sub-region is specified, revert to the driver's native default scan region
+                double defL, defT, defR, defB;
+                if (s.GetDefaultScanRegion(out defL, out defT, out defR, out defB))
+                    s.SetScanRegion(defL, defT, defR, defB);
+            }
+
+            if (!string.IsNullOrEmpty(settings.PaperSize) && settings.PaperSize != "Maximum")
+            {
+                ushort twss = StringToTwss(settings.PaperSize);
+                if (twss != TWSS.NONE)
+                {
+                    double actualTwss;
+                    s.CapSet(ICAP.SUPPORTEDSIZES, TWTY.UINT16, twss, out actualTwss);
+                }
             }
 
             // 9. Enhancement.
@@ -440,6 +573,101 @@ namespace NextScan.Twain
 
             // 11. Suppress the driver's own progress window when we are driving.
             if (!settings.ShowVendorUi) s.CapSet(CAP.INDICATORS, TWTY.BOOL, 0);
+        }
+
+        static string TwssToString(ushort code)
+        {
+            switch (code)
+            {
+                case TWSS.NONE: return "Maximum";
+                case TWSS.A4: return "A4";
+                case TWSS.JISB5: return "B5";
+                case TWSS.USLETTER: return "Letter";
+                case TWSS.USLEGAL: return "Legal";
+                case TWSS.A5: return "A5";
+                case TWSS.B4: return "B4";
+                case TWSS.B6: return "B6";
+                case TWSS.USLEDGER: return "Ledger";
+                case TWSS.USEXECUTIVE: return "Executive";
+                case TWSS.A3: return "A3";
+                case TWSS.B3: return "B3";
+                case TWSS.A6: return "A6";
+                case TWSS.C4: return "C4";
+                case TWSS.C5: return "C5";
+                case TWSS.C6: return "C6";
+                case TWSS.BUSINESSCARD: return "Card";
+                default: return null;
+            }
+        }
+
+        static ushort StringToTwss(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return TWSS.NONE;
+            switch (name)
+            {
+                case "A4": return TWSS.A4;
+                case "B5": return TWSS.JISB5;
+                case "Letter": return TWSS.USLETTER;
+                case "Legal": return TWSS.USLEGAL;
+                case "A5": return TWSS.A5;
+                case "B4": return TWSS.B4;
+                case "Ledger": return TWSS.USLEDGER;
+                case "A3": return TWSS.A3;
+                case "A6": return TWSS.A6;
+                case "Card": return TWSS.BUSINESSCARD;
+                default: return TWSS.NONE;
+            }
+        }
+
+        /// <summary>
+        /// Canon Color Network ScanGear 2 default driver profile has AutoDetect=1 enabled,
+        /// which causes the imageRUNNER copier hardware to detect small documents (like A4)
+        /// placed on the platen glass and truncate the acquisition to A4, ignoring larger
+        /// requested scan regions. This method configures the driver to respect application
+        /// scan regions and bypass hardware auto-detect truncation.
+        /// </summary>
+        static void EnsureCanonScanGearSettings(string productName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(productName) || productName.IndexOf("ScanGear", StringComparison.OrdinalIgnoreCase) < 0)
+                    return;
+
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), @"Canon\ScanGearIR");
+                if (!Directory.Exists(dir)) return;
+
+                // 1. Ensure AppNameDisabledAutoDetect in SGIRCFG.INI
+                string cfgPath = Path.Combine(dir, "SGIRCFG.INI");
+                if (File.Exists(cfgPath))
+                {
+                    string text = File.ReadAllText(cfgPath, Encoding.Unicode);
+                    string target = "AppNameDisabledAutoDetect=";
+                    int idx = text.IndexOf(target, StringComparison.OrdinalIgnoreCase);
+                    if (idx >= 0)
+                    {
+                        int endLine = text.IndexOfAny(new char[] { '\r', '\n' }, idx);
+                        string line = (endLine >= 0) ? text.Substring(idx, endLine - idx) : text.Substring(idx);
+                        if (!line.Contains("NextScan"))
+                        {
+                            string newLine = line + ",NextScan.Host32,NextScan.Host64,NextScanner,nsprobe";
+                            text = text.Substring(0, idx) + newLine + ((endLine >= 0) ? text.Substring(endLine) : "");
+                            File.WriteAllText(cfgPath, text, Encoding.Unicode);
+                        }
+                    }
+                }
+
+                // 2. Ensure AutoDetect=0 in user-specific SGIRCFG_*.ini
+                foreach (string file in Directory.GetFiles(dir, "SGIRCFG_*.ini"))
+                {
+                    string content = File.ReadAllText(file, Encoding.Default);
+                    if (content.Contains("AutoDetect=1"))
+                    {
+                        content = content.Replace("AutoDetect=1", "AutoDetect=0");
+                        File.WriteAllText(file, content, Encoding.Default);
+                    }
+                }
+            }
+            catch { }
         }
     }
 

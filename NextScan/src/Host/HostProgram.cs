@@ -156,6 +156,24 @@ namespace NextScan.Host
             string transport = Get(a, "transport", "twain").ToLowerInvariant();
             string settingsB64 = Get(a, "settings", "");
 
+            // Opened, never created: the parent owns the event. If it is missing we
+            // simply cannot be cancelled gracefully, and the parent falls back to
+            // killing this process.
+            string cancelName = Get(a, "cancel-event", "");
+            EventWaitHandle cancelEvent = null;
+            if (cancelName.Length > 0)
+            {
+                try { cancelEvent = EventWaitHandle.OpenExisting(cancelName); }
+                catch (Exception ex) { LogLine("cancel event unavailable: " + ex.Message); }
+            }
+
+            Func<bool> shouldCancel = delegate ()
+            {
+                if (cancelEvent == null) return false;
+                try { return cancelEvent.WaitOne(0); }
+                catch { return false; }
+            };
+
             ScanSettings settings = new ScanSettings();
             if (settingsB64.Length > 0)
             {
@@ -195,12 +213,14 @@ namespace NextScan.Host
             {
                 WiaDriver wia = new WiaDriver();
                 wia.Log = LogLine;
+                wia.ShouldCancel = shouldCancel;
                 r = wia.Scan(device, settings, onImage);
             }
             else
             {
                 TwainDriver twain = new TwainDriver();
                 twain.Log = LogLine;
+                twain.ShouldCancel = shouldCancel;
                 r = twain.Scan(device, settings, onImage);
             }
 

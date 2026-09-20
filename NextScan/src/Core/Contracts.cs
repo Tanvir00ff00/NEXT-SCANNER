@@ -98,6 +98,7 @@ namespace NextScan.Core
         /// <summary>Physical bed size in inches (0 when the device will not say).</summary>
         public double PhysicalWidthIn;
         public double PhysicalHeightIn;
+        public List<string> SupportedSizes = new List<string>();
 
         public bool HasBrightness, HasContrast;
         public double BrightnessMin, BrightnessMax, ContrastMin, ContrastMax;
@@ -115,6 +116,8 @@ namespace NextScan.Core
             foreach (PaperSource s in Sources) sr.Add(s.ToString());
             List<object> raw = new List<object>();
             foreach (string s in RawCapabilityLog) raw.Add(s);
+            List<object> sz = new List<object>();
+            foreach (string s in SupportedSizes) sz.Add(s);
 
             return new JsonObj()
                 .Set("resolutions", res)
@@ -133,6 +136,7 @@ namespace NextScan.Core
                 .Set("supportsHiddenUi", SupportsHiddenUi)
                 .Set("physicalWidthIn", PhysicalWidthIn)
                 .Set("physicalHeightIn", PhysicalHeightIn)
+                .Set("supportedSizes", sz)
                 .Set("hasBrightness", HasBrightness)
                 .Set("hasContrast", HasContrast)
                 .Set("brightnessMin", BrightnessMin)
@@ -165,6 +169,10 @@ namespace NextScan.Core
             List<object> raw = o.Arr("rawCapabilityLog");
             if (raw != null)
                 foreach (object s in raw) c.RawCapabilityLog.Add(Convert.ToString(s));
+
+            List<object> sz = o.Arr("supportedSizes");
+            if (sz != null)
+                foreach (object s in sz) c.SupportedSizes.Add(Convert.ToString(s));
 
             c.MinResolution = o.Int("minResolution", 75);
             c.MaxResolution = o.Int("maxResolution", 1200);
@@ -212,6 +220,7 @@ namespace NextScan.Core
 
         /// <summary>Preview passes drop resolution hard and skip post-processing.</summary>
         public bool IsPreview;
+        public string PaperSize = "Maximum";
 
         public bool HasRegion
         {
@@ -235,7 +244,8 @@ namespace NextScan.Core
                 .Set("duplex", Duplex)
                 .Set("brightness", Brightness)
                 .Set("contrast", Contrast)
-                .Set("isPreview", IsPreview);
+                .Set("isPreview", IsPreview)
+                .Set("paperSize", PaperSize);
         }
 
         public static ScanSettings FromJson(JsonObj o)
@@ -257,6 +267,7 @@ namespace NextScan.Core
             s.Brightness = o.Dbl("brightness", 0);
             s.Contrast = o.Dbl("contrast", 0);
             s.IsPreview = o.Bool("isPreview", false);
+            s.PaperSize = o.Str("paperSize", "Maximum");
             return s;
         }
     }

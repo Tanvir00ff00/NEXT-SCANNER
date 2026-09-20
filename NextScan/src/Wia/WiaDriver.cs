@@ -20,6 +20,9 @@ namespace NextScan.Wia
     {
         public Action<string> Log = delegate { };
 
+        /// <summary>Polled from the transfer callback; see WiaTransferSink.</summary>
+        public Func<bool> ShouldCancel;
+
         /// <summary>Image format negotiated with the driver for the current scan.</summary>
         public Guid TransferFormat = Guid.Empty;
 
@@ -339,8 +342,13 @@ namespace NextScan.Wia
                 if (settings.Source == PaperSource.FeederDuplex || settings.Duplex) handlingSelect |= WiaConst.DUPLEX;
                 WriteInt(devProps, WiaConst.WIA_DPS_DOCUMENT_HANDLING_SELECT, handlingSelect);
 
-                if (wantFeeder && settings.PageCount > 0)
-                    WriteInt(devProps, WiaConst.WIA_IPS_PAGES, settings.PageCount);
+                // WIA_IPS_PAGES is 0 for "every page in the feeder", which is what
+                // PageCount <= 0 means here too. Leaving the property alone is not
+                // the same thing: the WIA default is a single page, so an
+                // until-empty batch would have stopped after the first sheet.
+                if (wantFeeder)
+                    WriteInt(devProps, WiaConst.WIA_IPS_PAGES,
+                             settings.PageCount > 0 ? settings.PageCount : 0);
 
                 children = EnumerateChildren(root, IntPtr.Zero);
                 if (children.Count == 0)
@@ -370,11 +378,16 @@ namespace NextScan.Wia
 
                 WiaTransferSink sink = new WiaTransferSink();
                 sink.Log = Log;
+                sink.ShouldCancel = ShouldCancel;
+                sink.Transfer = transfer;
 
                 // ACQUIRE_CHILDREN is what makes a duplex/ADF batch return every page
                 // instead of only the first.
                 int flags = wantFeeder ? WiaConst.WIA_TRANSFER_ACQUIRE_CHILDREN : 0;
                 hr = transfer.Download(flags, sink);
+
+                if (sink.Cancelled)
+                    return NsResult.Fail(NsError.WiaCancelled, "Scan cancelled.", "");
 
                 if (hr != WiaConst.S_OK && sink.Streams.Count == 0)
                     return FailFromHr(hr, "Download");
@@ -648,12 +661,40 @@ namespace NextScan.Wia
     public class WiaTransferSink : IWiaTransferCallback
     {
         public Action<string> Log = delegate { };
+
+        /// <summary>Polled on every status callback the driver makes.</summary>
+        public Func<bool> ShouldCancel;
+
+        /// <summary>
+        /// Set so the sink can ask the driver to stop rather than only refusing
+        /// data: returning E_ABORT alone leaves some drivers finishing the page
+        /// before they notice.
+        /// </summary>
+        public IWiaTransfer Transfer;
+
         public readonly List<MemoryIStream> Streams = new List<MemoryIStream>();
         public int LastPercent;
         public bool Cancelled;
 
         public int TransferCallback(int lFlags, ref WiaTransferParams p)
         {
+            if (!Cancelled && ShouldCancel != null)
+            {
+                bool stop = false;
+                try { stop = ShouldCancel(); }
+                catch { }
+
+                if (stop)
+                {
+                    Cancelled = true;
+                    Log("WIA transfer cancelled");
+                    // Ask the driver to stop as well: returning E_ABORT alone leaves
+                    // some drivers finishing the page before they notice.
+                    try { if (Transfer != null) Transfer.Cancel(); }
+                    catch { }
+                }
+            }
+
             switch (p.lMessage)
             {
                 case WiaConst.IT_MSG_STATUS:

@@ -16,6 +16,7 @@ $nsprobe = Join-Path $root "bin\nsprobe.exe"
 $sim = Join-Path $root "tests\escl_sim.py"
 $port = 8951
 $failed = 0
+New-Item -ItemType Directory -Path (Join-Path $root "out") -Force | Out-Null
 
 if (-not (Test-Path $nsprobe)) { throw "nsprobe.exe not built. Run .\build.ps1 first." }
 if (-not (Test-Path $sim)) { throw "missing fixture: $sim" }
@@ -78,6 +79,20 @@ try {
     $secs = $sw.Elapsed.TotalSeconds
     Check "scan_survives_503_storm" ($scan -match "48x32") ($scan)
     Check "storm_cost_about_2s" ($secs -ge 2.0 -and $secs -le 8.0) ("elapsed " + [math]::Round($secs,1) + "s (2 x 1s retries expected)")
+}
+finally {
+    if ($simProc -and -not $simProc.HasExited) { Stop-Process -Id $simProc.Id -Force }
+    Remove-Item Env:NEXTSCAN_ESCL_URL -ErrorAction SilentlyContinue
+}
+
+# Absolute job URLs and chunked bodies exercise real printer HTTP variants.
+$env:NEXTSCAN_ESCL_URL = "http://127.0.0.1:$port/eSCL"
+$simProc = Start-Sim @{ "ESCL_SIM_CHUNKED" = "1"; "ESCL_SIM_ABSOLUTE" = "1" }
+try {
+    $caps = & $nsprobe caps "eSCL" --transport escl 2>&1 | Out-String
+    Check "chunked_capabilities" ($caps -match "8\.5 x 11\.7") $caps
+    $scan = & $nsprobe scan "eSCL" --transport escl --dpi 150 2>&1 | Out-String
+    Check "chunked_page_absolute_job_url" ($scan -match "48x32" -and $scan -match "Done: 1 page") $scan
 }
 finally {
     if ($simProc -and -not $simProc.HasExited) { Stop-Process -Id $simProc.Id -Force }

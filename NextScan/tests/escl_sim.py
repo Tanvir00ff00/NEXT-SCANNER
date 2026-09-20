@@ -68,9 +68,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if location:
             self.send_header("Location", location)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
+        chunked = os.environ.get("ESCL_SIM_CHUNKED") == "1"
+        self.send_header("Transfer-Encoding" if chunked else "Content-Length", "chunked" if chunked else str(len(data)))
         self.end_headers()
-        if data:
+        if chunked:
+            for start in range(0, len(data), 19):
+                chunk = data[start:start+19]
+                self.wfile.write(("%x\r\n" % len(chunk)).encode() + chunk + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        elif data:
             self.wfile.write(data)
 
     def do_GET(self):
@@ -105,7 +111,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         jid = str(uuid.uuid4()) if JOB_STYLE == "uuid" else str(len(JOBS) + 1)
         path = "/eSCL/ScanJobs/" + jid
         JOBS[path] = {"fetched": 0, "storm_left": STORM}
-        self._send(201, location=path)
+        location = ("http://" + self.headers["Host"] + path) if os.environ.get("ESCL_SIM_ABSOLUTE") == "1" else path
+        self._send(201, location=location)
 
     def do_DELETE(self):
         JOBS.pop(self.path.split("?")[0], None)

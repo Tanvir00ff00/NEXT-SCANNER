@@ -253,8 +253,7 @@ namespace NextScan.Net
                     img.PageIndex = page++;
 
                     bool keepGoing = true;
-                    try { keepGoing = onImage(img); }
-                    catch (Exception ex) { Log("onImage threw: " + ex.Message); }
+                    if (onImage != null) keepGoing = onImage(img);
 
                     if (!keepGoing || (settings.PageCount > 0 && page >= settings.PageCount))
                     {

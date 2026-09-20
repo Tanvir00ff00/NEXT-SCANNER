@@ -341,6 +341,32 @@ namespace NextScan.Twain
         public const ushort MILLIMETERS = 6;
     }
 
+    /// <summary>ICAP_SUPPORTEDSIZES values.</summary>
+    public static class TWSS
+    {
+        public const ushort NONE        = 0;
+        public const ushort A4          = 1;
+        public const ushort JISB5       = 2;
+        public const ushort USLETTER    = 3;
+        public const ushort USLEGAL     = 4;
+        public const ushort A5          = 5;
+        public const ushort ISOB4       = 6;
+        public const ushort B4          = 6;
+        public const ushort B6          = 7;
+        public const ushort ISOB6       = 7;
+        public const ushort USLEDGER    = 9;
+        public const ushort USEXECUTIVE = 10;
+        public const ushort A3          = 11;
+        public const ushort ISOB3       = 12;
+        public const ushort B3          = 12;
+        public const ushort A6          = 13;
+        public const ushort C4          = 14;
+        public const ushort C5          = 15;
+        public const ushort C6          = 16;
+        public const ushort BUSINESSCARD = 53;
+        public const ushort MAXSIZE     = 54;
+    }
+
     /// <summary>ICAP_PIXELFLAVOR values.</summary>
     public static class TWPF
     {

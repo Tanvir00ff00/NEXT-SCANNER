@@ -60,15 +60,8 @@ namespace NextScan.Core
         /// <summary>Directory holding NextScan.Host32.exe / NextScan.Host64.exe.</summary>
         public string HostDirectory;
 
-        /// <summary>
-        /// Host processes this broker spawned. Hosts are one-shot by design, so any
-        /// NextScan.Host32/64 process that this broker did NOT spawn is a leftover
-        /// from a previous (crashed, killed, or orphaned) run - and a leftover that
-        /// still holds a TWAIN data source open keeps the scanner locked for every
-        /// later attempt, which in the field looks like "scanner in use by another
-        /// program" until a reboot. Children are also killed when THIS process
-        /// exits, because Windows does not reap child processes on parent death.
-        /// </summary>
+        // Only reap hosts owned by this process. A foreign host may belong to
+        // another active Studio/CLI instance, not an orphan (2026-09-07 audit).
         static readonly List<int> ChildPids = new List<int>();
         static readonly object ChildLock = new object();
         static bool _exitHookRegistered;
@@ -120,53 +113,6 @@ namespace NextScan.Core
             try { System.Diagnostics.Debug.WriteLine("[DeviceBroker] " + msg); } catch { }
         }
 
-        /// <summary>
-        /// Hosts being spawned right now. When Probe() runs its two host probes
-        /// in parallel, one RunHost's stale-kill pass would race the other's
-        /// spawn (a host is only tracked as OUR child after Process.Start
-        /// returns) and could kill a perfectly fresh sibling. So the stale sweep
-        /// only runs when no other spawn is in flight - the sequential Scan/Caps
-        /// paths always qualify, and Probe() does its own sweep up front before
-        /// opening the parallel window.
-        /// </summary>
-        static int _spawnsInFlight;
-
-        /// <summary>
-        /// Kills every NextScan.Host32/64 process this broker did not spawn itself.
-        /// Called before each host run: hosts are stateless one-shot workers, so a
-        /// foreign instance can only be garbage from an earlier run - usually one
-        /// that was watchdog-killed mid-transfer (TerminateProcess never runs the
-        /// vendor driver's CloseDS) and whose driver-side lock is exactly what
-        /// blocks the next scan with TWCC_MAXCONNECTIONS.
-        /// </summary>
-        void KillStaleHosts()
-        {
-            int[] ours;
-            lock (ChildLock) { ours = ChildPids.ToArray(); }
-
-            foreach (string name in new string[] { "NextScan.Host32", "NextScan.Host64" })
-            {
-                Process[] procs;
-                try { procs = Process.GetProcessesByName(name); }
-                catch { continue; }
-                foreach (Process p in procs)
-                {
-                    bool isOurs = false;
-                    foreach (int pid in ours) if (pid == p.Id) { isOurs = true; break; }
-                    if (isOurs) continue;
-
-                    try
-                    {
-                        Log("killing stale host process " + name + " (pid " + p.Id + ") left over from an earlier run");
-                        p.Kill();
-                        p.WaitForExit(3000);
-                    }
-                    catch { }
-                    finally { try { p.Dispose(); } catch { } }
-                }
-            }
-        }
-
         static string ResolveHostDirectory()
         {
             List<string> candidates = new List<string>();
@@ -201,10 +147,6 @@ namespace NextScan.Core
         public List<ScannerEntry> Probe()
         {
             List<DeviceDescriptor> all = new List<DeviceDescriptor>();
-
-            // Sweep for leftovers BEFORE opening the parallel window, so the two
-            // host probes and the mDNS browse below never race the killer.
-            KillStaleHosts();
 
             // All three transports probe in parallel: the two host processes
             // (~0.4 s each, serial before) and the mDNS listen window used to add
@@ -319,8 +261,14 @@ namespace NextScan.Core
         public NsResult Scan(DeviceDescriptor device, ScanSettings settings,
                              Func<RawImage, bool> onFrame, Action<string, int> onProgress)
         {
-            if (device == null)
-                return NsResult.Fail(NsError.HostProtocolViolation, "No device selected.", "");
+            return ScanAttempt(device, settings, onFrame, onProgress, true);
+        }
+
+        NsResult ScanAttempt(DeviceDescriptor device, ScanSettings settings,
+                             Func<RawImage, bool> onFrame, Action<string, int> onProgress, bool allowReset)
+        {
+            if (device == null || settings == null)
+                return NsResult.Fail(NsError.HostProtocolViolation, "No device or scan settings selected.", "");
 
             // eSCL runs in-process; no host spawn, no shared-memory hop.
             if (device.Transport == Transport.Escl)
@@ -343,6 +291,7 @@ namespace NextScan.Core
                           " --settings " + b64;
 
             int pages = 0;
+            NsResult deliveryFailure = null;
             // Vendor drivers are slow and a network copier can take minutes; the host
             // has its own watchdog, this is the outer backstop.
             int timeout = settings.IsPreview ? 180000 : 600000;
@@ -357,13 +306,23 @@ namespace NextScan.Core
                         onProgress("Receiving page " + (f.PageIndex + 1) + "...", 70);
 
                     RawImage img = ReadFrame(f);
-                    if (img == null) { Log("could not map frame " + f.ShmName); return true; }
+                    if (img == null)
+                    {
+                        deliveryFailure = NsResult.Fail(NsError.HostProtocolViolation,
+                            "Could not read a complete scanner frame.", "Try scanning again.");
+                        return false;
+                    }
 
                     pages++;
                     if (onFrame != null)
                     {
                         try { return onFrame(img); }
-                        catch (Exception ex) { Log("onFrame threw: " + ex.Message); }
+                        catch (Exception ex)
+                        {
+                            deliveryFailure = NsResult.Fail(NsError.HostProtocolViolation,
+                                "Could not receive the scanned page: " + ex.Message, "Try scanning again.");
+                            return false;
+                        }
                     }
                 }
                 else if (type == "progress" && onProgress != null)
@@ -373,6 +332,7 @@ namespace NextScan.Core
                 return true;
             });
 
+            if (deliveryFailure != null) return deliveryFailure;
             if (run.Result.Ok && pages == 0)
                 return NsResult.Fail(NsError.HostProtocolViolation,
                     "The scanner host finished without delivering a page.", "Try scanning again.");
@@ -382,7 +342,7 @@ namespace NextScan.Core
             // On the failure codes a wedged device produces, power-cycle the USB
             // node through the elevated helper task and try ONCE more. Disable
             // with NEXTSCAN_USB_RESET=0.
-            if (!run.Result.Ok && LooksLikeDeviceWedge(run.Result) && UsbResetEnabled())
+            if (allowReset && pages == 0 && !run.Result.Ok && LooksLikeDeviceWedge(run.Result) && UsbResetEnabled())
             {
                 Log("scan failed with " + run.Result.Code + " - attempting USB device reset");
                 UsbReset.Log = Log;
@@ -394,7 +354,7 @@ namespace NextScan.Core
                     // under a second. Give it a settle window first.
                     Log("device reset succeeded - settling 8s, then retrying the scan once");
                     Thread.Sleep(8000);
-                    NsResult retry = Scan(device, settings, onFrame, onProgress);
+                    NsResult retry = ScanAttempt(device, settings, onFrame, onProgress, false);
                     if (retry.Ok) return retry;
                     Log("scan still failing after reset: " + retry.Message);
                     return retry;
@@ -434,7 +394,8 @@ namespace NextScan.Core
         {
             try
             {
-                return Environment.GetEnvironmentVariable("NEXTSCAN_USB_RESET") != "0";
+                return string.IsNullOrEmpty(Environment.GetEnvironmentVariable("NEXTSCAN_TWAIN_DSM")) &&
+                       Environment.GetEnvironmentVariable("NEXTSCAN_USB_RESET") != "0";
             }
             catch { return true; }
         }
@@ -457,7 +418,9 @@ namespace NextScan.Core
 
                     int pixelOffset = view.ReadInt32(76);
                     long pixelLength = view.ReadInt64(80);
-                    if (pixelLength <= 0 || pixelLength > int.MaxValue) return null;
+                    if (pixelOffset < 128 || pixelLength <= 0 || pixelLength > int.MaxValue ||
+                        pixelOffset > view.Capacity || pixelLength > view.Capacity - pixelOffset ||
+                        pixelLength != (long)f.Height * f.Stride) return null;
 
                     RawImage img = new RawImage();
                     img.Width = f.Width;
@@ -471,7 +434,7 @@ namespace NextScan.Core
                     img.Side = f.Side;
                     img.Pixels = new byte[pixelLength];
                     view.ReadArray(pixelOffset, img.Pixels, 0, (int)pixelLength);
-                    return img;
+                    return img.IsValid ? img : null;
                 }
             }
             catch (Exception ex)
@@ -505,6 +468,67 @@ namespace NextScan.Core
         /// buffer on the channel we are not reading - a failure this codebase has hit
         /// before, and one that presents as a scanner that "randomly hangs".
         /// </summary>
+        // ---------------------------------------------------------------- cancel
+        //
+        // Cancellation is a cross-process problem: the driver is running inside a
+        // host we cannot call into, and the control channel only flows outwards
+        // (ADR-0001). A named event solves it without adding a back channel - the
+        // host polls it between transfer strips and stops the TWAIN/WIA session
+        // cleanly, which matters because an abandoned session leaves the lamp on
+        // and the next open failing with MAXCONNECTIONS.
+        //
+        // Killing the host still works and is still the backstop, because a driver
+        // wedged inside a vendor DLL will never reach the poll.
+        readonly object _cancelLock = new object();
+        EventWaitHandle _cancelEvent;
+        Process _activeScan;
+        volatile bool _cancelRequested;
+
+        /// <summary>Name of the event handed to the host for the current scan.</summary>
+        string _cancelEventName;
+
+        /// <summary>True while a scan is running and can be cancelled.</summary>
+        public bool ScanInProgress
+        {
+            get { lock (_cancelLock) { return _activeScan != null; } }
+        }
+
+        /// <summary>
+        /// Asks the running scan to stop. Returns false when nothing was running.
+        /// Signals first and only kills if the host does not exit in time.
+        /// </summary>
+        public bool CancelScan()
+        {
+            Process proc;
+            EventWaitHandle evt;
+
+            lock (_cancelLock)
+            {
+                proc = _activeScan;
+                evt = _cancelEvent;
+                if (proc == null) return false;
+                _cancelRequested = true;
+            }
+
+            Log("cancel requested");
+            try { if (evt != null) evt.Set(); } catch { }
+
+            // Give the host a chance to close the data source properly. Four
+            // seconds is comfortably longer than one memory-transfer strip and
+            // short enough that the user does not think the button did nothing.
+            try
+            {
+                if (!proc.WaitForExit(4000))
+                {
+                    Log("host did not stop within 4s - killing it");
+                    TryKill(proc);
+                }
+            }
+            catch { TryKill(proc); }
+
+            return true;
+        }
+
         HostRun RunHost(string exe, string args, int timeoutMs, Func<JsonObj, bool> onMessage)
         {
             HostRun run = new HostRun();
@@ -515,19 +539,6 @@ namespace NextScan.Core
                 return run;
             }
 
-            // A leftover host from an earlier run may still hold the driver; clear
-            // it before spawning so this run cannot lose the race for the device.
-            // The FIRST spawn of a wave does the sweep WHILE HOLDING THE LOCK:
-            // releasing between "decide to sweep" and "sweep done" let a sibling
-            // thread spawn + get killed by the still-running sweep (found as a
-            // flaky 1-in-5 missing device on the parallel probe, 2026-08-23).
-            lock (ChildLock)
-            {
-                _spawnsInFlight++;
-                if (_spawnsInFlight == 1) KillStaleHosts();
-            }
-            try
-            {
             Process p = null;
             bool cancelled = false;
             StringBuilder stderr = new StringBuilder();
@@ -544,6 +555,24 @@ namespace NextScan.Core
 
                 p = new Process();
                 p.StartInfo = psi;
+
+                bool isScan = args.StartsWith("scan", StringComparison.OrdinalIgnoreCase);
+                if (isScan)
+                {
+                    lock (_cancelLock)
+                    {
+                        _cancelRequested = false;
+                        _cancelEventName = "NextScan.Cancel." + Guid.NewGuid().ToString("N");
+                        try
+                        {
+                            _cancelEvent = new EventWaitHandle(false, EventResetMode.ManualReset, _cancelEventName);
+                        }
+                        catch { _cancelEvent = null; _cancelEventName = null; }
+                    }
+
+                    if (_cancelEventName != null)
+                        psi.Arguments = args + " --cancel-event " + _cancelEventName;
+                }
 
                 p.OutputDataReceived += delegate (object sender, DataReceivedEventArgs e)
                 {
@@ -575,6 +604,12 @@ namespace NextScan.Core
 
                 p.Start();
                 TrackChild(p);
+
+                // Publish the process so CancelScan can reach it. Without this the
+                // cancel path silently did nothing: CancelScan found no active scan
+                // and returned false, so neither the signal nor the kill ever ran.
+                if (isScan) { lock (_cancelLock) { _activeScan = p; } }
+
                 p.BeginOutputReadLine();
                 p.BeginErrorReadLine();
 
@@ -597,9 +632,11 @@ namespace NextScan.Core
                 lock (stderr) { err = stderr.ToString().Trim(); }
                 if (err.Length > 0) Log("[host stderr] " + err);
 
-                if (cancelled)
+                if (cancelled || _cancelRequested)
                 {
-                    run.Result = NsResult.Success();
+                    // A cancel is a normal outcome, not a failure: pages already
+                    // delivered stay valid and the caller reports it as stopped.
+                    run.Result = NsResult.Fail(NsError.TwainCancelled, "Scan cancelled.", "");
                 }
                 else if (run.ExitCode != 0 && (run.Result.Ok || !run.SawResult))
                 {
@@ -619,16 +656,19 @@ namespace NextScan.Core
             }
             finally
             {
+                lock (_cancelLock)
+                {
+                    if (ReferenceEquals(_activeScan, p)) _activeScan = null;
+                    if (_cancelEvent != null) { try { _cancelEvent.Close(); } catch { } _cancelEvent = null; }
+                    _cancelEventName = null;
+                }
+
                 if (p != null)
                 {
-                    UntrackChild(p);
+                    TryKill(p);
+                    try { UntrackChild(p); } catch (InvalidOperationException) { }
                     try { p.Dispose(); } catch { }
                 }
-            }
-            }
-            finally
-            {
-                lock (ChildLock) { _spawnsInFlight--; }
             }
         }
 

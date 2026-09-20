@@ -64,6 +64,16 @@ namespace NextScan.Twain
 
         public Action<string> Log = delegate { };
 
+        /// <summary>Polled between pages and between memory-transfer strips.</summary>
+        public Func<bool> ShouldCancel;
+
+        bool IsCancelled()
+        {
+            if (ShouldCancel == null) return false;
+            try { return ShouldCancel(); }
+            catch { return false; }
+        }
+
         /// <summary>Last condition code fetched from the DS, for diagnostics.</summary>
         public ushort LastConditionCode { get; private set; }
 
@@ -474,7 +484,20 @@ namespace NextScan.Twain
                         TW_ONEVALUE ov = (TW_ONEVALUE)Marshal.PtrToStructure(locked, typeof(TW_ONEVALUE));
                         itemType = ov.ItemType;
                         LastItemType = itemType;
+                        byte b0 = Marshal.ReadByte(locked, 0);
+                        byte b1 = Marshal.ReadByte(locked, 1);
+                        byte b2 = Marshal.ReadByte(locked, 2);
+                        byte b3 = Marshal.ReadByte(locked, 3);
+                        byte b4 = Marshal.ReadByte(locked, 4);
+                        byte b5 = Marshal.ReadByte(locked, 5);
+                        byte b6 = Marshal.ReadByte(locked, 6);
+                        byte b7 = Marshal.ReadByte(locked, 7);
                         double v = DecodeItem(locked + 2, ov.ItemType, 0);
+                        if (cap == 0x1111 || cap == 0x1112) // PHYSICALWIDTH or PHYSICALHEIGHT
+                        {
+                            Log(string.Format("CAP 0x{0:x4} ONEVALUE: type={1} raw={2:X2} {3:X2} {4:X2} {5:X2} {6:X2} {7:X2} dec={8}",
+                                cap, ov.ItemType, b2, b3, b4, b5, b6, b7, v));
+                        }
                         values.Add(v);
                         current = v;
                         break;
@@ -740,6 +763,35 @@ namespace NextScan.Twain
             finally { Marshal.FreeHGlobal(p); }
         }
 
+        /// <summary>Queries the scanner's default or current bed scan region in inches.</summary>
+        public bool GetDefaultScanRegion(out double leftIn, out double topIn, out double rightIn, out double bottomIn)
+        {
+            leftIn = 0; topIn = 0; rightIn = 0; bottomIn = 0;
+            IntPtr p = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(TW_IMAGELAYOUT)));
+            try
+            {
+                // In TWAIN, MSG_RESET explicitly returns the Source's maximum possible acquisition area
+                ushort rc = DsEntry(DG.IMAGE, DAT.IMAGELAYOUT, MSG.RESET, p);
+                if (rc != TWRC.SUCCESS && rc != TWRC.CHECKSTATUS)
+                    rc = DsEntry(DG.IMAGE, DAT.IMAGELAYOUT, MSG.GETDEFAULT, p);
+                if (rc != TWRC.SUCCESS && rc != TWRC.CHECKSTATUS)
+                    rc = DsEntry(DG.IMAGE, DAT.IMAGELAYOUT, MSG.GET, p);
+
+                if (rc == TWRC.SUCCESS || rc == TWRC.CHECKSTATUS)
+                {
+                    TW_IMAGELAYOUT layout = (TW_IMAGELAYOUT)Marshal.PtrToStructure(p, typeof(TW_IMAGELAYOUT));
+                    leftIn = layout.Frame.Left.ToDouble();
+                    topIn = layout.Frame.Top.ToDouble();
+                    rightIn = layout.Frame.Right.ToDouble();
+                    bottomIn = layout.Frame.Bottom.ToDouble();
+                    return true;
+                }
+                return false;
+            }
+            catch { return false; }
+            finally { Marshal.FreeHGlobal(p); }
+        }
+
         // ---------------------------------------------------------------- enable / disable
         public NsResult EnableSource(bool showUi, bool modal, IntPtr hwnd)
         {
@@ -908,6 +960,13 @@ namespace NextScan.Twain
 
             while (pending > 0)
             {
+                if (IsCancelled())
+                {
+                    Log("cancelled before page " + (pageIndex + 1));
+                    ResetXfers();
+                    return NsResult.Fail(NsError.TwainCancelled, "Scan cancelled.", "");
+                }
+
                 TW_IMAGEINFO info;
                 if (!GetImageInfo(out info))
                 {
@@ -1059,6 +1118,15 @@ namespace NextScan.Twain
                     }
 
                     MemUnlock(buffer);
+
+                    // Between strips is the only safe place to abandon a transfer:
+                    // the DS is between calls, so the session can still be reset
+                    // cleanly rather than left mid-transfer.
+                    if (IsCancelled())
+                    {
+                        Log("cancelled mid-transfer after " + totalRows + " rows");
+                        return NsResult.Fail(NsError.TwainCancelled, "Scan cancelled.", "");
+                    }
 
                     if (rc != TWRC.SUCCESS && rc != TWRC.XFERDONE)
                     {

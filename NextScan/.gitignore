@@ -1,0 +1,9 @@
+tests/real/
+
+# Scanner output written beside the application during manual testing. These
+# are pages from the owner scanner, not source, and some contain identity
+# documents -- the same reason tests/real is ignored.
+scan_*.png
+scan_*.jpg
+scan_*.tif
+scan_*.pdf

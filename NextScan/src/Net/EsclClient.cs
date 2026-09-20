@@ -42,30 +42,29 @@ namespace NextScan.Net
             if (string.IsNullOrEmpty(baseUrl))
                 throw new ArgumentException("eSCL base URL is empty", "baseUrl");
 
-            string rest = baseUrl.Trim();
-            _tls = rest.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
-            int scheme = rest.IndexOf("://", StringComparison.Ordinal);
-            rest = scheme >= 0 ? rest.Substring(scheme + 3) : rest;
+            Uri uri;
+            string address = baseUrl.Trim();
+            if (address.IndexOf("://", StringComparison.Ordinal) < 0) address = "http://" + address;
+            if (!Uri.TryCreate(address, UriKind.Absolute, out uri) ||
+                (uri.Scheme != "http" && uri.Scheme != "https") || !string.IsNullOrEmpty(uri.UserInfo) ||
+                !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+                throw new ArgumentException("Invalid eSCL HTTP(S) URL", "baseUrl");
+            _tls = uri.Scheme == "https";
+            _host = uri.DnsSafeHost.Trim('[', ']');
+            _port = uri.Port;
+            _root = uri.AbsolutePath.TrimEnd('/');
+            if (_root.Length == 0) _root = "/eSCL";
 
-            int slash = rest.IndexOf('/');
-            string authority = slash >= 0 ? rest.Substring(0, slash) : rest;
-            _root = slash >= 0 ? rest.Substring(slash).TrimEnd('/') : "";
-            if (_tls) _port = 443; else _port = 80;
-            int colon = authority.IndexOf(':');
-            if (colon >= 0)
-            {
-                _host = authority.Substring(0, colon);
-                int p;
-                if (int.TryParse(authority.Substring(colon + 1), out p)) _port = p;
-            }
-            else _host = authority;
-
-            if (_root.Length == 0) _root = "/eSCL";   // rs= is not always "eSCL", but it is the default
         }
 
         public string BaseUrl
         {
-            get { return (_tls ? "https://" : "http://") + _host + ":" + _port + _root; }
+            get { return (_tls ? "https://" : "http://") + Authority + _root; }
+        }
+
+        string Authority
+        {
+            get { return (_host.IndexOf(':') >= 0 ? "[" + _host + "]" : _host) + ":" + _port; }
         }
 
         /// <summary>Fetches the capabilities document (retries transient failures).</summary>
@@ -99,7 +98,11 @@ namespace NextScan.Net
             if (status != 201 || string.IsNullOrEmpty(location))
                 throw new IOException("ScanJobs POST returned HTTP " + status +
                     (string.IsNullOrEmpty(location) ? " without a Location header" : ""));
-            return location;
+            Uri job = new Uri(new Uri(BaseUrl + "/ScanJobs"), location);
+            if (job.Scheme != (_tls ? "https" : "http") ||
+                !string.Equals(job.DnsSafeHost.Trim('[', ']'), _host, StringComparison.OrdinalIgnoreCase) || job.Port != _port)
+                throw new IOException("ScanJobs Location points to a different scanner");
+            return job.PathAndQuery;
         }
 
         /// <summary>
@@ -187,16 +190,16 @@ namespace NextScan.Net
                 Stream s = tcp.GetStream();
                 if (_tls)
                 {
-                    System.Net.Security.SslStream ssl = new System.Net.Security.SslStream(s, false,
-                        delegate { return true; });   // self-signed printer certs: accept and let the
-                                                     // caller pin per-device later (plan 7.4.2)
+                    // Validate the scanner certificate with the OS trust store. Silently
+                    // accepting every certificate exposes scanned documents to interception.
+                    System.Net.Security.SslStream ssl = new System.Net.Security.SslStream(s, false);
                     ssl.AuthenticateAsClient(_host);
                     s = ssl;
                 }
 
                 StringBuilder head = new StringBuilder();
                 head.Append(method).Append(' ').Append(path).Append(" HTTP/1.1\r\n");
-                head.Append("Host: ").Append(_host).Append("\r\n");
+                head.Append("Host: ").Append(Authority).Append("\r\n");
                 head.Append("Accept: */*\r\n");
                 head.Append("Connection: close\r\n");
                 head.Append("User-Agent: NextScan/1.0\r\n");
@@ -219,9 +222,7 @@ namespace NextScan.Net
                     byte[] buf = new byte[16384];
                     while (true)
                     {
-                        int n;
-                        try { n = s.Read(buf, 0, buf.Length); }
-                        catch (Exception) { break; }
+                        int n = s.Read(buf, 0, buf.Length);
                         if (n <= 0) break;
                         ms.Write(buf, 0, n);
                         if (ms.Length > 64 * 1024 * 1024) throw new IOException("eSCL response exceeds 64 MB");
@@ -236,13 +237,26 @@ namespace NextScan.Net
 
                     string[] lines = headers.Split(new[] { "\r\n" }, StringSplitOptions.RemoveEmptyEntries);
                     int status = 0;
+                    long contentLength = -1;
+                    bool chunked = false;
                     foreach (string line in lines)
                     {
                         if (status == 0 && line.StartsWith("HTTP/", StringComparison.Ordinal))
                         {
                             int sp = line.IndexOf(' ');
                             int code;
-                            if (sp > 0 && int.TryParse(line.Substring(sp + 1, 3), out code)) status = code;
+                            if (sp > 0 && line.Length >= sp + 4 && int.TryParse(line.Substring(sp + 1, 3), out code)) status = code;
+                        }
+                        else if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!long.TryParse(line.Substring(15).Trim(), out contentLength) || contentLength < 0)
+                                throw new IOException("Invalid HTTP Content-Length");
+                        }
+                        else if (line.StartsWith("Transfer-Encoding:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.Equals(line.Substring(18).Trim(), "chunked", StringComparison.OrdinalIgnoreCase))
+                                throw new IOException("Unsupported HTTP Transfer-Encoding");
+                            chunked = true;
                         }
                         else if (line.StartsWith("Location:", StringComparison.OrdinalIgnoreCase))
                         {
@@ -250,7 +264,40 @@ namespace NextScan.Net
                         }
                     }
                     if (status == 0) throw new IOException("no status line in response");
+                    if (chunked) body = DecodeChunks(body);
+                    else if (contentLength >= 0 && body.LongLength != contentLength)
+                        throw new IOException("Truncated or invalid HTTP body");
                     return status;
+                }
+            }
+        }
+
+        static byte[] DecodeChunks(byte[] bytes)
+        {
+            using (MemoryStream output = new MemoryStream())
+            {
+                int pos = 0;
+                while (true)
+                {
+                    int end = pos;
+                    while (end + 1 < bytes.Length && !(bytes[end] == 13 && bytes[end + 1] == 10)) end++;
+                    if (end + 1 >= bytes.Length) throw new IOException("Missing HTTP chunk size");
+                    string line = Encoding.ASCII.GetString(bytes, pos, end - pos).Split(';')[0];
+                    int size;
+                    if (!int.TryParse(line, System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture, out size) || size < 0)
+                        throw new IOException("Invalid HTTP chunk size");
+                    pos = end + 2;
+                    if (size == 0)
+                    {
+                        if (pos + 1 >= bytes.Length) throw new IOException("Truncated HTTP chunk terminator");
+                        return output.ToArray();
+                    }
+                    if (size > bytes.Length - pos - 2) throw new IOException("Truncated HTTP chunk");
+                    output.Write(bytes, pos, size);
+                    pos += size;
+                    if (bytes[pos] != 13 || bytes[pos + 1] != 10) throw new IOException("Invalid HTTP chunk delimiter");
+                    pos += 2;
                 }
             }
         }

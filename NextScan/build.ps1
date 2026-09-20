@@ -1,4 +1,4 @@
-# =============================================================================
+﻿# =============================================================================
 # NextScan Studio - build script
 # Plan ref: MASTER_PLAN section 19.5.
 #
@@ -58,20 +58,23 @@ $refs = @(
 Write-Host "NextScan Studio build" -ForegroundColor Cyan
 Write-Host "  compiler: $csc"
 
+# A build must not terminate a live scan or discard unsaved session pages.
+# Fail before replacing any outputs if this checkout is currently running.
+$running = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and ([IO.Path]::GetDirectoryName($_.Path) -eq $bin) } catch { $false }
+}
+if ($running) { throw "Close programs running from $bin before building: $($running.Name -join ', ')" }
+
 if ($Clean -and (Test-Path $bin)) {
     Write-Host "  cleaning bin\" -ForegroundColor DarkGray
-    Remove-Item "$bin\*" -Force -Recurse -ErrorAction SilentlyContinue
+    $resolvedBin = [IO.Path]::GetFullPath($bin)
+    if ($resolvedBin -ne [IO.Path]::GetFullPath((Join-Path $root 'bin'))) { throw "Unexpected build output path" }
+    Get-ChildItem -LiteralPath $resolvedBin -Force | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -Recurse }
 }
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null }
 
-# Kill anything holding the outputs open, or the link step fails with a lock.
-foreach ($p in @("NextScan.Host32","NextScan.Host64","nsprobe","NextScanner")) {
-    Get-Process $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-}
-Start-Sleep -Milliseconds 200
-
 function Build-Target {
-    param([string]$Name, [string]$Out, [string]$Platform, [string]$Kind, [string[]]$Sources, [string]$EntryPoint)
+    param([string]$Name, [string]$Out, [string]$Platform, [string]$Kind, [string[]]$Sources, [string]$EntryPoint, [string]$Icon)
 
     $files = @()
     foreach ($s in $Sources) {
@@ -83,6 +86,7 @@ function Build-Target {
     $args = @("-nologo", "-target:$Kind", "-platform:$Platform", "-out:$Out",
               "-unsafe", "-langversion:7.3", "-optimize+", "-warn:3") + $refs
     if ($EntryPoint) { $args += "-main:$EntryPoint" }
+    if ($Icon -and (Test-Path $Icon)) { $args += "-win32icon:$Icon" }
     $args += $files
 
     Write-Host ("  building {0,-22} ({1}, {2})" -f $Name, $Platform, $Kind) -NoNewline
@@ -109,9 +113,36 @@ Build-Target -Name "nsprobe"         -Out "$bin\nsprobe.exe"         -Platform "
 Build-Target -Name "nsimgtest"       -Out "$bin\nsimgtest.exe"       -Platform "anycpu" -Kind "exe" `
              -Sources ($engine + @("Tools\NsImgTest.cs")) -EntryPoint "NextScan.Tools.NsImgTest"
 
-# Library form, so the existing Photoshop bridge (scanhelper.exe) can drop NAPS2
-# and drive the native engine instead.
+# Cancellation tests (plan 13.4): graceful stop, kill fallback, recovery.
+Build-Target -Name "nscanceltest"   -Out "$bin\nscanceltest.exe"   -Platform "anycpu" -Kind "exe" `
+             -Sources ($engine + @("Tools\NsCancelTest.cs")) -EntryPoint "NextScan.Tools.NsCancelTest"
+
+# Auto crop tests (plan 8.1): runs the engine's own self-test, then independent
+# cases written against the specification rather than beside the code.
+Build-Target -Name "nscroptest"     -Out "$bin\nscroptest.exe"     -Platform "anycpu" -Kind "exe" `
+             -Sources ($engine + @("Tools\NsCropTest.cs", "Tools\RegionSplitter.cs")) -EntryPoint "NextScan.Tools.NsCropTest"
+
+# Export and batch tests (plan 11.1, 12): naming, PDF and TIFF containers,
+# blank detection, document separation.
+Build-Target -Name "nsexporttest"   -Out "$bin\nsexporttest.exe"   -Platform "anycpu" -Kind "exe" `
+             -Sources ($engine + @("Tools\NsExportTest.cs")) -EntryPoint "NextScan.Tools.NsExportTest"
+
+# ONNX interop and segmentation (plan: model-assisted detection). x64 because
+# the native runtime it binds to is, and the check it runs is worth nothing if
+# it silently loads a different architecture.
+Build-Target -Name "nsonnxtest"     -Out "$bin\nsonnxtest.exe"     -Platform "x64" -Kind "exe" `
+             -Sources ($engine + @("Tools\NsOnnxTest.cs")) -EntryPoint "NextScan.Tools.NsOnnxTest"
+
 Build-Target -Name "NextScan.Engine" -Out "$bin\NextScan.Engine.dll" -Platform "anycpu" -Kind "library" -Sources $engine
+
+# Dedicated standalone studio application (Master Plan section 13)
+$app_ = $engine + @("App\*.cs")
+$appIcon = Join-Path $src "App\NextScanner.ico"
+Build-Target -Name "NextScanner"     -Out "$bin\NextScanner.exe"     -Platform "anycpu" -Kind "winexe" `
+             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon
+
+# Deploy NextScan.Engine.dll to the parent directory for scanhelper compatibility
+Copy-Item "$bin\NextScan.Engine.dll" (Join-Path (Split-Path -Parent $root) "NextScan.Engine.dll") -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "Output in $bin" -ForegroundColor Green

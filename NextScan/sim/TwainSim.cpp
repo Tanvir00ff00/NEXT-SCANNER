@@ -192,6 +192,7 @@ enum SimPersonality
     PERS_CRASH7,         // access violation on the first DAT_IMAGEMEMXFER (state 7)
     PERS_DUPLEX,         // feeder+duplex: two pages, back side rotated 180 degrees
     PERS_BUSY,           // first OPENDS refuses with TWCC_MAXCONNECTIONS, retry wins
+    PERS_SLOW,           // delays every strip, so a scan can be cancelled mid-flight
 };
 
 enum SimPattern
@@ -272,6 +273,7 @@ static void ReadConfig()
         else if (!_stricmp(pers, "refusesui")) S.personality = PERS_REFUSESUI;
         else if (!_stricmp(pers, "setlies"))   S.personality = PERS_SETLIES;
         else if (!_stricmp(pers, "hang"))      S.personality = PERS_HANG;
+        else if (!_stricmp(pers, "slow"))      S.personality = PERS_SLOW;
         else if (!_stricmp(pers, "crash7"))    S.personality = PERS_CRASH7;
         else if (!_stricmp(pers, "duplex"))    S.personality = PERS_DUPLEX;
         else if (!_stricmp(pers, "busy"))      S.personality = PERS_BUSY;
@@ -1111,6 +1113,14 @@ extern "C" TW_UINT16 TW_CALL DSM_Entry(
         {
             Logf("IMAGEMEMXFER crashing deliberately (personality=crash7)");
             *(volatile int*)0 = 0x0BADF00D;
+        }
+
+        // A real 600 dpi page takes a minute or more, which is the window in
+        // which a user actually reaches for Cancel. Reproducing that here makes
+        // cancellation testable without tying the test to hardware timing.
+        if (S.personality == PERS_SLOW)
+        {
+            Sleep(400);
         }
 
         TW_IMAGEMEMXFER* mx = (TW_IMAGEMEMXFER*)pData;

@@ -41,7 +41,11 @@ namespace NextScan.Core
         {
             get
             {
-                return Pixels != null && Width > 0 && Height > 0 && Stride > 0 &&
+                if ((Channels != 1 && Channels != 3) ||
+                    (BitsPerChannel != 1 && BitsPerChannel != 8 && BitsPerChannel != 16) ||
+                    (BitsPerChannel == 1 && Channels != 1)) return false;
+                long rowBytes = ((long)Width * BitsPerPixel + 7) / 8;
+                return Pixels != null && Width > 0 && Height > 0 && Stride >= rowBytes &&
                        Pixels.Length >= (long)Height * Stride;
             }
         }
@@ -181,6 +185,43 @@ namespace NextScan.Core
             finally { bmp.UnlockBits(bd); }
 
             return img;
+        }
+
+        /// <summary>Rotates or flips the raster image losslessly.</summary>
+        public RawImage Rotate(RotateFlipType type)
+        {
+            if (!IsValid) return null;
+            int transform = (int)type;
+            if (transform < 0 || transform > 7) throw new ArgumentOutOfRangeException("type");
+            int turns = transform & 3;
+            bool swap = (turns & 1) != 0;
+            RawImage rotated = new RawImage
+            {
+                Width = swap ? Height : Width, Height = swap ? Width : Height,
+                Channels = Channels, BitsPerChannel = BitsPerChannel,
+                XDpi = swap ? YDpi : XDpi, YDpi = swap ? XDpi : YDpi,
+                PageIndex = PageIndex, Side = Side
+            };
+            rotated.Stride = checked((int)(((long)rotated.Width * BitsPerPixel + 7) / 8));
+            rotated.Pixels = new byte[checked(rotated.Stride * rotated.Height)];
+            int sampleBytes = Channels * (BitsPerChannel / 8);
+            for (int y = 0; y < Height; y++)
+            for (int x = 0; x < Width; x++)
+            {
+                int dx = x, dy = y;
+                if (turns == 1) { dx = Height - 1 - y; dy = x; }
+                else if (turns == 2) { dx = Width - 1 - x; dy = Height - 1 - y; }
+                else if (turns == 3) { dx = y; dy = Width - 1 - x; }
+                if ((transform & 4) != 0) dx = rotated.Width - 1 - dx;
+                if (BitsPerChannel == 1)
+                {
+                    if ((Pixels[y * Stride + (x >> 3)] & (0x80 >> (x & 7))) != 0)
+                        rotated.Pixels[dy * rotated.Stride + (dx >> 3)] |= (byte)(0x80 >> (dx & 7));
+                }
+                else Buffer.BlockCopy(Pixels, y * Stride + x * sampleBytes,
+                                      rotated.Pixels, dy * rotated.Stride + dx * sampleBytes, sampleBytes);
+            }
+            return rotated;
         }
     }
 }
