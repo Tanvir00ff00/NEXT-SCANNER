@@ -89,6 +89,17 @@ namespace NextScan.App
         /// </summary>
         public bool IsBedView { get; private set; }
 
+        /// <summary>
+        /// The resolution to quote while showing the blank sheet.
+        ///
+        /// The sheet is a stand-in drawn at whatever size is cheap to allocate,
+        /// and quoting its own resolution told the operator the scan would be
+        /// 100 dpi when they had asked for 300. Nothing about a placeholder is
+        /// worth reporting except the size of the area, so the numbers beside it
+        /// describe what pressing Scan would actually produce.
+        /// </summary>
+        public double PlaceholderDpi;
+
         public PointF[] DetectedPolygon;
         public double DetectedAngle;
         public double DetectedConfidence = -1;
@@ -1155,9 +1166,17 @@ namespace NextScan.App
                 double inW = (_image.XDpi > 1) ? pxW / _image.XDpi : 0;
                 double inH = (_image.YDpi > 1) ? pxH / _image.YDpi : 0;
 
+                double quoted = _image.XDpi;
+                if (IsPlaceholder && PlaceholderDpi > 1)
+                {
+                    quoted = PlaceholderDpi;
+                    pxW = (int)Math.Round(inW * quoted);
+                    pxH = (int)Math.Round(inH * quoted);
+                }
+
                 string dims = string.Format(CultureInfo.InvariantCulture,
                     "{0:0.00} × {1:0.00} in     {2} × {3} px  @ {4:0} DPI",
-                    inW, inH, pxW, pxH, _image.XDpi);
+                    inW, inH, pxW, pxH, quoted);
                 if (!string.IsNullOrEmpty(ActivePaperLabel) && !full)
                     dims = ActivePaperLabel + "  •  " + dims;
 

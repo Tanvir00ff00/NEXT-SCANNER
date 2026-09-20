@@ -11,6 +11,8 @@
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Windows.Forms;
 
 namespace NextScan.App
@@ -260,7 +262,11 @@ namespace NextScan.App
 
             // The icon sits above the optical centre so the caption below does
             // not make the pair look bottom-heavy.
-            NsIcon.Draw(g, Icon, new RectangleF(Width / 2f - 10f, plate.Top + 8f, 20f, 20f), colour);
+            // The same small lift the footer icons have, so the rail does not
+            // feel like a different window from the panel beside it.
+            float grow = (float)(20f * (1.0 + 0.09 * HotAnim.Eased));
+            NsIcon.Draw(g, Icon, new RectangleF(Width / 2f - grow / 2f,
+                plate.Top + 8f + (20f - grow) / 2f - (float)(0.8 * HotAnim.Eased), grow, grow), colour);
 
             using (Font font = Theme.UiSemi(6.9f))
                 TextRenderer.DrawText(g, Caption, font,
@@ -289,9 +295,88 @@ namespace NextScan.App
     /// A small square icon button, for the view controls in the status bar and
     /// the chrome buttons in the title bar.
     /// </summary>
+    /// <summary>
+    /// The icon Photoshop itself uses, taken from the installed application.
+    ///
+    /// Drawn marks are fine for the verbs in this window -- fit, rotate, close
+    /// -- because those are ours. "Send this to Photoshop" is not a verb of
+    /// ours, it names somebody else's program, and the thing that names it
+    /// best is the icon that program already wears on the operator's own
+    /// desktop. Reading it off the executable also means nothing of Adobe's is
+    /// copied into this repository or shipped in the installer: if Photoshop
+    /// is not installed there is no icon to read and the drawn mark is used,
+    /// which is exactly the case where the drawn mark is the honest answer.
+    /// </summary>
+    public static class AppIcon
+    {
+        static bool _looked;
+        static Image _photoshop;
+
+        public static Image Photoshop
+        {
+            get
+            {
+                if (_looked) return _photoshop;
+                _looked = true;
+                try { _photoshop = FromExecutable(FindPhotoshop()); }
+                catch { _photoshop = null; }
+                return _photoshop;
+            }
+        }
+
+        static Image FromExecutable(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return null;
+            using (Icon small = Icon.ExtractAssociatedIcon(path))
+            {
+                if (small == null) return null;
+                // ExtractAssociatedIcon hands back a 32 pixel icon; drawing it
+                // larger than that is what makes an icon look cheap, so it is
+                // never asked to be.
+                using (Icon sized = new Icon(small, 32, 32))
+                    return sized.ToBitmap();
+            }
+        }
+
+        /// <summary>
+        /// The newest Photoshop on this machine. Newest rather than first,
+        /// because an operator who has upgraded has both, and the one they use
+        /// is the one they last installed.
+        /// </summary>
+        static string FindPhotoshop()
+        {
+            string[] roots =
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+            };
+
+            string best = null, bestName = null;
+            foreach (string root in roots)
+            {
+                string adobe = string.IsNullOrEmpty(root) ? null : Path.Combine(root, "Adobe");
+                if (adobe == null || !Directory.Exists(adobe)) continue;
+
+                foreach (string folder in Directory.GetDirectories(adobe, "Adobe Photoshop*"))
+                {
+                    string exe = Path.Combine(folder, "Photoshop.exe");
+                    if (!File.Exists(exe)) continue;
+                    string name = Path.GetFileName(folder);
+                    if (bestName == null || string.CompareOrdinal(name, bestName) > 0)
+                    { best = exe; bestName = name; }
+                }
+            }
+            return best;
+        }
+    }
+
     public class NsIconButton : NsBase
     {
         readonly Anim _on = new Anim(0);
+        readonly Anim _press = new Anim(0);
+
+        /// <summary>Draw this picture instead of a vector mark, when there is one.</summary>
+        public Image Picture;
 
         public string Icon = NsIcon.Fit;
 
@@ -302,6 +387,16 @@ namespace NextScan.App
 
         /// <summary>Turns the hover plate red, for a window close button.</summary>
         public Color DangerHover = Color.Empty;
+
+        /// <summary>
+        /// Show a resting plate, not only one on hover.
+        ///
+        /// For a button that sits beside a labelled one. On its own in a
+        /// toolbar an icon can afford to be bare, but next to "Preview" a bare
+        /// icon reads as an empty box rather than as the button it is, and the
+        /// operator has to hover over it to find out it was ever clickable.
+        /// </summary>
+        public bool Raised;
 
         bool _checked;
 
@@ -322,12 +417,34 @@ namespace NextScan.App
             Size = new Size(28, 22);
             Cursor = Cursors.Hand;
             Animator.Attach(this, _on);
+            Animator.Attach(this, _press);
         }
 
         protected override void OnClick(EventArgs e)
         {
             if (Toggle) Checked = !Checked;
             base.OnClick(e);
+        }
+
+        // A press that only changes colour reads as a picture of a button. The
+        // icon dipping under the finger and coming back is what makes it read
+        // as a thing that was actually pushed.
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            _press.Target = 1; Animator.Kick();
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            _press.Target = 0; Animator.Kick();
+            base.OnMouseUp(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            _press.Target = 0; Animator.Kick();
+            base.OnMouseLeave(e);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -342,19 +459,32 @@ namespace NextScan.App
             Rectangle plate = new Rectangle(1, 1, Math.Max(1, Width - 2), Math.Max(1, Height - 2));
             Color hoverFill = DangerHover.IsEmpty ? Theme.Hover : DangerHover;
 
-            if (on > 0.01 || hot > 0.01)
+            if (Raised || on > 0.01 || hot > 0.01)
             {
+                Color rest = Raised ? Theme.Mix(Theme.BackOf(this), Theme.Field, 1.0) : Theme.BackOf(this);
                 Color fill = on > hot
-                    ? Theme.Mix(Theme.BackOf(this), Theme.Accent, on)
-                    : Theme.Mix(Theme.BackOf(this), hoverFill, hot);
-                using (GraphicsPath path = Theme.Round(plate, 5))
-                using (SolidBrush brush = new SolidBrush(fill))
-                    g.FillPath(brush, path);
+                    ? Theme.Mix(rest, Theme.Accent, on)
+                    : Theme.Mix(rest, hoverFill, hot);
+                using (GraphicsPath path = Theme.Round(plate, 7))
+                {
+                    using (SolidBrush brush = new SolidBrush(fill))
+                        g.FillPath(brush, path);
+                    if (Raised && on < 0.5 && Picture == null)
+                        using (Pen edge = new Pen(Theme.Mix(Theme.Line, Theme.Accent, hot * 0.6), 1f))
+                            g.DrawPath(edge, path);
+                }
             }
 
             Color colour = on > 0.5 ? Theme.OnAccent
                          : (!DangerHover.IsEmpty && hot > 0.5) ? Color.White
                          : Theme.Mix(Theme.TextDim, Theme.Text, hot);
+
+            // Grows a little under the pointer and dips under a press. Both are
+            // small on purpose: an icon that jumps draws the eye away from the
+            // page, which is the one thing in this window worth looking at.
+            double press = _press.Eased;
+            float scale = (float)(1.0 + 0.10 * hot - 0.14 * press);
+            float lift = (float)(-1.0 * hot + 1.0 * press);
 
             if (!string.IsNullOrEmpty(Glyph))
             {
@@ -365,8 +495,27 @@ namespace NextScan.App
             }
             else
             {
-                float box = Math.Min(Width, Height) - 8f;
-                NsIcon.Draw(g, Icon, new RectangleF((Width - box) / 2f, (Height - box) / 2f, box, box), colour);
+                float box = (Math.Min(Width, Height) - 8f) * scale;
+                RectangleF where = new RectangleF((Width - box) / 2f, (Height - box) / 2f + lift, box, box);
+
+                if (Picture != null)
+                {
+                    // Someone else's artwork, so it is drawn rather than tinted:
+                    // the only thing this window does to it is fade it back when
+                    // the pointer is elsewhere, the same as every other icon here.
+                    using (ImageAttributes fade = new ImageAttributes())
+                    {
+                        float alpha = (float)(0.72 + 0.28 * hot);
+                        ColorMatrix matrix = new ColorMatrix();
+                        matrix.Matrix33 = alpha;
+                        fade.SetColorMatrix(matrix);
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(Picture,
+                            new Rectangle((int)where.X, (int)where.Y, (int)where.Width, (int)where.Height),
+                            0, 0, Picture.Width, Picture.Height, GraphicsUnit.Pixel, fade);
+                    }
+                }
+                else NsIcon.Draw(g, Icon, where, colour);
             }
 
             PaintKeyboardFocus(g);

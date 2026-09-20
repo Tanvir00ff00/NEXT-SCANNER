@@ -76,6 +76,7 @@ namespace NextScan.Tools
             }
 
             Console.WriteLine();
+            if (Environment.GetEnvironmentVariable("NS_SHEET") == "1") { Sheet(root); return 0; }
             Segment(root);
             return 0;
         }
@@ -129,6 +130,33 @@ namespace NextScan.Tools
                             Console.WriteLine("        . " + line);
                 }
             }
+        }
+
+        /// <summary>Composes a few reference pages into a contact sheet, to look at.</summary>
+        static void Sheet(string root)
+        {
+            string folder = System.IO.Path.GetFullPath(System.IO.Path.Combine(root, "..", "tests", "real"));
+            string[] beds = Directory.GetFiles(folder, "lide400_*.png");
+            Array.Sort(beds);
+
+            System.Collections.Generic.List<RawImage> pages = new System.Collections.Generic.List<RawImage>();
+            foreach (string bed in beds)
+            {
+                if (pages.Count >= 5) break;
+                using (System.Drawing.Bitmap b = new System.Drawing.Bitmap(bed)) pages.Add(RawImage.FromBitmap(b));
+            }
+            Console.WriteLine("  composing " + pages.Count + " pages");
+
+            RawImage sheet = ContactSheet.Compose(pages, 1200);
+            if (sheet == null) { Console.WriteLine("  FAILED: nothing composed"); return; }
+            Console.WriteLine("  sheet " + sheet.Width + "x" + sheet.Height + ", " + sheet.Channels
+                              + " channels, stride " + sheet.Stride);
+
+            string outPath = System.IO.Path.Combine(
+                Environment.GetEnvironmentVariable("TEMP"), "contact_sheet.png");
+            using (System.Drawing.Bitmap bmp = sheet.ToBitmap())
+                bmp.Save(outPath, System.Drawing.Imaging.ImageFormat.Png);
+            Console.WriteLine("  wrote " + outPath);
         }
 
         static string Size(CropRegion item)

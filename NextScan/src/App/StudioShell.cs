@@ -94,7 +94,7 @@ namespace NextScan.App
 
         /// <summary>What the connected scanner can actually feed from.</summary>
         bool _hasFeeder, _hasDuplex;
-        NsReadout _roEstimate, _roDetect;
+        NsReadout _roEstimate;
         Bitmap _processedCache;
 
         public class PaperSizeDef
@@ -241,6 +241,20 @@ namespace NextScan.App
         RawImage _previewPage;
         bool _probing;
         bool _thoroughDetect;
+
+        /// <summary>
+        /// Every item of the last scan, shown together as one picture.
+        ///
+        /// Built at display resolution and never exported: the pages it is made
+        /// from are kept whole in the filmstrip, and everything that writes a
+        /// file or hands one to Photoshop reads those. Holding it here rather
+        /// than only in the canvas is what lets the view be switched back and
+        /// forth without scanning again.
+        /// </summary>
+        RawImage _sheet;
+        RawImage _beforeSheet;
+        bool _showingSheet;
+        NsIconButton _tbSheet;
 
         readonly List<RectangleF> _cropPlan = new List<RectangleF>();
         readonly List<PointF[]> _cropPlanCorners = new List<PointF[]>();
@@ -799,12 +813,23 @@ namespace NextScan.App
             _previewPill.Click += delegate { StartScan(true); };
             _inspFoot.Controls.Add(_previewPill);
 
-            _batchPill = new NsIconButton { Icon = NsIcon.Stack, Toggle = false };
+            _batchPill = new NsIconButton { Icon = NsIcon.Stack, Toggle = false, Raised = true };
             _batchPill.Click += delegate { ToggleBatchBar(); };
+            _tips.SetToolTip(_batchPill, "Batch and hot folder");
             _inspFoot.Controls.Add(_batchPill);
 
-            _toPsPill = new NsIconButton { Icon = NsIcon.Photoshop };
+            // Photoshop wears its own icon here when it is installed, because
+            // this button names Photoshop rather than an action of ours.
+            _toPsPill = new NsIconButton
+            {
+                Icon = NsIcon.Photoshop,
+                Picture = AppIcon.Photoshop,
+                Raised = true
+            };
             _toPsPill.Click += delegate { SendToPhotoshop(); };
+            _tips.SetToolTip(_toPsPill, AppIcon.Photoshop != null
+                ? "Send to Photoshop"
+                : "Send to Photoshop (not installed)");
             _inspFoot.Controls.Add(_toPsPill);
 
             _scanPill = new NsPill { Text = "Scan", Kind = PillKind.Primary, Radius = 8 };
@@ -846,7 +871,6 @@ namespace NextScan.App
             // Everything in the host was just disposed; these are rebuilt by the
             // section that owns them, and must not be written to before then.
             _roEstimate = null;
-            _roDetect = null;
             _segSource = null;
             _slQuality = null;
             _qualityNote = null;
@@ -1149,6 +1173,7 @@ namespace NextScan.App
             {
                 int i = _ddDpi.SelectedIndex;
                 if (i >= 0 && i < _supportedDpiValues.Count) _settings.Dpi = _supportedDpiValues[i];
+                if (_canvas != null) { _canvas.PlaceholderDpi = _settings.Dpi; _canvas.Invalidate(); }
             };
 
             AddFieldLabel("Colour", ref y);
@@ -1242,28 +1267,11 @@ namespace NextScan.App
             _drawerHost.Controls.Add(_findAgainPill);
             y += 40;
 
-            _roDetect = new NsReadout
-            {
-                Caption = "last preview",
-                Location = new Point(Dx, y),
-                Size = new Size(Dw, 30)
-            };
-            _drawerHost.Controls.Add(_roDetect);
-            y += 38;
-
-            // The rule stated where the switches are. The footer says what THIS
-            // setup will do; this says why pressing Scan on its own never crops.
-            const string rule = "Cropping only happens for items you have seen outlined " +
-                                "in a preview. Scan on its own always keeps the whole area.";
-            NsNote note = new NsNote
-            {
-                Text = rule,
-                Warning = true,
-                Location = new Point(Dx, y),
-                Size = new Size(Dw, NsNote.Measure(rule, Dw))
-            };
-            _drawerHost.Controls.Add(note);
-            y += note.Height + 8;
+            // A standing notice about when cropping happens used to sit here. It
+            // said the same thing as the line above the Preview button, which is
+            // written from the current state and changes as the state does, so
+            // the fixed copy was one more thing to read past every time the
+            // panel opened without ever telling the operator anything new.
 
             UpdateDetectReadout();
         }
@@ -1299,29 +1307,18 @@ namespace NextScan.App
             _roEstimate.Invalidate();
         }
 
+        /// <summary>
+        /// Keeps "find items again" from offering to do something it cannot.
+        ///
+        /// This used to drive a readout beside it as well, saying how the last
+        /// preview went. The line above the Preview button says that from the
+        /// same facts and updates on the same events, so the readout was a
+        /// second copy that could only ever agree with the first.
+        /// </summary>
         void UpdateDetectReadout()
         {
             if (_findAgainPill != null)
                 _findAgainPill.Enabled = _settings.AutoCrop && _previewPage != null;
-
-            if (_roDetect == null) return;
-
-            if (!_settings.AutoCrop)
-            {
-                _roDetect.Value = "auto crop is off";
-                _roDetect.ValueColor = Theme.TextFaint;
-            }
-            else if (_cropPlan.Count > 0)
-            {
-                _roDetect.Value = _cropPlan.Count + (_cropPlan.Count == 1 ? " item" : " items");
-                _roDetect.ValueColor = Theme.Good;
-            }
-            else
-            {
-                _roDetect.Value = _hasRealPage ? "nothing found" : "not previewed";
-                _roDetect.ValueColor = _hasRealPage ? Theme.Warn : Theme.TextFaint;
-            }
-            _roDetect.Invalidate();
         }
 
         void BuildLookGroup(ref int y)
@@ -2315,6 +2312,13 @@ namespace NextScan.App
             _tbCompare.Toggle = true;
             _tbCompare.Click += delegate { _canvas.ShowSplit = _tbCompare.Checked; _canvas.Invalidate(); };
 
+            // Only useful once a scan has cut several items, so it is hidden
+            // until there is something to show rather than sitting there greyed.
+            _tbSheet = AddViewButton(NsIcon.Pages, "Every item from the last scan", null);
+            _tbSheet.Toggle = true;
+            _tbSheet.Visible = false;
+            _tbSheet.Click += delegate { ShowSheet(_tbSheet.Checked); };
+
             _zoomText = new Label
             {
                 ForeColor = Theme.TextFaint,
@@ -2688,7 +2692,7 @@ namespace NextScan.App
             _planLabel.SetBounds(Dx, 10, inner, 30);
 
             const int gap = 8;
-            const int square = 34;
+            const int square = 38;
 
             // Preview, then the two follow-on actions as icons. They are
             // recognised rather than read, and giving them full-width labels
@@ -3150,6 +3154,7 @@ namespace NextScan.App
             RawImage sheet = MakeBlankSheet(_activeBedW, _activeBedH, 100);
             if (sheet == null) return;
 
+            _canvas.PlaceholderDpi = _settings.Dpi;
             _canvas.SetPlaceholderImage(sheet);
             _pageBedRect = new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
             _manualCrop = false;
@@ -3507,6 +3512,12 @@ namespace NextScan.App
             _lastScanPages.Clear();
 
             if (_canvas != null) { _canvas.SelectedRegion = -1; _canvas.DetectedRegions = null; }
+
+            // Last scan's sheet describes last scan. Leaving it reachable while
+            // a new page arrives would let the operator switch to a view of
+            // work that is no longer on screen.
+            DropSheet();
+            if (_tbSheet != null) { _tbSheet.Checked = false; _tbSheet.Visible = false; }
 
             // One journal per session rather than per scan, so pages added by a
             // later "scan more" land in the same recoverable batch.
@@ -3909,6 +3920,11 @@ namespace NextScan.App
         RawImage CutRegion(int index)
         {
             if (_canvas == null || _canvas.Image == null || !_canvas.Image.IsValid) return null;
+
+            // The contact sheet is a picture of pages, not a page. Cutting a
+            // region out of it would hand Photoshop a screenshot.
+            if (_showingSheet) return null;
+
             List<RawImage> pieces = ApplyAutoCrop(_canvas.Image, _pageBedRect);
             if (pieces == null || index < 0 || index >= pieces.Count) return null;
             if (ReferenceEquals(pieces[index], _canvas.Image)) return null;   // nothing was cut
@@ -4528,6 +4544,7 @@ namespace NextScan.App
                 }
 
                 UpdateProcessedPreview();
+                OfferSheet(pages);
                 PinStatus("Scanned " + pages.Count + " page" + (pages.Count == 1 ? "" : "s") +
                           ".  " + _film.Count + " in this session." +
                           (_autoCropNote.Length > 0 ? "  (" + _autoCropNote + ")" : ""));
@@ -4958,7 +4975,8 @@ namespace NextScan.App
             // Nothing is detected here. This cuts what the preview already found
             // and showed, exactly as a scan does.
             if (_settings.AutoCrop && _cropPlan.Count > 0 && _canvas != null &&
-                !_canvas.IsPlaceholder && _canvas.Image != null && _canvas.Image.IsValid)
+                !_canvas.IsPlaceholder && !_showingSheet &&
+                _canvas.Image != null && _canvas.Image.IsValid)
             {
                 RawImage shown = _canvas.Image;
                 List<RawImage> pieces = ApplyAutoCrop(shown, _pageBedRect);
@@ -5176,6 +5194,69 @@ namespace NextScan.App
                 BwThreshold = _settings.BwThreshold,
                 AdaptiveThreshold = _settings.AdaptiveThreshold
             };
+        }
+
+        /// <summary>
+        /// After a scan that produced several items, shows them all at once.
+        ///
+        /// A scan that cut five things off the glass used to put one of them on
+        /// screen and the other four in a list, so the only way to find out
+        /// whether the scan worked was to click through them. The question is
+        /// whether all five came out right, and that is one question, so it gets
+        /// one picture -- with the single-page view one click away.
+        ///
+        /// Only after a scan. A preview is the bed as it is, which is the thing
+        /// the operator is about to decide about; tiling it would be tiling one
+        /// picture.
+        /// </summary>
+        void OfferSheet(List<RawImage> pages)
+        {
+            DropSheet();
+            if (pages == null || pages.Count < 2) { if (_tbSheet != null) _tbSheet.Visible = false; return; }
+
+            try { _sheet = ContactSheet.Compose(pages, 1800); }
+            catch (Exception ex) { Log("contact sheet failed: " + ex.Message); _sheet = null; }
+
+            if (_tbSheet != null)
+            {
+                _tbSheet.Visible = _sheet != null;
+                _tbSheet.Checked = false;
+            }
+            if (_sheet != null) ShowSheet(true);
+        }
+
+        void ShowSheet(bool on)
+        {
+            if (_canvas == null) return;
+
+            if (on)
+            {
+                if (_sheet == null) return;
+                if (!_showingSheet) _beforeSheet = _canvas.Image;
+                _showingSheet = true;
+                _canvas.SelectedRegion = -1;
+                _canvas.DetectedRegions = null;
+                _canvas.SetImage(_sheet);
+                _canvas.ZoomFit();
+                if (_tbSheet != null) _tbSheet.Checked = true;
+                SetStatus("Every item from the last scan. Click the button again for one page at a time.");
+            }
+            else
+            {
+                _showingSheet = false;
+                if (_beforeSheet != null && _beforeSheet.IsValid) _canvas.SetImage(_beforeSheet);
+                else if (_film != null && _film.SelectedImage != null) _canvas.SetImage(_film.SelectedImage);
+                _canvas.ZoomFit();
+                if (_tbSheet != null) _tbSheet.Checked = false;
+            }
+            UpdateStatus();
+        }
+
+        void DropSheet()
+        {
+            _showingSheet = false;
+            _sheet = null;
+            _beforeSheet = null;
         }
 
         void UpdateProcessedPreview()
