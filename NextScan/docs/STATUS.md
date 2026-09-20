@@ -1764,16 +1764,40 @@ the running app:
 
 ## 4. Not started
 
-Everything else in the master plan. Most notably:
+Everything else in the master plan. Re-checked against the code on 2026-09-20,
+because several lines here had gone stale in the direction that flatters: they
+said not started about things that were finished.
+
+Done since this list was written, and no longer outstanding:
+
+- **AI subsystem** (§10) — no longer the Python `ai_doc_cascade.py` side-process.
+  MobileSAM runs in-process through hand-bound ONNX Runtime; see section 10.
+- **Photoshop connectors** (§14) — no longer the legacy `.jsx`. An acquire
+  module (`.8ba`) hands pixels over directly; see sections 12 and 13.
+- **Installer** (§19) — see section 14.
+- **Licensing** (§15) — dropped, not deferred. The project is open source.
+
+Still outstanding:
 
 - **WSD network transport** (§7.4) — not implemented; eSCL/mDNS exist and eSCL has simulator coverage.
-- **Imaging pipeline integration** (§9): RawImage detection, curves and deskew estimators exist; complete full-depth adjustment/export integration remains unfinished.
-- **AI subsystem** (§10) — still the Python `ai_doc_cascade.py` side-process
-- **PDF / OCR / MRC output** (§11)
-- **Film module, IT8, ICC colour management** (§10.3–10.6)
-- **Photoshop connectors** (§14) — still the legacy `.jsx`
-- **Batch/jobs, licensing, installer, quirks DB** (§12, §15, §19, §7.6)
-- **Remaining test coverage**: real-device matrix, GUI workflows, long watchdog / cancellation and installer tests. Imaging, TWAIN golden, eSCL simulator and audit regression suites exist.
+- **Imaging pipeline integration** (§9) — detection, curves and deskew estimators
+  exist and `PageWriter` has a 16-bit path, but full-depth adjustment through to
+  every export format is not finished.
+- **OCR and MRC** (§11) — nothing at all. PDF and multi-page TIFF containers exist.
+- **Job presets** (§12) — the batch machinery exists (separation rules, blank
+  dropping, hot folder, naming templates) but there is one flat settings file
+  and no way to name a set of settings and recall it. Every repeat job is set up
+  by hand again.
+- **Film module, IT8** (§10.3–10.5) — not started.
+- **ICC colour management** (§10.6) — pages are tagged sRGB and Photoshop assigns
+  rather than converts; no device profile, no conversion. See section 12.
+- **Quirks DB** (§7.6) — not started; two real entries are waiting for it.
+- **Photoshop target modes** (§14.4) — always a new document; no layer or smart
+  object target.
+- **Remaining test coverage**: real-device matrix, GUI workflows, long watchdog /
+  cancellation, and the installer's registry and shortcut work, which was checked
+  by hand rather than by a test. Imaging, crop, export, cancellation, ONNX
+  interop, TWAIN golden and eSCL simulator suites exist.
 
 ---
 

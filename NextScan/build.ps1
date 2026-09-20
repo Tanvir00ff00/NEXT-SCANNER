@@ -74,7 +74,8 @@ if ($Clean -and (Test-Path $bin)) {
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null }
 
 function Build-Target {
-    param([string]$Name, [string]$Out, [string]$Platform, [string]$Kind, [string[]]$Sources, [string]$EntryPoint, [string]$Icon)
+    param([string]$Name, [string]$Out, [string]$Platform, [string]$Kind, [string[]]$Sources, [string]$EntryPoint,
+          [string]$Icon, [string[]]$Extra)
 
     $files = @()
     foreach ($s in $Sources) {
@@ -88,6 +89,7 @@ function Build-Target {
     if ($EntryPoint) { $args += "-main:$EntryPoint" }
     if ($Icon -and (Test-Path $Icon)) { $args += "-win32icon:$Icon" }
     $args += $files
+    if ($Extra) { $args += $Extra }
 
     Write-Host ("  building {0,-22} ({1}, {2})" -f $Name, $Platform, $Kind) -NoNewline
     $out = & $csc $args 2>&1
@@ -98,6 +100,26 @@ function Build-Target {
     }
     Write-Host "  ok" -ForegroundColor Green
 }
+
+# The version lives in one file and is read back out of it, so the executable's
+# file properties cannot drift from what the About panel says.
+$versionFile = Join-Path $src "Core\AppInfo.cs"
+if (-not (Test-Path $versionFile)) { throw "missing $versionFile" }
+$m = [regex]::Match((Get-Content $versionFile -Raw), 'Version\s*=\s*"([0-9]+(?:\.[0-9]+)*)"')
+if (-not $m.Success) { throw "no Version constant in $versionFile" }
+$appVersion = $m.Groups[1].Value
+$fileVersion = ($appVersion.Split('.') + @('0','0','0','0'))[0..3] -join '.'
+Write-Host "  version : $appVersion"
+
+$stamp = Join-Path $env:TEMP "nextscan_version.cs"
+@"
+using System.Reflection;
+[assembly: AssemblyTitle("NextScan Studio")]
+[assembly: AssemblyProduct("NextScan Studio")]
+[assembly: AssemblyCompany("NextScan")]
+[assembly: AssemblyVersion("$fileVersion")]
+[assembly: AssemblyFileVersion("$fileVersion")]
+"@ | Set-Content $stamp -Encoding UTF8
 
 $engine = @("Core\*.cs", "Twain\*.cs", "Wia\*.cs", "Net\*.cs")
 $host_  = $engine + @("Host\*.cs")
@@ -139,7 +161,7 @@ Build-Target -Name "NextScan.Engine" -Out "$bin\NextScan.Engine.dll" -Platform "
 $app_ = $engine + @("App\*.cs")
 $appIcon = Join-Path $src "App\NextScanner.ico"
 Build-Target -Name "NextScanner"     -Out "$bin\NextScanner.exe"     -Platform "anycpu" -Kind "winexe" `
-             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon
+             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon -Extra @($stamp)
 
 # Deploy NextScan.Engine.dll to the parent directory for scanhelper compatibility
 Copy-Item "$bin\NextScan.Engine.dll" (Join-Path (Split-Path -Parent $root) "NextScan.Engine.dll") -Force -ErrorAction SilentlyContinue

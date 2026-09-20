@@ -1783,37 +1783,31 @@ namespace NextScan.App
         {
             AddSectionLabel("About", ref y);
 
-            // The build TIME, not an assembly version: this is compiled with csc
-            // directly and has no version stamp to report, so a version number
-            // here would read "0.0.0" and tell nobody anything.
-            string version = "unknown";
+            AddReadout("Version", AppInfo.Product + " " + AppInfo.Version, ref y);
+
+            // The build time as well as the version. Two builds can carry the
+            // same version while one of them is the one with the fix in it, and
+            // during development that is most of them.
+            string built = "unknown";
             try
             {
                 string exe = Assembly.GetExecutingAssembly().Location;
                 if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
-                    version = File.GetLastWriteTime(exe).ToString("yyyy-MM-dd HH:mm");
+                    built = File.GetLastWriteTime(exe).ToString("yyyy-MM-dd HH:mm");
             }
             catch { }
+            AddReadout("Build", built, ref y);
 
-            NsReadout build = new NsReadout
-            {
-                Caption = "Build",
-                Value = version,
-                Location = new Point(Dx, y),
-                Size = new Size(Dw, 30)
-            };
-            _drawerHost.Controls.Add(build);
-            y += 36;
+            AddReadout(".NET Framework", Environment.Version.ToString(), ref y);
 
-            NsReadout runtime = new NsReadout
-            {
-                Caption = ".NET Framework",
-                Value = Environment.Version.ToString(),
-                Location = new Point(Dx, y),
-                Size = new Size(Dw, 30)
-            };
-            _drawerHost.Controls.Add(runtime);
-            y += 38;
+            // Whether the model layer is actually there. It is two files and a
+            // native DLL that are not in the repository, and when they are
+            // missing nothing breaks -- detection is simply worse, quietly. The
+            // one place that can say so plainly is here.
+            AddReadout("Detection model", ModelStatus(), ref y);
+
+            AddReadout("Source", AppInfo.Repository, ref y);
+            y += 2;
 
             AddFieldLabel("Diagnostics are written to", ref y);
             Label folder = new Label
@@ -1849,6 +1843,38 @@ namespace NextScan.App
             };
             _drawerHost.Controls.Add(open);
             y += 40;
+        }
+
+        void AddReadout(string caption, string value, ref int y)
+        {
+            NsReadout readout = new NsReadout
+            {
+                Caption = caption,
+                Value = value,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 30)
+            };
+            _drawerHost.Controls.Add(readout);
+            y += 36;
+        }
+
+        /// <summary>
+        /// Says which half is missing when the model layer is off, because the
+        /// two have different answers: a missing runtime is a broken install, a
+        /// missing model file is a payload that was never fetched.
+        /// </summary>
+        string ModelStatus()
+        {
+            try
+            {
+                string encoder, decoder;
+                SamProposals.Locate(out encoder, out decoder);
+
+                if (!File.Exists(encoder) || !File.Exists(decoder)) return "not installed";
+                if (!Ort.Available) return Ort.Availability;
+                return _settings.UseModel ? "ready" : "installed, switched off";
+            }
+            catch { return "unknown"; }
         }
 
         static string DiagnosticsFolder()

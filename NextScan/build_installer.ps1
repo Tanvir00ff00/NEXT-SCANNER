@@ -15,7 +15,10 @@
 # name and by size before anything is packaged.
 # =============================================================================
 param(
-    [string]$Version = "1.0.0",
+    # Empty by default: the version is read out of src\Core\AppInfo.cs, so the
+    # installer, the executable and the About panel cannot disagree. Pass one
+    # only to build something other than what the source says it is.
+    [string]$Version = "",
     [switch]$SkipBuild,
     [switch]$NoConnector
 )
@@ -28,6 +31,14 @@ $models = Join-Path $root "models"
 $dist = Join-Path $root "dist"
 $work = Join-Path $env:TEMP "nextscan_setup"
 
+if (-not $Version) {
+    $versionFile = Join-Path $root "src\Core\AppInfo.cs"
+    $m = [regex]::Match((Get-Content $versionFile -Raw), 'Version\s*=\s*"([0-9]+(?:\.[0-9]+)*)"')
+    if (-not $m.Success) { throw "no Version constant in $versionFile" }
+    $Version = $m.Groups[1].Value
+}
+# Written as 1.0 in source; the file version resource wants three parts.
+$Version = ($Version.Split('.') + @('0','0','0'))[0..2] -join '.'
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must look like 1.2.3, got '$Version'" }
 
 Write-Host "NextScan Studio installer $Version" -ForegroundColor Cyan
