@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // NextScan Studio - Main application entry point & CLI handler
 // Plan ref: MASTER_PLAN section 12.3, 13.1, 14.3.
 //
@@ -41,6 +41,20 @@ namespace NextScan.App
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+
+            // The acquire module starts us with a session id when the operator
+            // picks File, Import, Next Scanner. Read before anything else, so
+            // the shell knows from the start that a scan has somewhere to go.
+            StudioPsBridge.ReadCommandLine(args);
+            StudioPsBridge.RecordLocation();
+
+            foreach (string a in args)
+                if (string.Equals(a, "--ps-selftest", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("NextScan Photoshop frame layout");
+                    Console.WriteLine();
+                    return StudioPsBridge.SelfTest(Console.WriteLine);
+                }
 
             StudioSettings settings = StudioSettings.Load();
 

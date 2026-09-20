@@ -7,3 +7,7 @@ scan_*.png
 scan_*.jpg
 scan_*.tif
 scan_*.pdf
+
+# A hand-staged copy of the built acquire module. Build output, like bin/, and
+# the same file build_8ba.ps1 -Install places in Photoshop's Plug-ins folder.
+psplugins/

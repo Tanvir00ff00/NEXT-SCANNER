@@ -4550,7 +4550,19 @@ namespace NextScan.App
                           (_autoCropNote.Length > 0 ? "  (" + _autoCropNote + ")" : ""));
                 EndBatch(pages.Count, false);
 
-                if (_settings.OpenInPhotoshop)
+                // Started from Photoshop's own Import menu: the page goes back
+                // down the pipe it came up, not out through a file. Nothing is
+                // written to disk, the bit depth is whatever was scanned, and
+                // the window closes once Photoshop has the pixels.
+                if (StudioPsBridge.Serving && pages.Count > 0)
+                {
+                    PinStatus(pages.Count == 1
+                              ? "Handing the scan to Photoshop…"
+                              : "Handing " + pages.Count + " items to Photoshop…");
+                    StudioPsBridge.PublishAll(pages, Log);
+                    BeginInvoke((MethodInvoker)delegate { Close(); });
+                }
+                else if (_settings.OpenInPhotoshop)
                 {
                     if (pages.Count > 1) SendScanPagesToPhotoshop(pages);
                     else SendToPhotoshop();

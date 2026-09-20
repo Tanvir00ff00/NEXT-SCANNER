@@ -2488,3 +2488,117 @@ Still carried, and still true: `StepOntoGlass` scans its 20/80 crossings from
 `at - gap - run`, which on a profile that goes bright, dark, bright starts inside
 the item and past both thresholds. It no longer bites, because the candidate must
 now sit on the crossing midpoint, but it is a trap for whoever touches this next.
+
+## 12. The Photoshop connector, 2026-09-20
+
+Photoshop acquires from NextScanner directly now: File, Import, Next Scanner
+starts the application, the operator scans, and the pixels arrive as a document
+without a file in between. Connector B, an acquire module (`.8ba`), because an
+acquire plug-in is the only kind Photoshop lists under Import, which is where
+someone looks for a scanner.
+
+### What is verified, and by what
+
+| | how |
+| --- | --- |
+| The byte layout the two languages share | a compiled `offsetof` dumper against `--ps-selftest` |
+| BGR to RGB, and 65535 to 32768 | `--ps-selftest`, on a known frame |
+| Pixels, size, orientation, resolution | the owner, in Photoshop, on a real scan |
+| Page by page turn taking | `--ps-selftest`, against the real publisher |
+| **Several items into several documents** | **not yet, in Photoshop** |
+
+The last row matters. Everything below the line about multiple pages is tested
+against a stand in for the plug-in, not against Photoshop, for a reason given at
+the end.
+
+### Photoshop 16 bit is 0..32768
+
+Not 0..65535. `PIColorSpaceSuite.h:233`. Getting this wrong produces an image
+that looks right and measures wrong, which is the worst kind of wrong, so the
+conversion is done once on the writing side and checked by name in the self
+test. `imageHRes` and `imageVRes` are `Fixed` 16.16 for the same reason: 300 dpi
+is `300 << 16`, and a plain 300 would arrive as a page four thousandths of an
+inch across.
+
+### Waiting without freezing Photoshop
+
+Photoshop calls plug-ins on its own thread. The first working version waited
+there for the scan, which stopped Photoshop's message loop: the window stopped
+repainting and Windows greyed it over and called it not responding. The scan
+happens in another process and cannot be hurried, so the wait has to pump for
+Photoshop while it runs.
+
+Pumping on its own would have been worse than freezing -- a dispatched message
+can take the operator back into the menus and re-enter the plug-in -- so the
+host window is disabled for the duration. A disabled window still repaints; it
+only refuses input, which is right while the scan belongs to the other
+application. Clicks into Photoshop doing nothing during a scan is deliberate.
+
+The same wait watches the application's process handle. Closing NextScanner
+without scanning is an ordinary thing to do, and before this it cost half an
+hour of a dead Photoshop.
+
+### Several items, one scan
+
+Five cards on the glass are five pages, and only the first was handed over. The
+API has the mechanism: `acquireAgain`, set in the Finish handler, asks the host
+to start again (`PIAcquire.h:472`).
+
+The frame carries `pageIndex` and `pageCount`, so Finish decides from the page
+the application just sent -- read before the mapping that says so is unmapped.
+
+Two things in the transport changed to carry more than one page:
+
+- **A mapping name per page**, `Local\NextScan.Frame.<session>.<page>`. The
+  application builds the next page while the plug-in may still hold the last one
+  open, and two mappings cannot share a name.
+- **Ready and Done became auto reset.** Each page is one exchange, and an auto
+  reset event is emptied by the wait that receives it, so a page boundary needs
+  no bookkeeping. With manual reset events a stale Ready sends the reader looking
+  for a mapping that does not exist yet -- which is what the negative control
+  below actually does.
+
+`Cancel` now means stop early and never "we are finished". Setting it on the
+ordinary path would make a completed one page scan look abandoned, because the
+application waits on Done and Cancel together. It is set on failure, on giving
+up, and by Finalize -- which is what a host that ignores `acquireAgain` looks
+like from this end. Adobe says plainly that a host may ignore it and that Finish
+must clean up regardless, so the session is left open holding nothing, and
+Finalize closes it if Start never comes back.
+
+### The handover test, and what happens when it is broken
+
+The layout test proves the two sides agree about bytes. It says nothing about
+whether they agree about turns, which is the half that fails by hanging rather
+than by looking wrong -- and inside Photoshop is the least debuggable place for
+a hang. So `--ps-selftest` also runs the real publisher against a stand in for
+the plug-in, with every wait bounded, and checks two things:
+
+    all three pages, in order             ok
+    giving up stops the rest              ok
+
+Three pages of different sizes, so a page delivered out of order reads as a
+wrong string rather than as a count that happens to match. Both checks were
+confirmed to fail when the thing they test is removed:
+
+- **Publishing only the first page**, the behaviour this replaced: first check
+  FAILED, second still ok.
+- **Manual reset Ready and Done on the publisher**: first check FAILED. The
+  first attempt at this control took the whole self test down with a stack
+  trace from the reader thread, which is a poor way for a test to report; the
+  reader now records what went wrong and releases the publisher either way, so
+  a broken turn reads as one line instead of hanging the next ten minutes.
+
+### Still outstanding
+
+- **Multiple items have not been through Photoshop.** The turn taking is
+  tested, `acquireAgain` is not, and it cannot be tested from this end: Adobe
+  permits a host to ignore it. It needs a bed with several documents on it and
+  someone watching how many windows open. If Photoshop declines, the fallback
+  is one document carrying every item, which is a larger change than this one.
+- **No ICC profile.** The frame reserves room and the plug-in assigns rather
+  than converts, which is the right behaviour once there is something to
+  assign. The capture does not carry a profile yet; pulling one from WIA or
+  TWAIN is separate work.
+- **Always a new document.** New layer and smart object targets, and the named
+  pipe negotiation from the plan, are not implemented.
