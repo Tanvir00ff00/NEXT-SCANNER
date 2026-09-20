@@ -2655,3 +2655,63 @@ before anything is recorded anywhere.
 
 - **Always a new document.** New layer and smart object targets, and the named
   pipe negotiation from the plan, are not implemented.
+
+## 13. Previewing a selection, 2026-09-20 night
+
+Preview follows the selection now. Nothing drawn, and it takes the whole platen
+as before; draw a selection and it previews exactly that, in place on the glass,
+and detects on it. A second button beside Preview forces the whole bed, which is
+the way back out without having to clear the selection first.
+
+### It was asked for more than once, and the code was already there
+
+The logic had been written. It could not run:
+
+    public bool PreviewFullBed = true;                                // default
+    RectangleF previewRegion = (!_settings.PreviewFullBed && _manualCrop) ? ...
+
+`!true` is never satisfied, so the selection was never honoured, and the only
+control was a toggle buried in the settings panel called "Preview the whole
+glass". The setting is gone entirely -- field, toggle, and both halves of its
+persistence. A hidden setting that quietly reverses what a button does is worth
+less than nothing; the two buttons now say the whole story.
+
+### The measurement that gave away the real bug
+
+With the selection honoured, detections came back as tall skewed shapes running
+down into the unscanned part of the bed, one of them entirely outside the
+previewed strip. The preview was 4.05 in tall on a bed of about 11.7. The
+regions were stretched by about 2.9, and 11.7 / 4.05 is 2.89.
+
+A ratio that matches the two heights is not a detection fault. It is a unit
+fault, and it was one field doing two jobs:
+
+| | |
+| --- | --- |
+| what the preview image is of | used to turn preview pixels into a place on the glass |
+| what the canvas is displaying | used to turn a place on the glass into somewhere to draw |
+
+They are the same rectangle while a preview is the whole platen, which is why
+one field served for both. Previewing a selection and compositing it back onto a
+picture of the whole bed makes them differ by exactly the ratio above. Four
+conversions read the wrong one: the crop plan, the drawn outlines, the oriented
+corners and the bed outline.
+
+The comment above those conversions already said what should happen -- "a scan
+may cover a different area, a paper size, or a selection" -- but the arithmetic
+underneath multiplied by the whole bed regardless. The intent was recorded and
+never implemented, and the broken default hid it: previews were never partial,
+so the wrong branch never ran.
+
+Two bugs, each of which kept the other invisible. Worth remembering the next time
+a feature "has already been done": it had been, and it had never once executed.
+
+### What is still assumed
+
+When a partial preview is composited back onto a picture of the bed, the canvas
+is treated as showing the whole platen, which is what the interactive helpers --
+dragging a corner, clicking to probe for an item -- also assume. If
+`MakeBedComposite` ever returns null the canvas shows the bare crop instead, the
+drawn outlines still follow it correctly, but those two helpers would be measured
+against the wrong rectangle. The same gap already existed on the scan path; it
+has not been closed, only written down.

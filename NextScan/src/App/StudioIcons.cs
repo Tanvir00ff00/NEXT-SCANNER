@@ -39,6 +39,7 @@ namespace NextScan.App
         public const string Photoshop = "photoshop";
         public const string Play = "play";
         public const string Stack = "stack";
+        public const string WholeBed = "wholebed";
 
         /// <summary>
         /// Draws one icon centred in <paramref name="box"/>.
@@ -109,6 +110,19 @@ namespace NextScan.App
                 case Stack:
                     g.DrawRectangle(p, 7f, 3.5f, 13f, 13f);
                     g.DrawLines(p, new PointF[] { new PointF(16.5f, 20.5f), new PointF(4f, 20.5f), new PointF(4f, 8f) });
+                    break;
+
+                case WholeBed:
+                    // The platen, with the view pushing out to its corners. The
+                    // deliberate opposite of Detect, which closes in on what is
+                    // there: this one says take all of it.
+                    g.DrawRectangle(p, 3.5f, 3.5f, 17f, 17f);
+                    g.DrawLine(p, 10f, 10f, 6.6f, 6.6f);
+                    g.DrawLines(p, new PointF[] { new PointF(6.5f, 10f), new PointF(6.5f, 6.5f),
+                                                  new PointF(10f, 6.5f) });
+                    g.DrawLine(p, 14f, 14f, 17.4f, 17.4f);
+                    g.DrawLines(p, new PointF[] { new PointF(17.5f, 14f), new PointF(17.5f, 17.5f),
+                                                  new PointF(14f, 17.5f) });
                     break;
 
                 case Pages:

@@ -64,7 +64,6 @@ namespace NextScan.App
         /// show them anything new. Off, a preview covers exactly the selection,
         /// which is what you want once the selection is the thing being adjusted.
         /// </summary>
-        public bool PreviewFullBed = true;
         public PaperSource Source = PaperSource.Flatbed;
         public string PaperSize = "Maximum";
         public bool PaperLandscape = false;
@@ -182,10 +181,6 @@ namespace NextScan.App
                             int pd;
                             if (int.TryParse(val, out pd) && pd > 0) s.PreviewDpi = pd;
                             break;
-                        case "previewfullbed":
-                            s.PreviewFullBed = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
-                                && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
-                            break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
                                 && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -296,7 +291,6 @@ namespace NextScan.App
                 lines.Add("previewmode=" + PreviewMode);
                 lines.Add("previewmatchesscan=" + (PreviewMatchesScan ? "on" : "off"));
                 lines.Add("usemodel=" + (UseModel ? "on" : "off"));
-                lines.Add("previewfullbed=" + (PreviewFullBed ? "on" : "off"));
                 lines.Add("source=" + Source.ToString().ToLowerInvariant());
                 lines.Add("format=" + OutputFormat);
                 lines.Add("outdir=" + OutputDirectory);

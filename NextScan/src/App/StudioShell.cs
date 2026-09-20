@@ -191,10 +191,22 @@ namespace NextScan.App
 
         NsPill _scanPill;
         NsPill _previewPill;
+        NsIconButton _fullBedPill;
         bool _cancelling;
 
         /// <summary>Region asked for by the scan in flight, for OnScanDone.</summary>
         RectangleF _lastRequestedRegion = RectangleF.Empty;
+
+        /// <summary>
+        /// What the preview image covers on the glass, in inches.
+        ///
+        /// Not the same thing as <c>_pageBedRect</c>, which is what the canvas
+        /// is currently showing. They agree while a preview is the whole platen,
+        /// which is why one field did for both until previews could be of a
+        /// selection: after that, detections measured against the wrong one
+        /// land somewhere else entirely on the bed.
+        /// </summary>
+        RectangleF _previewBedRect = RectangleF.Empty;
         bool _lastScanUsedManualCrop;
 
         /// <summary>
@@ -810,8 +822,18 @@ namespace NextScan.App
             _inspFoot.Controls.Add(_planLabel);
 
             _previewPill = new NsPill { Text = "Preview", Kind = PillKind.Normal, Radius = 7 };
-            _previewPill.Click += delegate { StartScan(true); };
+            _previewPill.Click += delegate { StartScan(true, false); };
             _inspFoot.Controls.Add(_previewPill);
+
+            // Preview follows the selection once there is one, which is what
+            // the operator means by it. This is the way back out to the whole
+            // glass without having to clear the selection first, and it is a
+            // button rather than a setting because it is a thing you do, not a
+            // mode you are in.
+            _fullBedPill = new NsIconButton { Icon = NsIcon.WholeBed, Toggle = false, Raised = true };
+            _fullBedPill.Click += delegate { StartScan(true, true); };
+            _tips.SetToolTip(_fullBedPill, "Preview the whole glass");
+            _inspFoot.Controls.Add(_fullBedPill);
 
             _batchPill = new NsIconButton { Icon = NsIcon.Stack, Toggle = false, Raised = true };
             _batchPill.Click += delegate { ToggleBatchBar(); };
@@ -1951,13 +1973,6 @@ namespace NextScan.App
         {
             AddSectionLabel("Preview", ref y);
 
-            NsToggle wholeBed = AddToggle("Preview the whole glass", _settings.PreviewFullBed, ref y);
-            wholeBed.CheckedChanged += delegate
-            {
-                _settings.PreviewFullBed = wholeBed.Checked;
-                UpdatePreviewCost();
-            };
-
             NsToggle matchScan = AddToggle("Use the scan resolution", _settings.PreviewMatchesScan, ref y);
 
             AddFieldLabel("Resolution", ref y);
@@ -2698,10 +2713,12 @@ namespace NextScan.App
             // recognised rather than read, and giving them full-width labels
             // made four buttons of equal weight where only one matters.
             int row = 46;
-            int previewWidth = Math.Max(60, inner - (square + gap) * 2);
+            int previewWidth = Math.Max(60, inner - (square + gap) * 3);
+            int at = Dx + previewWidth + gap;
             _previewPill.SetBounds(Dx, row, previewWidth, square);
-            _batchPill.SetBounds(Dx + previewWidth + gap, row, square, square);
-            _toPsPill.SetBounds(Dx + previewWidth + gap + square + gap, row, square, square);
+            _fullBedPill.SetBounds(at, row, square, square);
+            _batchPill.SetBounds(at + square + gap, row, square, square);
+            _toPsPill.SetBounds(at + (square + gap) * 2, row, square, square);
 
             _scanPill.SetBounds(Dx, row + square + gap, inner, 40);
         }
@@ -3497,10 +3514,13 @@ namespace NextScan.App
             }
 
             if (_previewPill != null) _previewPill.Enabled = !_busy;
+            if (_fullBedPill != null) _fullBedPill.Enabled = !_busy;
             _scanPill.Invalidate();
         }
 
-        void StartScan(bool preview)
+        void StartScan(bool preview) { StartScan(preview, false); }
+
+        void StartScan(bool preview, bool wholeBed)
         {
             if (_busy) { SetStatus("A scan is already running."); return; }
             if (_device == null) { SetStatus("No scanner selected."); return; }
@@ -3556,12 +3576,15 @@ namespace NextScan.App
             s.ShowVendorUi = !preview && _settings.ShowVendorUi;
             if (preview)
             {
-                // A preview normally takes the whole glass, because that is how
-                // the operator finds out what is on the bed. Once they have drawn
-                // a selection, though, previewing the whole bed again throws away
-                // the thing they are working on: they want to see that area
-                // closer, not the platen once more.
-                RectangleF previewRegion = (!_settings.PreviewFullBed && _manualCrop)
+                // A preview takes the whole glass when nothing is selected,
+                // because that is how the operator finds out what is on the bed.
+                // Once they have drawn a selection, previewing the whole bed
+                // again throws away the thing they are working on: they want to
+                // see that area closer, not the platen once more. The whole bed
+                // button is the way back, and it is the only thing that forces
+                // it -- this used to be a setting whose default quietly meant
+                // the selection was never honoured at all.
+                RectangleF previewRegion = (!wholeBed && _manualCrop)
                     ? CropToBedRegion() : RectangleF.Empty;
 
                 if (previewRegion.Width > 0.05f && previewRegion.Height > 0.05f)
@@ -4056,6 +4079,26 @@ namespace NextScan.App
             // The plan is held in inches on the glass, not as a fraction of the
             // preview. A scan may cover a different area - a paper size, or a
             // selection - and inches are the one description both agree on.
+            //
+            // Two rectangles, because two different things are being converted
+            // between and they stopped being the same rectangle once a preview
+            // could be of a selection:
+            //
+            //   covers  what the preview image is of, so preview pixels become
+            //           a place on the glass
+            //   shown   what the canvas is displaying, so a place on the glass
+            //           becomes somewhere to draw
+            //
+            // Previewing a selection and then compositing it back onto a picture
+            // of the whole bed makes these differ by the ratio between them. Read
+            // the wrong one and every region is stretched by exactly that ratio,
+            // which is how this was found.
+            RectangleF whole = new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
+            RectangleF covers = (_previewBedRect.Width > 0.05f && _previewBedRect.Height > 0.05f)
+                                ? _previewBedRect : whole;
+            RectangleF shown = (_pageBedRect.Width > 0.05f && _pageBedRect.Height > 0.05f)
+                               ? _pageBedRect : whole;
+
             List<PointF[]> outlines = new List<PointF[]>();
             List<CropConfidence> confidences = new List<CropConfidence>();
             int reviewCount = 0;
@@ -4064,39 +4107,52 @@ namespace NextScan.App
                 confidences.Add(item.Confidence);
                 if (item.Confidence < CropConfidence.High) reviewCount++;
                 _cropPlan.Add(new RectangleF(
-                    (float)(item.NormRect.X * _activeBedW), (float)(item.NormRect.Y * _activeBedH),
-                    (float)(item.NormRect.Width * _activeBedW), (float)(item.NormRect.Height * _activeBedH)));
+                    covers.X + item.NormRect.X * covers.Width,
+                    covers.Y + item.NormRect.Y * covers.Height,
+                    item.NormRect.Width * covers.Width,
+                    item.NormRect.Height * covers.Height));
 
                 PointF[] corners = item.Outline ?? ((item.Box != null) ? item.Box.Corners : null);
                 if (corners != null && corners.Length >= 3)
                 {
                     PointF[] q = new PointF[corners.Length];
                     for (int i = 0; i < corners.Length; i++)
-                        q[i] = new PointF(corners[i].X / preview.Width, corners[i].Y / preview.Height);
+                    {
+                        float bedX = covers.X + corners[i].X / preview.Width * covers.Width;
+                        float bedY = covers.Y + corners[i].Y / preview.Height * covers.Height;
+                        q[i] = new PointF((bedX - shown.X) / shown.Width,
+                                          (bedY - shown.Y) / shown.Height);
+                    }
                     outlines.Add(q);
                 }
                 else
                 {
                     RectangleF n = item.NormRect;
+                    float left = (covers.X + n.Left * covers.Width - shown.X) / shown.Width;
+                    float top = (covers.Y + n.Top * covers.Height - shown.Y) / shown.Height;
+                    float right = (covers.X + n.Right * covers.Width - shown.X) / shown.Width;
+                    float bottom = (covers.Y + n.Bottom * covers.Height - shown.Y) / shown.Height;
                     outlines.Add(new PointF[]
                     {
-                        new PointF(n.Left, n.Top), new PointF(n.Right, n.Top),
-                        new PointF(n.Right, n.Bottom), new PointF(n.Left, n.Bottom)
+                        new PointF(left, top), new PointF(right, top),
+                        new PointF(right, bottom), new PointF(left, bottom)
                     });
                 }
                 PointF[] bedCorners = new PointF[4];
                 PointF[] orientation = item.Box.Corners;
                 for (int corner = 0; corner < 4; corner++)
-                    bedCorners[corner] = new PointF((float)(orientation[corner].X / preview.Width * _activeBedW),
-                        (float)(orientation[corner].Y / preview.Height * _activeBedH));
+                    bedCorners[corner] = new PointF(
+                        covers.X + orientation[corner].X / preview.Width * covers.Width,
+                        covers.Y + orientation[corner].Y / preview.Height * covers.Height);
                 _cropPlanCorners.Add(bedCorners);
                 PointF[] bedOutline = null;
                 if (item.Outline != null)
                 {
                     bedOutline = new PointF[item.Outline.Length];
                     for (int vertex = 0; vertex < bedOutline.Length; vertex++)
-                        bedOutline[vertex] = new PointF((float)(item.Outline[vertex].X / preview.Width * _activeBedW),
-                            (float)(item.Outline[vertex].Y / preview.Height * _activeBedH));
+                        bedOutline[vertex] = new PointF(
+                            covers.X + item.Outline[vertex].X / preview.Width * covers.Width,
+                            covers.Y + item.Outline[vertex].Y / preview.Height * covers.Height);
                 }
                 _cropPlanOutlines.Add(bedOutline);
             }
@@ -4483,17 +4539,55 @@ namespace NextScan.App
             {
                 _previewPage = pages[0];
                 _canvas.SetImage(pages[0]);
-                RecordPageBedRect(pages[0], new RectangleF(0, 0, (float)_activeBedW, (float)_activeBedH));
 
-                // A new preview replaces whatever was selected before it, so an
-                // earlier hand-drawn selection no longer applies. Failing to
-                // clear this is what switched auto crop off for a whole session
-                // after a single drag.
-                _manualCrop = false;
-                _cropDrawnByUser = false;
+                // Where on the glass this preview actually came from. It is no
+                // longer always the whole bed, and everything downstream -- the
+                // detections, the plan, the crop maths -- is in bed inches, so
+                // getting this wrong puts every region in the wrong place.
+                RectangleF reg = _lastRequestedRegion;
+                RecordPageBedRect(pages[0], reg);
 
-                if (_paperSizeIndex >= 0 && _paperSizeIndex < _supportedPaperEntries.Count)
-                    ApplyPaperSizeToCanvasCrop(_supportedPaperEntries[_paperSizeIndex]);
+                _previewBedRect = (reg.Width > 0.05f && reg.Height > 0.05f)
+                    ? reg : new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
+
+                bool partial = reg.Width > 0.05f && reg.Height > 0.05f &&
+                               (reg.Width < _activeBedW - 0.05 || reg.Height < _activeBedH - 0.05);
+
+                if (partial)
+                {
+                    // Shown where it came from rather than filling the window:
+                    // the operator is looking closer at one part of the bed, not
+                    // at a new and smaller bed.
+                    RawImage bedView = MakeBedComposite(pages[0], reg);
+                    if (bedView != null)
+                    {
+                        _canvas.SetBedViewImage(bedView);
+                        _pageBedRect = new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
+                    }
+
+                    // The selection stands: it is what was just previewed, and
+                    // pressing Preview again should mean the same area, not the
+                    // whole platen.
+                    _canvas.CropNorm = new RectangleF(
+                        (float)(reg.X / _activeBedW), (float)(reg.Y / _activeBedH),
+                        (float)(reg.Width / _activeBedW), (float)(reg.Height / _activeBedH));
+                    _settings.CropNorm = _canvas.CropNorm;
+                    _manualCrop = true;
+                    _cropDrawnByUser = true;
+                }
+                else
+                {
+                    // A whole-bed preview replaces whatever was selected before
+                    // it, so an earlier hand-drawn selection no longer applies.
+                    // Failing to clear this is what switched auto crop off for a
+                    // whole session after a single drag.
+                    _manualCrop = false;
+                    _cropDrawnByUser = false;
+
+                    if (_paperSizeIndex >= 0 && _paperSizeIndex < _supportedPaperEntries.Count)
+                        ApplyPaperSizeToCanvasCrop(_supportedPaperEntries[_paperSizeIndex]);
+                }
+
                 UpdateProcessedPreview();
 
                 // Show what auto crop can see, on the preview, before the
