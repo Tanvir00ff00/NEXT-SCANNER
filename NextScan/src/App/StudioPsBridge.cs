@@ -32,7 +32,7 @@ namespace NextScan.App
     internal static class StudioPsBridge
     {
         const int Magic = 0x5246534E;      // 'NSFR'
-        const int Version = 1;
+        const int Version = 2;
         // 8 int32, then 2 double, then 6 int32, then 6 reserved int32. Counted
         // against the struct rather than guessed: a header a few bytes short
         // shifts every pixel and the page still arrives, just wrong.
@@ -85,17 +85,70 @@ namespace NextScan.App
         }
 
         static MemoryMappedFile _mapping;
-        static EventWaitHandle _ready, _done;
 
         /// <summary>
-        /// Publishes one page and waits for Photoshop to finish reading it.
+        /// Hands every page of a scan to Photoshop and waits for each one to be
+        /// read before building the next.
         ///
-        /// Returns false when there is nobody to hand it to, which is the
+        /// One at a time, not all at once: five 600 dpi pages is a great deal
+        /// of memory to hold a second copy of, and Photoshop takes them one at
+        /// a time regardless -- it asks for the next only once it has opened
+        /// the last.
+        ///
+        /// Returns false when there is nobody to hand them to, which is the
         /// ordinary case: the application is usually started by a person.
         /// </summary>
-        internal static bool Publish(RawImage page, int pageIndex, int pageCount, Action<string> log)
+        internal static bool PublishAll(IList<RawImage> pages, Action<string> log)
         {
-            if (!Serving || page == null || !page.IsValid) return false;
+            if (!Serving || pages == null || pages.Count == 0) return false;
+
+            try
+            {
+                // Opened once for the whole scan rather than per page. Ready and
+                // Done are auto reset, so each page is one exchange and neither
+                // side has to clear anything between them.
+                using (EventWaitHandle ready = new EventWaitHandle(
+                           false, EventResetMode.AutoReset, ReadyPrefix + Session))
+                using (EventWaitHandle done = new EventWaitHandle(
+                           false, EventResetMode.AutoReset, DonePrefix + Session))
+                using (EventWaitHandle cancel = new EventWaitHandle(
+                           false, EventResetMode.ManualReset, CancelPrefix + Session))
+                {
+                    for (int i = 0; i < pages.Count; i++)
+                    {
+                        if (cancel.WaitOne(0))
+                        {
+                            if (log != null)
+                                log("Photoshop stopped after " + i + " of " + pages.Count + " pages");
+                            return i > 0;
+                        }
+
+                        if (!Publish(pages[i], i + 1, pages.Count, ready, done, cancel, log))
+                            return i > 0;
+                    }
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (log != null) log("handing over failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Publishes one page into a mapping of its own and waits for the
+        /// plug-in to finish reading it.
+        ///
+        /// A mapping per page, because the application builds the next page
+        /// while the plug-in may still hold the last one open, and two mappings
+        /// cannot share a name.
+        /// </summary>
+        static bool Publish(RawImage page, int pageIndex, int pageCount,
+                            EventWaitHandle ready, EventWaitHandle done, EventWaitHandle cancel,
+                            Action<string> log)
+        {
+            if (page == null || !page.IsValid) return false;
 
             try
             {
@@ -111,7 +164,8 @@ namespace NextScan.App
                 long total = HeaderBytes + pixelBytes + iccBytes;
                 if (total > int.MaxValue) { if (log != null) log("page too large to hand over"); return false; }
 
-                _mapping = MemoryMappedFile.CreateNew(MappingPrefix + Session, total);
+                _mapping = MemoryMappedFile.CreateNew(
+                    MappingPrefix + Session + "." + pageIndex, total);
                 using (MemoryMappedViewAccessor view = _mapping.CreateViewAccessor(0, total))
                 {
                     WriteHeader(view, page, channels, bits, stride, (int)pixelBytes, iccBytes, pageIndex, pageCount);
@@ -119,22 +173,33 @@ namespace NextScan.App
                     if (iccBytes > 0) view.WriteArray(HeaderBytes + pixelBytes, icc, 0, iccBytes);
                 }
 
-                _ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyPrefix + Session);
-                _done = new EventWaitHandle(false, EventResetMode.ManualReset, DonePrefix + Session);
-
-                _ready.Set();
-                if (log != null) log("handed " + page.Width + "x" + page.Height + " to Photoshop, waiting");
+                ready.Set();
+                if (log != null)
+                    log("handed page " + pageIndex + " of " + pageCount + ", " +
+                        page.Width + "x" + page.Height + ", waiting");
 
                 // Photoshop reads straight out of the mapping, so it must stay
-                // alive until the plug-in says it is done with it.
-                if (!_done.WaitOne(TimeSpan.FromMinutes(10)) && log != null)
-                    log("Photoshop did not acknowledge the frame");
+                // alive until the plug-in says it is done with it. Cancel is
+                // waited on alongside Done: an import the operator gave up on
+                // must not cost them ten minutes of a stuck window.
+                WaitHandle[] either = new WaitHandle[] { done, cancel };
+                int woke = WaitHandle.WaitAny(either, TimeSpan.FromMinutes(10));
 
+                if (woke == WaitHandle.WaitTimeout)
+                {
+                    if (log != null) log("Photoshop did not acknowledge page " + pageIndex);
+                    return false;
+                }
+                if (woke == 1)
+                {
+                    if (log != null) log("Photoshop wants no more pages");
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)
             {
-                if (log != null) log("handing over failed: " + ex.Message);
+                if (log != null) log("handing over page " + pageIndex + " failed: " + ex.Message);
                 return false;
             }
             finally { Release(); }
@@ -176,11 +241,15 @@ namespace NextScan.App
                 say(string.Format("  {0,-16} {1,-10} {2}", what, got, ok ? "ok" : "EXPECTED " + want));
             };
 
-            using (EventWaitHandle done = new EventWaitHandle(false, EventResetMode.ManualReset,
-                                                              DonePrefix + Session))
+            using (EventWaitHandle ready = new EventWaitHandle(
+                       false, EventResetMode.AutoReset, ReadyPrefix + Session))
+            using (EventWaitHandle done = new EventWaitHandle(
+                       false, EventResetMode.AutoReset, DonePrefix + Session))
+            using (EventWaitHandle cancel = new EventWaitHandle(
+                       false, EventResetMode.ManualReset, CancelPrefix + Session))
             {
                 done.Set();                     // nobody is reading; do not wait for them
-                Publish(page, 1, 1, null);
+                Publish(page, 1, 1, ready, done, cancel, null);
             }
 
             // Publish disposes the mapping on the way out, so the check runs on
@@ -229,8 +298,121 @@ namespace NextScan.App
             check("0 becomes", row[2] | (row[3] << 8), 0);
 
             Session = null;
-            say(bad == 0 ? "  ok" : "  FAILED: " + bad + " field(s) wrong");
+            if (bad != 0) { say("  FAILED: " + bad + " field(s) wrong"); return 1; }
+            say("  layout ok");
+
+            say("");
+            say("NextScan Photoshop handover");
+            say("");
+            return Handshake(say);
+        }
+
+        /// <summary>
+        /// Plays the plug-in against the real publisher and checks that every
+        /// page arrives, in order, and that giving up stops the rest.
+        ///
+        /// The layout test above proves the two sides agree about bytes. This
+        /// proves they agree about turns, which is the half that fails by
+        /// hanging rather than by looking wrong -- and a hang inside Photoshop
+        /// is the least debuggable place it could happen. Every wait here is
+        /// bounded so a deadlock fails the build instead of stopping it.
+        /// </summary>
+        static int Handshake(Action<string> say)
+        {
+            int bad = 0;
+            Action<string, bool> check = delegate(string what, bool ok)
+            {
+                if (!ok) bad++;
+                say("  " + what.PadRight(38) + (ok ? "ok" : "FAILED"));
+            };
+
+            // Three pages of different sizes, so a page delivered out of order
+            // is visible rather than merely plausible.
+            List<RawImage> pages = new List<RawImage>();
+            for (int n = 1; n <= 3; n++)
+            {
+                int w = 8 * n, h = 4 * n;
+                RawImage page = new RawImage
+                {
+                    Width = w, Height = h, Channels = 3, BitsPerChannel = 8,
+                    Stride = w * 3, XDpi = 300, YDpi = 300
+                };
+                page.Pixels = new byte[page.Stride * h];
+                for (int i = 0; i < page.Pixels.Length; i++) page.Pixels[i] = (byte)n;
+                pages.Add(page);
+            }
+
+            check("all three pages, in order", Deal(pages, 3, 3) == "8x4#1/3 16x8#2/3 24x12#3/3");
+            check("giving up stops the rest", Deal(pages, 1, 3) == "8x4#1/3");
+
+            say(bad == 0 ? "  ok" : "  FAILED: " + bad + " check(s)");
             return bad == 0 ? 0 : 1;
+        }
+
+        /// <summary>
+        /// Publishes the pages while a second thread collects them the way the
+        /// plug-in does, stopping after <paramref name="take"/> of them.
+        /// Returns what was collected, as text, so a wrong order reads as a
+        /// wrong string rather than as a count that happens to match.
+        /// </summary>
+        static string Deal(List<RawImage> pages, int take, int expect)
+        {
+            Session = "handshake" + Environment.TickCount;
+            List<string> got = new List<string>();
+
+            Thread reader = new Thread(delegate()
+            {
+                // Anything that goes wrong here is recorded rather than thrown.
+                // A reader that dies on a background thread would take the whole
+                // self test down with a stack trace, when what the caller needs
+                // is one line saying which turn went wrong -- and a publisher
+                // left waiting on a Done that will never come is exactly the
+                // fault this test exists to catch.
+                try
+                {
+                    using (EventWaitHandle ready = new EventWaitHandle(
+                               false, EventResetMode.AutoReset, ReadyPrefix + Session))
+                    using (EventWaitHandle done = new EventWaitHandle(
+                               false, EventResetMode.AutoReset, DonePrefix + Session))
+                    using (EventWaitHandle cancel = new EventWaitHandle(
+                               false, EventResetMode.ManualReset, CancelPrefix + Session))
+                    {
+                        for (int n = 1; n <= take; n++)
+                        {
+                            if (!ready.WaitOne(TimeSpan.FromSeconds(10)))
+                            { got.Add("page " + n + " never came"); return; }
+
+                            try
+                            {
+                                using (MemoryMappedFile map = MemoryMappedFile.OpenExisting(
+                                           MappingPrefix + Session + "." + n))
+                                using (MemoryMappedViewAccessor view = map.CreateViewAccessor())
+                                {
+                                    got.Add(view.ReadInt32(8) + "x" + view.ReadInt32(12) +
+                                            "#" + view.ReadInt32(64) + "/" + view.ReadInt32(68));
+                                }
+                            }
+                            finally
+                            {
+                                // Released even when the read threw, so a broken
+                                // reader reports a wrong page instead of hanging
+                                // the publisher for ten minutes.
+                                if (n == take && take < expect) cancel.Set();
+                                done.Set();
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { got.Add(ex.GetType().Name); }
+            });
+            reader.IsBackground = true;
+            reader.Start();
+
+            PublishAll(pages, null);
+            reader.Join(TimeSpan.FromSeconds(20));
+
+            Session = null;
+            return string.Join(" ", got.ToArray());
         }
 
         /// <summary>Lets the plug-in stop waiting when the operator closes us.</summary>
@@ -249,10 +431,8 @@ namespace NextScan.App
 
         static void Release()
         {
-            try { if (_ready != null) _ready.Dispose(); } catch { }
-            try { if (_done != null) _done.Dispose(); } catch { }
             try { if (_mapping != null) _mapping.Dispose(); } catch { }
-            _ready = null; _done = null; _mapping = null;
+            _mapping = null;
         }
 
         static void WriteHeader(MemoryMappedViewAccessor view, RawImage page, int channels, int bits,

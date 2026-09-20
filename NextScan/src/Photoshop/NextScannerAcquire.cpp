@@ -50,12 +50,15 @@ namespace
         HANDLE ready;
         HANDLE done;
         HANDLE cancel;
+        HANDLE app;
         const unsigned char* view;
         const NextScanFrame* frame;
         int32_t nextRow;
+        int32_t nextPage;         /* 1 based: which mapping to open next */
+        int32_t pageCount;        /* learned from the page the application sent */
 
-        Session() : mapping(NULL), ready(NULL), done(NULL), cancel(NULL),
-                    view(NULL), frame(NULL), nextRow(0) {}
+        Session() : mapping(NULL), ready(NULL), done(NULL), cancel(NULL), app(NULL),
+                    view(NULL), frame(NULL), nextRow(0), nextPage(1), pageCount(0) {}
     };
 
     Session g;
@@ -110,13 +113,37 @@ namespace
 
     void Close(HANDLE& h) { if (h) { CloseHandle(h); h = NULL; } }
 
-    void Release()
+    /* Lets go of one page. The application is waiting on Done to hear that its
+       mapping is free, so this is also what lets it build the next one. The
+       session stays open: there may be more pages behind this one. */
+    void ReleaseFrame()
     {
-        if (g.done) SetEvent(g.done);           /* the application may now free the mapping */
         if (g.view) { UnmapViewOfFile(g.view); g.view = NULL; }
         g.frame = NULL;
-        Close(g.mapping); Close(g.ready); Close(g.done); Close(g.cancel);
+        Close(g.mapping);
         g.nextRow = 0;
+        if (g.done) SetEvent(g.done);
+    }
+
+    /* Ends the conversation.
+
+       Cancel means stop early, never "we are finished": the application waits
+       on Done and Cancel together, so setting it on the ordinary path would
+       make a completed scan look abandoned. It is set when the import failed,
+       was given up on, or - through Finalize - when Photoshop took the first
+       page and never came back for the rest, which is what a host that ignores
+       acquireAgain looks like from here.
+
+       It is set before the page is released rather than after, so the
+       application sees it the instant Done frees it, instead of racing ahead
+       to prepare a page nobody will collect. */
+    void EndSession(bool stopApplication)
+    {
+        if (stopApplication && g.cancel) SetEvent(g.cancel);
+        ReleaseFrame();
+        Close(g.ready); Close(g.done); Close(g.cancel); Close(g.app);
+        g.nextPage = 1;
+        g.pageCount = 0;
         g.id.clear();
     }
 
@@ -183,7 +210,10 @@ namespace
     }
 
     /* Starts a scan and maps the result. Returns a Photoshop error code. */
-    int16 BeginScan()
+    /* Starts the application. Only the first page pays for this: the rest come
+       back down the same pipe, from the same run, and the operator never sees
+       the window open twice. */
+    int16 StartApplication()
     {
         std::wstring app = FindApplication();
         if (app.empty())
@@ -196,49 +226,77 @@ namespace
         wchar_t id[64];
         wsprintfW(id, L"%lu_%lu", GetCurrentProcessId(), GetTickCount());
         g.id = id;
+        g.nextPage = 1;
+        g.pageCount = 0;
 
-        g.ready  = CreateEventW(NULL, TRUE, FALSE, Named(NEXTSCAN_READY_PREFIX, g.id).c_str());
-        g.done   = CreateEventW(NULL, TRUE, FALSE, Named(NEXTSCAN_DONE_PREFIX, g.id).c_str());
-        g.cancel = CreateEventW(NULL, TRUE, FALSE, Named(NEXTSCAN_CANCEL_PREFIX, g.id).c_str());
-        if (!g.ready || !g.done || !g.cancel) { Release(); return memFullErr; }
+        /* Ready and Done are auto reset: one signal with one waiter, emptied by
+           the wait that takes it, so a page boundary costs no bookkeeping.
+           Cancel is manual - once no more pages are wanted, that stays true. */
+        g.ready  = CreateEventW(NULL, FALSE, FALSE, Named(NEXTSCAN_READY_PREFIX, g.id).c_str());
+        g.done   = CreateEventW(NULL, FALSE, FALSE, Named(NEXTSCAN_DONE_PREFIX, g.id).c_str());
+        g.cancel = CreateEventW(NULL, TRUE,  FALSE, Named(NEXTSCAN_CANCEL_PREFIX, g.id).c_str());
+        if (!g.ready || !g.done || !g.cancel) { EndSession(true); return memFullErr; }
 
         std::wstring command = L"\"" + app + L"\" --ps-acquire " + g.id;
-        std::wstring mutableCommand = command;
 
         STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
         PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
-        if (!CreateProcessW(NULL, &mutableCommand[0], NULL, NULL, FALSE,
+        if (!CreateProcessW(NULL, &command[0], NULL, NULL, FALSE,
                             0, NULL, NULL, &si, &pi))
         {
             Say(L"Next Scanner could not be started.", MB_ICONWARNING);
-            Release();
+            EndSession(true);
             return userCanceledErr;
         }
         CloseHandle(pi.hThread);
 
-        bool ready = WaitForScan(pi.hProcess);
-        CloseHandle(pi.hProcess);
-        if (!ready) { Release(); return userCanceledErr; }   /* cancelled, or never came */
+        /* Kept rather than closed: every page waits on this as well as on the
+           frame, so closing the application ends the import instead of hanging
+           it. EndSession is what finally lets it go. */
+        g.app = pi.hProcess;
+        return noErr;
+    }
 
-        g.mapping = OpenFileMappingW(FILE_MAP_READ, FALSE,
-                                     Named(NEXTSCAN_MAPPING_PREFIX, g.id).c_str());
-        if (!g.mapping) { Release(); return userCanceledErr; }
+    /* Waits for the next page and maps it. Returns a Photoshop error code. */
+    int16 TakeNextFrame()
+    {
+        if (!WaitForScan(g.app)) { EndSession(true); return userCanceledErr; }
+
+        wchar_t suffix[24];
+        wsprintfW(suffix, L".%ld", static_cast<long>(g.nextPage));
+        std::wstring name = Named(NEXTSCAN_MAPPING_PREFIX, g.id) + suffix;
+
+        g.mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name.c_str());
+        if (!g.mapping) { EndSession(true); return userCanceledErr; }
 
         g.view = static_cast<const unsigned char*>(MapViewOfFile(g.mapping, FILE_MAP_READ, 0, 0, 0));
-        if (!g.view) { Release(); return memFullErr; }
+        if (!g.view) { EndSession(true); return memFullErr; }
 
         g.frame = reinterpret_cast<const NextScanFrame*>(g.view);
         if (g.frame->magic != NEXTSCAN_FRAME_MAGIC || g.frame->version != NEXTSCAN_FRAME_VERSION)
         {
             Say(L"Next Scanner sent a frame this plug-in does not understand.\n"
                 L"The application and the plug-in are different versions.", MB_ICONWARNING);
-            Release();
+            EndSession(true);
             return errPlugInHostInsufficient;
         }
-        if (g.frame->width <= 0 || g.frame->height <= 0) { Release(); return userCanceledErr; }
+        if (g.frame->width <= 0 || g.frame->height <= 0) { EndSession(true); return userCanceledErr; }
 
+        g.pageCount = g.frame->pageCount;
         g.nextRow = 0;
         return noErr;
+    }
+
+    /* The whole job of the Start handler: make sure the application is running,
+       then take whichever page is next. */
+    int16 BeginScan()
+    {
+        if (g.ready == NULL)
+        {
+            int16 launched = StartApplication();
+            if (launched != noErr) return launched;
+        }
+        return TakeNextFrame();
     }
 
     /* Describes the waiting image to Photoshop. Called once, at Start. */
@@ -359,7 +417,7 @@ DLLExport MACPASCAL void PluginMain(const int16 selector,
         {
             int16 started = BeginScan();
             if (started != noErr) { *result = started; return; }
-            if (!RangeAgrees()) { Release(); *result = errPlugInHostInsufficient; return; }
+            if (!RangeAgrees()) { EndSession(true); *result = errPlugInHostInsufficient; return; }
 
             Describe(acquireRecord);
             Deliver(acquireRecord);
@@ -372,10 +430,31 @@ DLLExport MACPASCAL void PluginMain(const int16 selector,
             break;
 
         case acquireSelectorFinish:
-        case acquireSelectorFinalize:
+        {
             /* Finish arrives whether the import completed or was abandoned, so
-               this is the one place the mapping is guaranteed to be released. */
-            Release();
+               this is where a page is always let go of. Whether another follows
+               has to be read before the mapping that says so is unmapped. */
+            bool more = g.frame != NULL && g.frame->pageIndex < g.frame->pageCount;
+            ReleaseFrame();
+
+            if (more)
+            {
+                g.nextPage++;
+                /* Adobe is explicit that a host may ignore this, and that
+                   Finish must clean up regardless. So the session is left open
+                   while nothing is held, and Finalize closes it if Start never
+                   comes back. */
+                acquireRecord->acquireAgain = TRUE;
+            }
+            else EndSession(false);   /* every page delivered; nothing to cancel */
+            break;
+        }
+
+        case acquireSelectorFinalize:
+            /* The last word. If Photoshop honoured acquireAgain the session is
+               already closed and this does nothing; if it did not, this is what
+               releases the application from waiting on pages two onward. */
+            EndSession(true);
             break;
 
         default:

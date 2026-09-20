@@ -4556,8 +4556,10 @@ namespace NextScan.App
                 // the window closes once Photoshop has the pixels.
                 if (StudioPsBridge.Serving && pages.Count > 0)
                 {
-                    PinStatus("Handing the scan to Photoshop…");
-                    StudioPsBridge.Publish(pages[0], 1, pages.Count, Log);
+                    PinStatus(pages.Count == 1
+                              ? "Handing the scan to Photoshop…"
+                              : "Handing " + pages.Count + " items to Photoshop…");
+                    StudioPsBridge.PublishAll(pages, Log);
                     BeginInvoke((MethodInvoker)delegate { Close(); });
                 }
                 else if (_settings.OpenInPhotoshop)

@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #define NEXTSCAN_FRAME_MAGIC   0x5246534EL   /* 'NSFR' little-endian */
-#define NEXTSCAN_FRAME_VERSION 1
+#define NEXTSCAN_FRAME_VERSION 2
 
 #pragma pack(push, 4)
 struct NextScanFrame
@@ -57,7 +57,27 @@ struct NextScanFrame
 /* Named objects, all suffixed with the session id the plug-in generates so two
    Photoshops asking at once cannot collide. Local\ rather than Global\ because
    both processes are the same user and Global needs a privilege we should not
-   be asking for. */
+   be asking for.
+
+   One scan can carry several items - five cards laid on the glass are five
+   pages - so the mapping name carries the page number as well:
+
+       Local\NextScan.Frame.<session>.<page>      the page number is 1 based
+
+   A name per page rather than one name reused, because the application builds
+   the next page while the plug-in may still hold the last one open, and two
+   mappings cannot share a name.
+
+   Ready and Done are auto reset. Each page is one exchange - the application
+   signals Ready, the plug-in signals Done - and an auto reset event is emptied
+   by the wait that receives it, so neither side has to remember to clear it
+   before the next page. A forgotten reset would not fail loudly: it would hand
+   Photoshop the same page twice.
+
+   Cancel is manual reset and means the same thing from either direction: no
+   more pages. The application sets it when the operator closes it without
+   scanning, and the plug-in sets it when Photoshop will take no more - which
+   is also what happens on a host that ignores acquireAgain. */
 #define NEXTSCAN_MAPPING_PREFIX  L"Local\\NextScan.Frame."
 #define NEXTSCAN_READY_PREFIX    L"Local\\NextScan.Ready."
 #define NEXTSCAN_DONE_PREFIX     L"Local\\NextScan.Done."
