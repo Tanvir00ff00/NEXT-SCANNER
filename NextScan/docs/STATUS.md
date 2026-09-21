@@ -1792,8 +1792,10 @@ Still outstanding:
 - **ICC colour management** (§10.6) — pages are tagged sRGB and Photoshop assigns
   rather than converts; no device profile, no conversion. See section 12.
 - **Quirks DB** (§7.6) — not started; two real entries are waiting for it.
-- **Photoshop target modes** (§14.4) — always a new document; no layer or smart
-  object target.
+- ~~**Photoshop target modes** (§14.4)~~ — dropped on 2026-09-21, not deferred.
+  A new document per item is what the owner actually wants; layer and smart
+  object targets were planned before the connector existed and have not been
+  missed since it did.
 - **Remaining test coverage**: real-device matrix, GUI workflows, long watchdog /
   cancellation, and the installer's registry and shortcut work, which was checked
   by hand rather than by a test. Imaging, crop, export, cancellation, ONNX
@@ -2495,6 +2497,11 @@ against 54. Either that card is not an ID-1 card, or something at its end is not
 visible in the capture. Settling which needs the owner to measure that specific
 card with a ruler; it cannot be settled from this end without looking at the
 document itself, which these references exist to avoid.
+
+**Closed on 2026-09-21 without settling it.** The owner decided the millimetre
+is not worth chasing, so the joined card's measurement stands as recorded and
+this stops being an open question. The reasoning below is kept because the
+method is reusable, not because the number still needs an answer.
 
 Two things were tried for the remaining millimetre and reverted, both measured:
 
