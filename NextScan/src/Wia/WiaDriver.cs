@@ -318,6 +318,14 @@ namespace NextScan.Wia
         }
 
         // ---------------------------------------------------------------- scan
+        /// <summary>
+        /// The colour profile the device named for the last scan, or empty when
+        /// it named none. A name rather than the bytes: both processes are on
+        /// the same machine, so the name resolves to the same file at both ends
+        /// and there is no profile to marshal across the pipe.
+        /// </summary>
+        public string ColorProfile = "";
+
         public NsResult Scan(string deviceId, ScanSettings settings, Func<RawImage, bool> onImage)
         {
             IWiaDevMgr2 mgr = null;
@@ -370,6 +378,17 @@ namespace NextScan.Wia
                     "' category=" + pickedCat + " type=0x" + pickedType.ToString("x"));
 
                 ApplySettings(itemProps, settings);
+
+                // What the driver says describes this scanner's colour. Asked of
+                // the item first and the device second, because a device with
+                // several items can profile them separately -- a flatbed and a
+                // transparency unit do not see colour the same way.
+                ColorProfile = ReadString(itemProps, WiaConst.WIA_IPA_ICM_PROFILE_NAME, "");
+                if (ColorProfile.Length == 0)
+                    ColorProfile = ReadString(devProps, WiaConst.WIA_IPA_ICM_PROFILE_NAME, "");
+                Log(ColorProfile.Length > 0
+                    ? "WIA colour profile: " + ColorProfile
+                    : "WIA: this device names no colour profile");
 
                 IWiaTransfer transfer = target as IWiaTransfer;
                 if (transfer == null)

@@ -49,6 +49,8 @@ namespace NextScan.Wia
         public const uint WIA_IPA_NUMBER_OF_LINES = 4114;
         public const uint WIA_IPA_ITEM_SIZE = 4116;
         public const uint WIA_IPA_ITEM_CATEGORY = 4125;
+        /// <summary>The profile the driver says describes this scanner. Taken from wiadef.h.</summary>
+        public const uint WIA_IPA_ICM_PROFILE_NAME = 4120;
 
         // Scan parameters
         public const uint WIA_IPS_CUR_INTENT = 6146;

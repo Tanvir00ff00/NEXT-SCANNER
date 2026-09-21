@@ -381,6 +381,22 @@ namespace NextScan.Twain
         /// Runs one acquisition. onImage is called per page on this thread; return
         /// false from it to stop a batch early.
         /// </summary>
+        /// <summary>
+        /// Empty for TWAIN, always, and the reason is worth writing down.
+        ///
+        /// TWAIN's ICAP_ICCPROFILE does not hand over a profile: it asks the data
+        /// source whether to embed or link one inside the transferred image, and
+        /// a memory transfer of a raw DIB has nowhere to put it. The profile
+        /// itself lives behind DAT_EXTIMAGEINFO / TWEI_ICCPROFILE, which is
+        /// TWAIN 2.x, optional, and almost never implemented by consumer flatbed
+        /// drivers.
+        ///
+        /// So the capability is queried for one purpose only: to tell the
+        /// operator a definite "this scanner does not offer one" instead of
+        /// leaving them to wonder. A chosen profile is the answer on TWAIN.
+        /// </summary>
+        public string ColorProfile = "";
+
         public NsResult Scan(string productName, ScanSettings settings, Func<RawImage, bool> onImage)
         {
             EnsureCanonScanGearSettings(productName);
@@ -514,6 +530,11 @@ namespace NextScan.Twain
 
             // 4. Units before any geometry or resolution value.
             s.CapSet(ICAP.UNITS, TWTY.UINT16, TWUN.INCHES);
+
+            Log(s.CapIsSupported(ICAP.ICCPROFILE)
+                ? "TWAIN: the source knows ICAP_ICCPROFILE, but that only embeds a profile inside the "
+                  + "transferred image and this is a memory transfer, so no profile comes from it"
+                : "TWAIN: this source offers no colour profile");
 
             // 5. Resolution.
             double dpi = settings.Dpi;

@@ -1859,6 +1859,85 @@ namespace NextScan.App
             _tgMultiPage.Enabled = PageWriter.SupportsMultiPage(_settings.OutputFormat);
             _tgMultiPage.CheckedChanged += delegate { _settings.MultiPageFile = _tgMultiPage.Checked; };
 
+            AddSectionLabel("Colour profile", ref y);
+
+            Label profileNow = new Label
+            {
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 30),
+                ForeColor = Theme.TextFaint,
+                BackColor = Color.Transparent,
+                Font = Theme.Ui(8f)
+            };
+            _drawerHost.Controls.Add(profileNow);
+            y += 34;
+
+            EventHandler sayWhichProfile = delegate
+            {
+                string chosen = _settings.ColorProfilePath;
+                profileNow.Text = string.IsNullOrEmpty(chosen)
+                    ? "The scanner's own, if it names one. Otherwise sRGB."
+                    : "Using " + Path.GetFileName(chosen);
+            };
+            sayWhichProfile(null, EventArgs.Empty);
+
+            NsPill pickProfile = new NsPill
+            {
+                Text = "Choose a profile",
+                Kind = PillKind.Normal,
+                Radius = 7,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw - 84, 32)
+            };
+            pickProfile.Click += delegate
+            {
+                using (OpenFileDialog dialog = new OpenFileDialog())
+                {
+                    dialog.Title = "Choose a colour profile for this scanner";
+                    dialog.Filter = "ICC profiles (*.icc;*.icm)|*.icc;*.icm|All files (*.*)|*.*";
+                    try
+                    {
+                        dialog.InitialDirectory = Path.Combine(
+                            Environment.GetFolderPath(Environment.SpecialFolder.System),
+                            @"spool\drivers\color");
+                    }
+                    catch { }
+
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+                    // Checked before it is kept, not when a scan is delivered.
+                    // Finding out then means finding out from a page that went
+                    // out claiming to know what its colours mean.
+                    if (IccProfile.Load(dialog.FileName) == null)
+                    {
+                        SetStatus("That file is not a colour profile.");
+                        return;
+                    }
+
+                    _settings.ColorProfilePath = dialog.FileName;
+                    sayWhichProfile(null, EventArgs.Empty);
+                    SetStatus("Colour profile set to " + Path.GetFileName(dialog.FileName) + ".");
+                }
+            };
+            _drawerHost.Controls.Add(pickProfile);
+
+            NsPill clearProfile = new NsPill
+            {
+                Text = "Clear",
+                Kind = PillKind.Quiet,
+                Radius = 7,
+                Location = new Point(Dx + Dw - 78, y),
+                Size = new Size(78, 32)
+            };
+            clearProfile.Click += delegate
+            {
+                _settings.ColorProfilePath = "";
+                sayWhichProfile(null, EventArgs.Empty);
+                SetStatus("Back to the scanner's own profile, or sRGB.");
+            };
+            _drawerHost.Controls.Add(clearProfile);
+            y += 44;
+
             AddFieldLabel("Name pattern", ref y);
             NsTextBox pattern = new NsTextBox
             {
@@ -3477,9 +3556,12 @@ namespace NextScan.App
         /// A white sheet the size of the selected scanner's platen, shown before
         /// anything has been scanned.
         ///
-        /// 100 dpi is deliberate: it is enough to crop against accurately while
-        /// keeping an A4 bed at roughly 3 MB, and it matches the dpi a preview
-        /// would have produced, so the crop maths is identical either way.
+        /// 100 dpi is deliberate, and it is no longer the preview's resolution:
+        /// this sheet is a white rectangle to drag a selection on, so its only
+        /// requirements are that an A4 bed stays around 3 MB and that it is
+        /// large enough to draw on. The crop maths does not care either way --
+        /// a selection is held in inches on the glass, not in pixels of
+        /// whatever happens to be displayed underneath it.
         /// </summary>
         static RawImage MakeBlankSheet(double widthIn, double heightIn, int dpi)
         {
@@ -4997,13 +5079,9 @@ namespace NextScan.App
                     PinStatus(pages.Count == 1
                               ? "Handing the scan to Photoshop…"
                               : "Handing " + pages.Count + " items to Photoshop…");
-                    // What the numbers mean, said rather than left to whatever
-                    // Photoshop happens to assume. The device has not told us,
-                    // so this is sRGB and is logged as an assumption.
-                    byte[] icc = IccProfile.Srgb();
-                    Log(icc == null
-                        ? "no sRGB profile on this machine; pages go untagged"
-                        : "tagging pages sRGB (" + icc.Length + " bytes)");
+                    string whichProfile;
+                    byte[] icc = ColourProfileInUse(out whichProfile);
+                    Log(whichProfile);
                     StudioPsBridge.PublishAll(pages, icc, Log);
                     BeginInvoke((MethodInvoker)delegate { Close(); });
                 }
@@ -5638,6 +5716,59 @@ namespace NextScan.App
             if (_tgAdaptive != null) _tgAdaptive.Enabled = bilevel;
             if (_slBwThreshold != null)
                 _slBwThreshold.Enabled = bilevel && !_settings.AdaptiveThreshold;
+        }
+
+        /// <summary>
+        /// The profile to attach to a delivered page, and where it came from.
+        ///
+        /// Three answers in order of authority, because they are three different
+        /// strengths of claim:
+        ///
+        ///   what the device said   it measured itself, or its maker did
+        ///   what the operator set  they know something we do not, such as a
+        ///                          profile made from an IT8 target on this glass
+        ///   sRGB                   an assumption, and said to be one
+        ///
+        /// The device is asked first and almost always says nothing. Most WIA
+        /// drivers name no profile, TWAIN has no way to hand one over at all,
+        /// and eSCL is sRGB by specification. That is precisely why the middle
+        /// answer exists: without it the first would be decorative.
+        ///
+        /// Whatever is chosen is assigned and never converted. Saying what the
+        /// numbers mean is a different act from changing them, and only the
+        /// first is ours to do.
+        /// </summary>
+        byte[] ColourProfileInUse(out string where)
+        {
+            string named = _broker != null ? _broker.LastColorProfile : null;
+            if (!string.IsNullOrEmpty(named))
+            {
+                byte[] fromDevice = IccProfile.Load(named);
+                if (fromDevice != null)
+                {
+                    where = "colour profile from the scanner: " + named;
+                    return fromDevice;
+                }
+                Log("the scanner named a profile we could not read: " + named);
+            }
+
+            if (!string.IsNullOrEmpty(_settings.ColorProfilePath))
+            {
+                byte[] chosen = IccProfile.Load(_settings.ColorProfilePath);
+                if (chosen != null)
+                {
+                    where = "colour profile chosen for this scanner: " +
+                            Path.GetFileName(_settings.ColorProfilePath);
+                    return chosen;
+                }
+                Log("the chosen colour profile could not be read: " + _settings.ColorProfilePath);
+            }
+
+            byte[] srgb = IccProfile.Srgb();
+            where = srgb == null
+                ? "no sRGB profile on this machine; pages go untagged"
+                : "no profile from the scanner and none chosen, so pages are tagged sRGB";
+            return srgb;
         }
 
         ToneSettings CurrentTone()

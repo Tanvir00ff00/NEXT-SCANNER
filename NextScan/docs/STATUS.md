@@ -3064,3 +3064,78 @@ and it is one click.
 - **1.0** — everything up to and including section 14.
 - **1.1** — named jobs.
 - **1.2** — advanced colour, the clean-up pass, and a neutral start.
+
+## 17. Asking the scanner what its colours mean, 2026-09-21
+
+Section 12 left pages tagged sRGB with a note that a device profile needed the
+host protocol extended. It is extended now, and the honest result is that on
+this scanner it will answer nothing -- which is exactly why the feature is two
+halves rather than one.
+
+### What each transport can say
+
+| | |
+| --- | --- |
+| **WIA** | Reads `WIA_IPA_ICM_PROFILE_NAME` (4120), item first and device second, because a device with a flatbed and a transparency unit does not see colour the same way through both. Most drivers name nothing. |
+| **TWAIN** | Cannot say at all. |
+| **eSCL** | sRGB by specification; nothing to ask. |
+
+TWAIN deserves its own paragraph because it looks like it should work.
+`ICAP_ICCPROFILE` is declared in `TwainTypes.cs` and has been there all along,
+but it does not hand a profile over: it asks the data source whether to embed or
+link one *inside the transferred image*, and this is a memory transfer of a raw
+DIB with nowhere to put it. The profile itself lives behind `DAT_EXTIMAGEINFO` /
+`TWEI_ICCPROFILE`, which is TWAIN 2.x, optional, and virtually absent from
+consumer flatbed drivers. The capability is therefore queried for one reason
+only: so the log can say "this source offers no colour profile" as a fact rather
+than leaving the operator to wonder.
+
+Since the owner's scanner is 32-bit TWAIN, that is the answer they will get.
+
+### Which is why there is a second half
+
+A feature that only asks the device would be decorative here. So the profile is
+chosen from three answers, in order of how strong a claim each makes:
+
+    what the device said    it measured itself, or its maker did
+    what the operator set   they know something we do not -- a profile made
+                            from an IT8 target on this glass, say
+    sRGB                    an assumption, and said to be one
+
+The operator's choice lives under Output rather than Look. That is a real
+distinction and not a filing decision: Look is where a page is made to look
+different, and a profile changes nothing about how a page looks. It is
+*assigned*, never converted. Saying what the numbers mean and changing them are
+different acts, and only the first is ours to do.
+
+A chosen file is validated when it is chosen, not when a scan is delivered.
+Finding out at delivery means finding out from a page that has already gone out
+claiming to know what its colours mean.
+
+`ColorProfilePath` is filed with the scanner, not the job: it is in
+`NotPartOfAJob`, so it survives a restart and presets do not carry it. A profile
+measured from this machine's scanner would be a lie about anybody else's.
+
+### The transport itself
+
+The host emits the profile *name*, once, with the result rather than on every
+frame -- it describes the scanner, not the page. A name and not the bytes,
+because both processes are on the same machine and the name resolves to the same
+file at both ends, so there is no profile to marshal across the pipe.
+
+### Preview resolution
+
+The preview default moved from 100 dpi to 300. Auto crop measures the preview
+and not the scan, so a coarse preview finds fewer small items and places their
+edges less precisely, and that cost lands on every page. A preview costs seconds;
+a crop measured a millimetre out costs the page. It is also the resolution every
+golden crop case is written at, so it is the resolution the engine is best tested
+at.
+
+One comment had to be corrected rather than left to rot. `MakeBlankSheet` builds
+its placeholder at 100 dpi and explained that this "matches the dpi a preview
+would have produced". It no longer does. The sheet stays at 100 -- it is a white
+rectangle to drag a selection on, and twenty-six megabytes of white pixels would
+buy nothing -- but the reasoning now says what is actually true: a selection is
+held in inches on the glass, so what is displayed underneath it does not enter
+the arithmetic.

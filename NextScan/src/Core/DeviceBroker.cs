@@ -258,9 +258,19 @@ namespace NextScan.Core
         /// Runs an acquisition. onFrame is called per page on a background thread.
         /// Return false from it to stop the batch.
         /// </summary>
+        /// <summary>
+        /// The colour profile the device named for the last scan, or empty.
+        ///
+        /// Empty is the ordinary answer, not a fault: most WIA devices name
+        /// nothing, TWAIN cannot say at all, and eSCL is sRGB by specification
+        /// with nothing to ask. What fills the gap is the caller's decision.
+        /// </summary>
+        public string LastColorProfile = "";
+
         public NsResult Scan(DeviceDescriptor device, ScanSettings settings,
                              Func<RawImage, bool> onFrame, Action<string, int> onProgress)
         {
+            LastColorProfile = "";
             return ScanAttempt(device, settings, onFrame, onProgress, true);
         }
 
@@ -586,7 +596,12 @@ namespace NextScan.Core
 
                     lock (run.Messages) { run.Messages.Add(o); }
 
-                    if (type == "result") { run.Result = NsResult.FromJson(o); run.SawResult = true; }
+                    if (type == "result")
+                    {
+                        run.Result = NsResult.FromJson(o);
+                        run.SawResult = true;
+                        LastColorProfile = o.Str("colorProfile", "");
+                    }
 
                     if (onMessage != null)
                     {

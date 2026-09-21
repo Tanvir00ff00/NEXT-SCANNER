@@ -21,6 +21,16 @@ namespace NextScan.App
         public string DeviceName = "";
         public Transport Transport = Transport.None;
         public int HostBitness = 64;
+
+        /// <summary>
+        /// A profile the operator chose for this scanner, or empty.
+        ///
+        /// Filed with the scanner rather than with the job, because that is what
+        /// it describes. It therefore survives a restart and is not carried by
+        /// presets: a profile measured from this machine's scanner would be a
+        /// lie about anyone else's.
+        /// </summary>
+        public string ColorProfilePath = "";
         public int Dpi = 300;
         public ColorMode Mode = ColorMode.Color24;
 
@@ -33,7 +43,12 @@ namespace NextScan.App
         //
         // 100 dpi is the shipped default because an A4 bed lands at roughly
         // 3 MB there and detection measures an ID card to within a millimetre.
-        public int PreviewDpi = 100;
+        // 300, matching the scan, because auto crop measures the preview and
+        // not the scan: a coarse preview finds fewer small items and places
+        // their edges less precisely, and that cost lands on every page. A
+        // preview costs seconds; a crop measured a millimetre out costs the
+        // page. PreviewDpi() still clamps this to what the device offers.
+        public int PreviewDpi = 300;
         public ColorMode PreviewMode = ColorMode.Color24;
 
         /// <summary>
@@ -212,6 +227,7 @@ namespace NextScan.App
                         case "sharpen": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.Sharpen = v; break; }
                         case "backgroundclean": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.BackgroundClean = v; break; }
                         case "despeckle": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.Despeckle = v; break; }
+                        case "colorprofile": s.ColorProfilePath = val; break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
                                 && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -322,6 +338,7 @@ namespace NextScan.App
                 lines.Add("previewmode=" + PreviewMode);
                 lines.Add("previewmatchesscan=" + (PreviewMatchesScan ? "on" : "off"));
                 lines.Add("usemodel=" + (UseModel ? "on" : "off"));
+                lines.Add("colorprofile=" + ColorProfilePath);
                 lines.Add("autotone=" + AutoTone);
                 lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));
                 lines.Add("vibrance=" + Vibrance.ToString(CultureInfo.InvariantCulture));

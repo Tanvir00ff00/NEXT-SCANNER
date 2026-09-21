@@ -35,7 +35,7 @@ namespace NextScan.App
         /// </summary>
         static readonly string[] NotPartOfAJob =
         {
-            "DeviceName", "Transport", "HostBitness",
+            "DeviceName", "Transport", "HostBitness", "ColorProfilePath",
             "HotFolderPath", "HotFolderGroupPerBatch", "HotFolderDisposition"
         };
 

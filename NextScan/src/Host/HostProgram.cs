@@ -215,6 +215,7 @@ namespace NextScan.Host
                 wia.Log = LogLine;
                 wia.ShouldCancel = shouldCancel;
                 r = wia.Scan(device, settings, onImage);
+                _colorProfile = wia.ColorProfile ?? "";
             }
             else
             {
@@ -222,6 +223,7 @@ namespace NextScan.Host
                 twain.Log = LogLine;
                 twain.ShouldCancel = shouldCancel;
                 r = twain.Scan(device, settings, onImage);
+                _colorProfile = twain.ColorProfile ?? "";
             }
 
             if (r.Ok && pageCounter == 0)
@@ -304,10 +306,17 @@ namespace NextScan.Host
 
         static void EmitResult(NsResult r) { EmitResult(r, -1); }
 
+        /// <summary>
+        /// The profile the device named, reported once with the result rather
+        /// than on every frame: it describes the scanner, not the page.
+        /// </summary>
+        static string _colorProfile = "";
+
         static void EmitResult(NsResult r, int pages)
         {
             JsonObj o = r.ToJson();
             o["type"] = "result";
+            o["colorProfile"] = _colorProfile;
             if (pages >= 0) o["pages"] = pages;
             o["hostBitness"] = IntPtr.Size * 8;
             Emit(o);
