@@ -2276,6 +2276,26 @@ namespace NextScan.App
             y += 40;
         }
 
+        /// <summary>
+        /// The shortcuts, read off the same list the keyboard uses.
+        /// </summary>
+        void BuildShortcutSettings(ref int y)
+        {
+            AddSectionLabel("Keyboard", ref y);
+
+            string group = "";
+            foreach (Shortcut shortcut in Shortcuts())
+            {
+                if (shortcut.Group != group)
+                {
+                    group = shortcut.Group;
+                    AddFieldLabel(group, ref y);
+                }
+                AddReadout(shortcut.Does, shortcut.Keys_, ref y);
+            }
+            y += 4;
+        }
+
         void AddReadout(string caption, string value, ref int y)
         {
             NsReadout readout = new NsReadout
@@ -2930,9 +2950,9 @@ namespace NextScan.App
                 _settingsBody.Controls.Add(columns[i]);
             }
 
-            SectionBuilder[] parts = { BuildOutputGroup, BuildPreviewSettings,
+            SectionBuilder[] parts = { BuildOutputGroup, BuildPreviewSettings, BuildShortcutSettings,
                                        BuildWatchGroup, BuildAppearanceSettings, BuildAboutSettings };
-            int[] into = { 0, 0, 1, 1, 1 };
+            int[] into = { 0, 0, 0, 1, 1, 1 };
             int tallest = 0;
             for (int i = 0; i < parts.Length; i++)
             {
@@ -6086,6 +6106,72 @@ namespace NextScan.App
         // =====================================================================
         // Keyboard
         // =====================================================================
+        /// <summary>
+        /// One shortcut, both as something that happens and as something that
+        /// can be read.
+        /// </summary>
+        class Shortcut
+        {
+            public Keys Key;
+            public Keys Same = Keys.None;   // a second key meaning the same thing
+            public bool Ctrl;
+            public string Group = "";
+            public string Does = "";
+            public string Keys_ = "";
+            public Action Do;               // null: handled elsewhere, listed here
+        }
+
+        /// <summary>
+        /// Every shortcut, once.
+        ///
+        /// The list the operator reads and the list the keyboard obeys are the
+        /// same list. Written twice they disagree the first time one is changed,
+        /// and a keyboard reference that lies is worse than none: it is the one
+        /// thing a reader has no way to check.
+        ///
+        /// Entries with no action are the ones whose handling cannot be reduced
+        /// to a key and a method -- Escape means different things depending on
+        /// what is open, panning is a key held rather than pressed -- so they
+        /// are listed here and handled below. They are in the table because a
+        /// reader does not care which of those two a shortcut is.
+        /// </summary>
+        List<Shortcut> Shortcuts()
+        {
+            return new List<Shortcut>
+            {
+                new Shortcut { Group = "Scanning", Does = "Preview", Keys_ = "F5",
+                               Key = Keys.F5, Do = delegate { StartScan(true); } },
+                new Shortcut { Group = "Scanning", Does = "Scan", Keys_ = "F7",
+                               Key = Keys.F7, Do = delegate { StartScan(false); } },
+                new Shortcut { Group = "Scanning", Does = "Scan", Keys_ = "Ctrl+Enter",
+                               Key = Keys.Enter, Ctrl = true, Do = delegate { StartScan(false); } },
+                new Shortcut { Group = "Scanning", Does = "Stop a scan", Keys_ = "Esc" },
+
+                new Shortcut { Group = "Sending", Does = "Send to Photoshop", Keys_ = "Ctrl+P",
+                               Key = Keys.P, Ctrl = true, Do = delegate { SendToPhotoshop(); } },
+                new Shortcut { Group = "Sending", Does = "Save the session", Keys_ = "Ctrl+S",
+                               Key = Keys.S, Ctrl = true, Do = delegate { SaveSession(); } },
+
+                new Shortcut { Group = "View", Does = "Fit in the window", Keys_ = "Ctrl+0",
+                               Key = Keys.D0, Same = Keys.NumPad0, Ctrl = true,
+                               Do = delegate { _canvas.ZoomFit(); } },
+                new Shortcut { Group = "View", Does = "Actual size", Keys_ = "Ctrl+1",
+                               Key = Keys.D1, Same = Keys.NumPad1, Ctrl = true,
+                               Do = delegate { _canvas.ZoomTo(1.0); } },
+                new Shortcut { Group = "View", Does = "Zoom in", Keys_ = "Ctrl+plus",
+                               Key = Keys.Oemplus, Same = Keys.Add, Ctrl = true,
+                               Do = delegate { _canvas.ZoomBy(1.25); } },
+                new Shortcut { Group = "View", Does = "Zoom out", Keys_ = "Ctrl+minus",
+                               Key = Keys.OemMinus, Same = Keys.Subtract, Ctrl = true,
+                               Do = delegate { _canvas.ZoomBy(1 / 1.25); } },
+                new Shortcut { Group = "View", Does = "Zoom", Keys_ = "Ctrl+wheel" },
+                new Shortcut { Group = "View", Does = "Pan the page", Keys_ = "hold Space" },
+
+                new Shortcut { Group = "Panels", Does = "Capture, Look, Batch, Pages", Keys_ = "Alt+1 to 4" },
+                new Shortcut { Group = "Panels", Does = "Settings", Keys_ = "Ctrl+comma" },
+            };
+        }
+
         void OnShellKeyDown(object sender, KeyEventArgs e)
         {
             // Escape belongs to whatever is in front. With the settings page
@@ -6116,51 +6202,27 @@ namespace NextScan.App
                 return;
             }
 
-            switch (e.KeyCode)
+            // Escape is not in the lookup: what it stops depends on what is
+            // running, and the settings page above has already had its say.
+            if (e.KeyCode == Keys.Escape) { RequestCancel(); e.Handled = true; UpdateStatus(); return; }
+
+            foreach (Shortcut shortcut in Shortcuts())
             {
-                case Keys.F5: StartScan(true); e.Handled = true; break;
-                case Keys.F7: StartScan(false); e.Handled = true; break;
-                case Keys.Escape: RequestCancel(); e.Handled = true; break;
+                if (shortcut.Do == null) continue;
+                if (e.Control != shortcut.Ctrl) continue;
+                if (e.KeyCode != shortcut.Key && (shortcut.Same == Keys.None || e.KeyCode != shortcut.Same))
+                    continue;
 
-                case Keys.Enter:
-                    if (e.Control) { StartScan(false); e.Handled = true; }
-                    break;
+                shortcut.Do();
+                e.Handled = true;
 
-                case Keys.P:
-                    if (e.Control) { SendToPhotoshop(); e.Handled = true; }
-                    break;
-
-                case Keys.S:
-                    if (e.Control) { SaveSession(); e.Handled = true; }
-                    break;
-
-                // Both zeroes and both ones. The number row and the keypad are
-                // the same key to the person pressing it, and only one of them
-                // was listened to.
-                //
-                // SuppressKeyPress as well as Handled, or the keystroke goes on
-                // to whatever has focus and a zoom shortcut types a digit into
-                // a field.
-                case Keys.D0:
-                case Keys.NumPad0:
-                    if (e.Control) { _canvas.ZoomFit(); e.Handled = true; e.SuppressKeyPress = true; }
-                    break;
-
-                case Keys.D1:
-                case Keys.NumPad1:
-                    if (e.Control) { _canvas.ZoomTo(1.0); e.Handled = true; e.SuppressKeyPress = true; }
-                    break;
-
-                case Keys.Oemplus:
-                case Keys.Add:
-                    if (e.Control) { _canvas.ZoomBy(1.25); e.Handled = true; e.SuppressKeyPress = true; }
-                    break;
-
-                case Keys.OemMinus:
-                case Keys.Subtract:
-                    if (e.Control) { _canvas.ZoomBy(1 / 1.25); e.Handled = true; e.SuppressKeyPress = true; }
-                    break;
+                // Suppressed as well as handled, or the keystroke goes on to
+                // whatever has focus: zooming with the cursor in a field used to
+                // type a digit into it as well.
+                e.SuppressKeyPress = true;
+                break;
             }
+
             UpdateStatus();
         }
 

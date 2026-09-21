@@ -3263,3 +3263,26 @@ Two real faults sat behind the report, though:
 And the real problem was neither: nobody had been told the shortcuts existed.
 There are no menus here to find them in, so the zoom buttons now name them in
 their tooltips. An unadvertised shortcut may as well not exist.
+
+### The list, and why it is not a list
+
+Settings gained a **Keyboard** group showing every shortcut, grouped by what it
+is for. It also revealed two that had always worked and were known to nobody:
+`Ctrl+wheel` to zoom and holding `Space` to pan.
+
+It is not a written list. The `switch` in `OnShellKeyDown` was replaced by a
+lookup over one table, and that same table is what the panel renders. Written
+twice, the two would disagree the first time either changed -- and a keyboard
+reference that lies is worse than none, because it is the one thing a reader has
+no way to check. Add a shortcut now and it appears in the list without anybody
+remembering to put it there.
+
+Two entries carry no action on purpose. Escape means different things depending
+on what is running, and panning is a key held rather than pressed, so both are
+handled outside the lookup and listed inside it. A reader does not care which of
+those two a shortcut is.
+
+The rewrite was verified rather than assumed: driving the application with real
+virtual key codes, `Ctrl` with the keypad plus twice reached 87%, and `Ctrl`
+with the keypad zero returned it to 56%. The second of those did nothing at all
+before today.
