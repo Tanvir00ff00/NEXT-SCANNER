@@ -100,6 +100,18 @@ namespace NextScan.App
         /// </summary>
         public double PlaceholderDpi;
 
+        /// <summary>
+        /// The resolution the pixels were actually captured at, when that is not
+        /// the resolution of the image being displayed.
+        ///
+        /// Previewing a selection composites the result onto a picture of the
+        /// whole bed built at BedViewDpi, so what is on screen is 150 dpi
+        /// whatever the preview was taken at. The badge quoted that, which made
+        /// a 300 dpi preview report itself as 150 -- a readout describing the
+        /// canvas while appearing to describe the scan.
+        /// </summary>
+        public double CaptureDpi;
+
         public PointF[] DetectedPolygon;
         public double DetectedAngle;
         public double DetectedConfidence = -1;
@@ -1167,9 +1179,13 @@ namespace NextScan.App
                 double inH = (_image.YDpi > 1) ? pxH / _image.YDpi : 0;
 
                 double quoted = _image.XDpi;
-                if (IsPlaceholder && PlaceholderDpi > 1)
+                if (IsPlaceholder && PlaceholderDpi > 1) quoted = PlaceholderDpi;
+                else if (CaptureDpi > 1) quoted = CaptureDpi;
+
+                // The pixel count has to be quoted at the same resolution as the
+                // resolution, or the badge contradicts itself.
+                if (Math.Abs(quoted - _image.XDpi) > 0.01)
                 {
-                    quoted = PlaceholderDpi;
                     pxW = (int)Math.Round(inW * quoted);
                     pxH = (int)Math.Round(inH * quoted);
                 }

@@ -3139,3 +3139,54 @@ rectangle to drag a selection on, and twenty-six megabytes of white pixels would
 buy nothing -- but the reasoning now says what is actually true: a selection is
 held in inches on the glass, so what is displayed underneath it does not enter
 the arithmetic.
+
+## 18. A downscaled page, and two readouts that agreed with it, 2026-09-21
+
+Cut items were arriving in Photoshop at 150 ppi from a 300 dpi scan. The owner
+found it by looking at Image Size; every readout inside the application said 300,
+and one of them had been corrected earlier the same day for saying 150.
+
+### The wrong conclusion first
+
+The first report was that a 300 dpi preview showed "150 DPI" on the crop badge.
+That was true, and it had a cause: previewing a selection composites the result
+onto a picture of the whole bed built at `BedViewDpi` (150), and the badge quoted
+`_image.XDpi` -- the resolution of what was on screen rather than of what had
+been captured. The badge was fixed, the status bar was found to have the same
+fault and fixed too, and both then read 300.
+
+That was the wrong place to stop. The readouts had been lying, but they were not
+the only thing reading the displayed image.
+
+### The actual fault
+
+Both export paths cut from the canvas:
+
+    List<RawImage> pieces = ApplyAutoCrop(_canvas.Image, _pageBedRect);   // CutRegion
+    RawImage shown = _canvas.Image;                                        // SendToPhotoshop
+
+After a preview of a selection, `_canvas.Image` *is* the bed composite. So what
+went to Photoshop was a piece cut out of a downscaled picture of the platen
+rather than a piece of the page -- at exactly 150 ppi, from a 300 dpi capture.
+
+The hazard was known. Directly below the second of those lines sits a comment
+that names it precisely:
+
+> Cropping the display-resolution bed view would silently downscale what
+> Photoshop receives.
+
+One branch had been guarded. The branch immediately above it had not. The
+contact-sheet guard in `CutRegion` -- "a picture of pages, not a page" -- is the
+same idea again, written for a different picture.
+
+`PageToCutFrom` is now the one place that answers what should be cut, and both
+paths go through it. The page and what it covers are recorded when the capture
+arrives, before the composite overwrites `_pageBedRect` with the whole platen.
+
+### Worth keeping
+
+A correct-looking readout is not evidence that the pixels are correct. Three
+places described this scan -- the crop badge, the status bar, and the file that
+reached Photoshop -- and after the first fix two of them agreed at 300 while the
+third, the only one that was actually the product, was still 150. The one that
+left the building was the one that counted.

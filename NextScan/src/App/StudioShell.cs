@@ -200,6 +200,18 @@ namespace NextScan.App
         RectangleF _lastRequestedRegion = RectangleF.Empty;
 
         /// <summary>
+        /// The page the canvas is showing, at the resolution it was captured at,
+        /// and what that page covers on the glass.
+        ///
+        /// Held separately because the canvas may not be showing it. Previewing
+        /// a selection composites the result onto a picture of the whole bed
+        /// built at BedViewDpi, and that composite is what <c>_canvas.Image</c>
+        /// returns from then on.
+        /// </summary>
+        RawImage _capturePage;
+        RectangleF _captureBedRect;
+
+        /// <summary>
         /// What the preview image covers on the glass, in inches.
         ///
         /// Not the same thing as <c>_pageBedRect</c>, which is what the canvas
@@ -4374,10 +4386,40 @@ namespace NextScan.App
             // region out of it would hand Photoshop a screenshot.
             if (_showingSheet) return null;
 
-            List<RawImage> pieces = ApplyAutoCrop(_canvas.Image, _pageBedRect);
+            RectangleF covers;
+            RawImage source = PageToCutFrom(out covers);
+            if (source == null || !source.IsValid) return null;
+
+            List<RawImage> pieces = ApplyAutoCrop(source, covers);
             if (pieces == null || index < 0 || index >= pieces.Count) return null;
-            if (ReferenceEquals(pieces[index], _canvas.Image)) return null;   // nothing was cut
+            if (ReferenceEquals(pieces[index], source)) return null;   // nothing was cut
             return pieces[index];
+        }
+
+        /// <summary>
+        /// The page an item should be cut from, and what it covers on the glass.
+        ///
+        /// Deliberately not <c>_canvas.Image</c>. Previewing a selection
+        /// composites the result onto a picture of the whole bed built at
+        /// BedViewDpi, so the displayed image is 150 dpi whatever the capture
+        /// was. Cutting from that handed Photoshop a downscaled picture of the
+        /// bed instead of the page, and the documents arrived at 150 ppi from a
+        /// 300 dpi scan.
+        ///
+        /// The guard against cutting up the contact sheet was already here for
+        /// the same reason -- it is a picture of pages, not a page -- and the
+        /// bed view is the same mistake wearing different clothes.
+        /// </summary>
+        RawImage PageToCutFrom(out RectangleF covers)
+        {
+            if (_capturePage != null && _capturePage.IsValid)
+            {
+                covers = _captureBedRect;
+                return _capturePage;
+            }
+
+            covers = _pageBedRect;
+            return _canvas != null ? _canvas.Image : null;
         }
 
         void SendRegionToPhotoshop(int index)
@@ -4965,6 +5007,7 @@ namespace NextScan.App
             {
                 _previewPage = pages[0];
                 _canvas.SetImage(pages[0]);
+                _canvas.CaptureDpi = pages[0].XDpi;
 
                 // Where on the glass this preview actually came from. It is no
                 // longer always the whole bed, and everything downstream -- the
@@ -4975,6 +5018,9 @@ namespace NextScan.App
 
                 _previewBedRect = (reg.Width > 0.05f && reg.Height > 0.05f)
                     ? reg : new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
+
+                _capturePage = pages[0];
+                _captureBedRect = _previewBedRect;
 
                 bool partial = reg.Width > 0.05f && reg.Height > 0.05f &&
                                (reg.Width < _activeBedW - 0.05 || reg.Height < _activeBedH - 0.05);
@@ -5026,7 +5072,13 @@ namespace NextScan.App
             {
                 RawImage last = pages[pages.Count - 1];
                 _canvas.SetImage(last);
+                _canvas.CaptureDpi = last.XDpi;
                 RecordPageBedRect(last, _lastRequestedRegion);
+
+                // Taken here, before the composite below overwrites _pageBedRect
+                // with the whole platen.
+                _capturePage = last;
+                _captureBedRect = _pageBedRect;
 
                 // A partial scan is shown back in its place on the glass, so the
                 // selection can be widened and re-scanned without another preview.
@@ -5513,8 +5565,9 @@ namespace NextScan.App
                 !_canvas.IsPlaceholder && !_showingSheet &&
                 _canvas.Image != null && _canvas.Image.IsValid)
             {
-                RawImage shown = _canvas.Image;
-                List<RawImage> pieces = ApplyAutoCrop(shown, _pageBedRect);
+                RectangleF covers;
+                RawImage shown = PageToCutFrom(out covers);
+                List<RawImage> pieces = ApplyAutoCrop(shown, covers);
 
                 // ApplyAutoCrop hands the page straight back when it could not
                 // use the plan; only a real cut is worth taking this path for.
@@ -6103,8 +6156,22 @@ namespace NextScan.App
                 return;
             }
 
-            SetStatus(img.Width + " × " + img.Height + " px   ·   " +
-                      img.XDpi.ToString("0", CultureInfo.InvariantCulture) + " dpi   ·   " +
+            // The same correction the badge needs, for the same reason: when a
+            // preview of a selection is composited onto a picture of the bed,
+            // the displayed image is BedViewDpi and describing it would say 150
+            // about a 300 dpi scan.
+            double dpi = img.XDpi;
+            int px = img.Width, py = img.Height;
+            if (_canvas.CaptureDpi > 1 && img.XDpi > 1 && img.YDpi > 1 &&
+                Math.Abs(_canvas.CaptureDpi - img.XDpi) > 0.01)
+            {
+                dpi = _canvas.CaptureDpi;
+                px = (int)Math.Round(img.Width / img.XDpi * dpi);
+                py = (int)Math.Round(img.Height / img.YDpi * dpi);
+            }
+
+            SetStatus(px + " × " + py + " px   ·   " +
+                      dpi.ToString("0", CultureInfo.InvariantCulture) + " dpi   ·   " +
                       _film.Count + " page" + (_film.Count == 1 ? "" : "s") + " in session");
         }
 
