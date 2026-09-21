@@ -2918,3 +2918,149 @@ in a hurry.
 
 - **1.0** — everything up to and including section 14.
 - **1.1** — named jobs.
+
+## 16. Colour, clean-up, and starting from nothing, 2026-09-21  —  version 1.2
+
+Seventeen tone presets instead of seven, six colour controls, a clean-up pass
+with four filters, and an application that no longer starts where it left off.
+
+### What the research changed
+
+Two headline features of the professional scanning suites were looked at and
+dropped, because neither can run on this hardware:
+
+- **iSRD** (SilverFast's dust and scratch removal) needs the scanner's infrared
+  channel. The LiDE 400 has none.
+- **Multi-Exposure** is for transparencies. There is nothing to expose twice on
+  a flatbed of paper.
+
+The useful answer was on the document side -- the Kofax VRS set: descreening,
+bleed-through suppression, background smoothing, despeckle. Those match what
+this scanner is actually used for.
+
+One line of it settled the whole pipeline design:
+
+> apply Unsharp Mask sharpening last -- never sharpen before pattern removal
+
+Sharpening a halftone before the descreen has removed it sharpens the dot grid,
+and the result is worse than doing neither. So `Apply` is now three passes
+rather than one:
+
+    tone       per pixel: the channel curves, colour, polish
+    clean-up   descreen - despeckle - background - sharpen
+    flatten    grey or two tones
+
+Moving the third pass to the end mattered independently: thresholding a page
+before it has been cleaned turns dust into ink and show-through into text.
+
+### Automatic, and what it measures
+
+`AutoTone` reads the page before correcting it. The insight it rests on is that
+a colour cast and a short tonal range are the same thing seen twice: a channel
+whose histogram does not reach as far as the others. One measurement answers
+both, which is why Contrast, Colour and Full are three depths of one idea rather
+than three features.
+
+Two restraints are deliberate. Half a percent is ignored at each end, because
+otherwise one dust speck at 255 becomes the page's white point. And the midtone
+gamma is clamped to 0.6-1.6, because an unclamped grey-world correction turns a
+page that really is mostly one colour grey.
+
+### Vibrance is not saturation
+
+Saturation moves every colour equally, so on a face it reaches skin first and
+turns it orange. Vibrance spends itself on the colours that have least and
+leaves the ones that already have enough, which is why the ID photo preset
+pushes vibrance to 20 and pulls saturation slightly *negative*.
+
+### What the tests caught
+
+Nine numerical cases were added to `nsimgtest`, each measuring two things: that
+what the filter claims to remove went, and that what it claims to keep stayed.
+Descreen must flatten a halftone and leave a smooth ramp alone; despeckle must
+remove specks and keep lines; background must flatten paper and keep ink.
+
+Two failed on the first run.
+
+**`background_clears_bleed_through`** was a real bug, and an inverted one:
+
+    flattened = (flattened - margin) / (1.0 - margin);     // wrong
+    flattened /= (1.0 - margin);                           // right
+
+The first form shifts the black end rather than lifting the white one, so faint
+marks are pulled *further* from white and come out more visible. It does the
+opposite of what it says. By eye this would have been nearly impossible to
+catch: "the show-through is still there" and "the show-through got worse" both
+read as "not working".
+
+**`sharpen_steepens_an_edge`** was the test's fault, not the code's: it sampled
+four pixels either side of the edge, outside the unsharp mask's reach, where no
+correct implementation could have changed anything. It now measures the steepest
+step across the edge.
+
+### The lag, measured before it was fixed
+
+The clean-up pass put real work behind every slider tick. On a 1275 x 608
+preview:
+
+| | random noise | a page that looks like a page |
+| --- | --- | --- |
+| nothing | 2 ms | |
+| auto full | 4 ms | |
+| descreen | 26 ms | |
+| sharpen | 50 ms | |
+| flatten paper | 56 ms | |
+| **despeckle** | **199 ms** | 69 ms |
+| Clean document preset | 305 ms | 136 ms |
+
+Despeckle was sorting a nine element window three times per pixel. It now asks
+the cheap question first -- is this pixel outside everything around it, which
+takes sixteen comparisons -- and only sorts for the few that are. That is also
+the more correct test: a pixel on an edge sits between its neighbours and is now
+left alone, where sorting first rounded the corner off every letter.
+
+The random-noise page is worth keeping in the table as a caution. Every pixel of
+it is an outlier, so it is the worst case despeckle can ever meet and roughly
+triple what a real page costs. Optimising against it alone would have been
+optimising against a page that does not exist.
+
+Rendering then moved off the UI thread, and coalesces: while a render is in
+flight, further changes only set a flag, and one more render happens at the end
+with whatever the settings became. Dragging through fifty values costs a handful
+of renders rather than fifty.
+
+The worker reads its own copy of the source, because the canvas may be painting
+the original while the worker locks its bits. When a new preview replaces it the
+old copy is dropped rather than disposed: a render already running still holds
+it, and a few megabytes collected later is a far smaller problem than a bitmap
+disposed underneath a thread reading it.
+
+### Starting from nothing
+
+The application no longer starts where it left off. Adjustments are the reason:
+a page looks the way it does because of settings that are invisible once the
+panel is scrolled past, and the failure is silent. Set Vivid and a heavy
+saturation for one job, come back the next morning, and every scan of the day is
+wrong with nothing on screen having changed.
+
+What resets is not a second list. It is exactly the split `ApplyJob` already
+draws, used the other way round:
+
+    public static void ResetJob(StudioSettings live)
+    {
+        ApplyJob(new StudioSettings(), live);
+    }
+
+So the job resets and the machine -- the scanner, the watched folder -- survives
+the night. The self test now checks both directions: a job field that fails to
+reset fails the build, and so does a machine field that resets.
+
+This was only worth doing once presets existed. Before them it would have been
+cruel: there would have been no way back to a configured state. Now there is one,
+and it is one click.
+
+### Versions
+
+- **1.0** — everything up to and including section 14.
+- **1.1** — named jobs.
+- **1.2** — advanced colour, the clean-up pass, and a neutral start.

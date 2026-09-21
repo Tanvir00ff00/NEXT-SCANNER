@@ -1142,7 +1142,7 @@ namespace NextScan.App
 
             Label hint = new Label
             {
-                Text = "Keeps everything but the scanner and the watched folder.",
+                Text = "Not the scanner, not the watched folder.",
                 Location = new Point(Dx, y),
                 Size = new Size(Dw, 16),
                 ForeColor = Theme.TextFaint,
@@ -1615,6 +1615,133 @@ namespace NextScan.App
             UpdateThresholdEnabled();
             y += 54;
 
+            // ---------------------------------------------------------------
+            // Colour
+            // ---------------------------------------------------------------
+            AddSectionLabel("Colour", ref y);
+
+            // The one control here that measures the page instead of taking a
+            // number, so it goes first and everything under it is a correction
+            // applied on top of what it decided.
+            AddFieldLabel("Automatic", ref y);
+            string[] autoNames = { "Off", "Contrast only", "Remove colour cast", "Cast and midtones" };
+            int autoIndex = (int)_settings.AutoTone;
+            NsDropdown ddAuto = AddDropdown(autoNames, autoIndex, ref y);
+
+            Label autoNote = new Label
+            {
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 30),
+                ForeColor = Theme.TextFaint,
+                BackColor = Color.Transparent,
+                Font = Theme.Ui(8f)
+            };
+            _drawerHost.Controls.Add(autoNote);
+            y += 34;
+
+            EventHandler sayWhatAutoDoes = delegate
+            {
+                switch (_settings.AutoTone)
+                {
+                    case AutoTone.Contrast:
+                        autoNote.Text = "Fills the tonal range. Colour is left exactly as found."; break;
+                    case AutoTone.Colour:
+                        autoNote.Text = "Stretches each channel, which takes out a lamp cast."; break;
+                    case AutoTone.Full:
+                        autoNote.Text = "Also pulls midtones neutral. Can flatten a genuinely one-colour page."; break;
+                    default:
+                        autoNote.Text = "Nothing is measured; only the settings below apply."; break;
+                }
+            };
+            sayWhatAutoDoes(null, EventArgs.Empty);
+
+            ddAuto.SelectedIndexChanged += delegate
+            {
+                _settings.AutoTone = (AutoTone)ddAuto.SelectedIndex;
+                sayWhatAutoDoes(null, EventArgs.Empty);
+                UpdateProcessedPreview();
+            };
+
+            NsSlider slVibrance = AddToneSlider("Vibrance", _settings.Vibrance, ref y);
+            slVibrance.ValueChanged += delegate
+            { _settings.Vibrance = slVibrance.Value; UpdateProcessedPreview(); };
+
+            NsSlider slSaturation = AddToneSlider("Saturation", _settings.Saturation, ref y);
+            slSaturation.ValueChanged += delegate
+            { _settings.Saturation = slSaturation.Value; UpdateProcessedPreview(); };
+
+            NsSlider slTemperature = AddToneSlider("Warmth", _settings.Temperature, ref y);
+            slTemperature.ValueChanged += delegate
+            { _settings.Temperature = slTemperature.Value; UpdateProcessedPreview(); };
+
+            NsSlider slTint = AddToneSlider("Tint", _settings.Tint, ref y);
+            slTint.ValueChanged += delegate
+            { _settings.Tint = slTint.Value; UpdateProcessedPreview(); };
+
+            // Vibrance above saturation, and the recovery pair below, because
+            // that is the order they are reached for: add colour, then rescue
+            // the ends if adding it cost anything.
+            AddSectionLabel("Recovery", ref y);
+
+            NsSlider slHighlights = AddToneSlider("Highlights", _settings.Highlights, ref y);
+            slHighlights.ValueChanged += delegate
+            { _settings.Highlights = slHighlights.Value; UpdateProcessedPreview(); };
+
+            NsSlider slShadows = AddToneSlider("Shadows", _settings.Shadows, ref y);
+            slShadows.ValueChanged += delegate
+            { _settings.Shadows = slShadows.Value; UpdateProcessedPreview(); };
+
+            // ---------------------------------------------------------------
+            // Clean-up
+            // ---------------------------------------------------------------
+            AddSectionLabel("Clean-up", ref y);
+
+            // Screen ruling, not a strength. A printed dot is a fixed size on
+            // paper, so what the filter needs to know is what was printed, and
+            // it works out the rest from the scan resolution.
+            AddFieldLabel("Printed original", ref y);
+            string[] screenNames = { "No (continuous tone)", "Newspaper  85 lpi",
+                                     "Magazine  133 lpi", "Fine printing  175 lpi" };
+            int[] screenLpi = { 0, 85, 133, 175 };
+            int screenIndex = 0;
+            for (int i = 0; i < screenLpi.Length; i++)
+                if (screenLpi[i] == _settings.DescreenLpi) screenIndex = i;
+
+            NsDropdown ddScreen = AddDropdown(screenNames, screenIndex, ref y);
+            ddScreen.SelectedIndexChanged += delegate
+            {
+                int i = Math.Max(0, Math.Min(screenLpi.Length - 1, ddScreen.SelectedIndex));
+                _settings.DescreenLpi = screenLpi[i];
+                UpdateProcessedPreview();
+            };
+
+            Label screenNote = new Label
+            {
+                Text = "Removes the dot grid from something that was printed.",
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 30),
+                ForeColor = Theme.TextFaint,
+                BackColor = Color.Transparent,
+                Font = Theme.Ui(8f)
+            };
+            _drawerHost.Controls.Add(screenNote);
+            y += 34;
+
+            NsSlider slBackground = AddZeroSlider("Flatten paper", _settings.BackgroundClean, ref y);
+            slBackground.ValueChanged += delegate
+            { _settings.BackgroundClean = slBackground.Value; UpdateProcessedPreview(); };
+
+            NsSlider slDespeckle = AddZeroSlider("Despeckle", _settings.Despeckle, ref y);
+            slDespeckle.ValueChanged += delegate
+            { _settings.Despeckle = slDespeckle.Value; UpdateProcessedPreview(); };
+
+            // Last in the panel because it is last in the pipeline, and the
+            // reason is worth seeing: sharpening a halftone before the descreen
+            // has removed it sharpens the dots.
+            NsSlider slSharpen = AddZeroSlider("Sharpen", _settings.Sharpen, ref y);
+            slSharpen.ValueChanged += delegate
+            { _settings.Sharpen = slSharpen.Value; UpdateProcessedPreview(); };
+
             NsPill btnReset = new NsPill
             {
                 Text = "Reset Adjustments",
@@ -1634,12 +1761,68 @@ namespace NextScan.App
                 if (_slContrast != null) _slContrast.Value = 0;
                 _settings.BwThreshold = 128;
                 if (_slBwThreshold != null) _slBwThreshold.Value = 128;
+
+                _settings.AutoTone = AutoTone.Off;
+                ddAuto.SelectedIndex = 0;
+                _settings.Saturation = 0; slSaturation.Value = 0;
+                _settings.Vibrance = 0; slVibrance.Value = 0;
+                _settings.Temperature = 0; slTemperature.Value = 0;
+                _settings.Tint = 0; slTint.Value = 0;
+                _settings.Highlights = 0; slHighlights.Value = 0;
+                _settings.Shadows = 0; slShadows.Value = 0;
+
+                _settings.DescreenLpi = 0; ddScreen.SelectedIndex = 0;
+                _settings.BackgroundClean = 0; slBackground.Value = 0;
+                _settings.Despeckle = 0; slDespeckle.Value = 0;
+                _settings.Sharpen = 0; slSharpen.Value = 0;
+
                     _settings.Tone = TonePreset.OriginalColour;
                 if (_ddTonePreset != null) _ddTonePreset.SelectedIndex = 0;
                 UpdateProcessedPreview();
             };
             _drawerHost.Controls.Add(btnReset);
             y += 46;
+        }
+
+        /// <summary>
+        /// A -100..100 adjustment slider, centred on zero because every one of
+        /// these does nothing there and can go either way from it.
+        /// </summary>
+        NsSlider AddToneSlider(string label, int value, ref int y)
+        {
+            NsSlider slider = new NsSlider
+            {
+                Label = label,
+                Suffix = "",
+                Minimum = -100,
+                Maximum = 100,
+                DefaultValue = 0,
+                Value = value,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 44)
+            };
+            _drawerHost.Controls.Add(slider);
+            y += 54;
+            return slider;
+        }
+
+        /// <summary>A 0..100 slider, for the things that only go one way.</summary>
+        NsSlider AddZeroSlider(string label, int value, ref int y)
+        {
+            NsSlider slider = new NsSlider
+            {
+                Label = label,
+                Suffix = "%",
+                Minimum = 0,
+                Maximum = 100,
+                DefaultValue = 0,
+                Value = value,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 44)
+            };
+            _drawerHost.Controls.Add(slider);
+            y += 54;
+            return slider;
         }
 
         void BuildOutputGroup(ref int y)
@@ -5466,7 +5649,18 @@ namespace NextScan.App
                 Brightness = _settings.Brightness,
                 Contrast = _settings.Contrast,
                 BwThreshold = _settings.BwThreshold,
-                AdaptiveThreshold = _settings.AdaptiveThreshold
+                AdaptiveThreshold = _settings.AdaptiveThreshold,
+                Auto = _settings.AutoTone,
+                Saturation = _settings.Saturation,
+                Vibrance = _settings.Vibrance,
+                Temperature = _settings.Temperature,
+                Tint = _settings.Tint,
+                Highlights = _settings.Highlights,
+                Shadows = _settings.Shadows,
+                DescreenLpi = _settings.DescreenLpi,
+                Sharpen = _settings.Sharpen,
+                BackgroundClean = _settings.BackgroundClean,
+                Despeckle = _settings.Despeckle
             };
         }
 
@@ -5533,15 +5727,106 @@ namespace NextScan.App
             _beforeSheet = null;
         }
 
+        // =====================================================================
+        // Re-rendering the preview while a slider is moving
+        //
+        // Every adjustment asks for the preview again, and the clean-up pass put
+        // real work behind that ask: measured on a 1275 x 608 preview of a page,
+        // the ID photo preset costs 21 ms but Clean document costs 136. Done on
+        // the UI thread, on every tick of a slider, that is a slider that jumps
+        // instead of slides.
+        //
+        // So a render happens on a worker, and the worker coalesces: while it is
+        // busy, further changes only set a flag, and it renders once more at the
+        // end with whatever the settings became. Dragging through fifty values
+        // therefore costs a handful of renders rather than fifty, and the window
+        // never stops responding to the drag that is causing them.
+        // =====================================================================
+
+        readonly object _previewLock = new object();
+        Bitmap _previewSource;          // our own copy; only the worker reads it
+        Bitmap _previewSourceOf;        // which original it was taken from
+        ToneSettings _previewTone;
+        ColorMode _previewMode;
+        bool _previewDirty;
+        bool _previewRendering;
+
         void UpdateProcessedPreview()
         {
             if (_canvas != null && _canvas.IsPlaceholder) return;
+            if (_canvas == null) return;
 
             Bitmap src = _canvas.OriginalBitmap;
             if (src == null) return;
 
-            Bitmap processed = ProcessBitmap(src);
+            lock (_previewLock)
+            {
+                if (!ReferenceEquals(_previewSourceOf, src))
+                {
+                    // A copy of our own, because the worker will lock its bits
+                    // while the canvas may be painting the original. The old one
+                    // is dropped rather than disposed: a render already running
+                    // still holds it, and a few megabytes collected later is a
+                    // far smaller problem than a bitmap disposed underneath a
+                    // thread that is reading it.
+                    _previewSource = (Bitmap)src.Clone();
+                    _previewSourceOf = src;
+                }
+
+                _previewTone = CurrentTone();
+                _previewMode = _settings.Mode;
+                _previewDirty = true;
+
+                if (_previewRendering) return;      // it will pick this up itself
+                _previewRendering = true;
+            }
+
+            Thread worker = new Thread(RenderPreviewLoop);
+            worker.IsBackground = true;
+            worker.Start();
+        }
+
+        void RenderPreviewLoop()
+        {
+            try
+            {
+                for (; ; )
+                {
+                    Bitmap source;
+                    ToneSettings tone;
+                    ColorMode mode;
+
+                    lock (_previewLock)
+                    {
+                        if (!_previewDirty) { _previewRendering = false; return; }
+                        _previewDirty = false;
+                        source = _previewSource;
+                        tone = _previewTone;
+                        mode = _previewMode;
+                    }
+
+                    if (source == null) continue;
+
+                    Bitmap made;
+                    try { made = ToneEngine.Apply(source, tone, mode); }
+                    catch { made = null; }
+                    if (made == null) continue;
+
+                    Bitmap ready = made;
+                    try { BeginInvoke((MethodInvoker)delegate { ShowProcessed(ready); }); }
+                    catch { ready.Dispose(); return; }   // the window went away mid-render
+                }
+            }
+            finally
+            {
+                lock (_previewLock) { _previewRendering = false; }
+            }
+        }
+
+        void ShowProcessed(Bitmap processed)
+        {
             if (processed == null) return;
+            if (IsDisposed) { processed.Dispose(); return; }
 
             if (_processedCache != null && !ReferenceEquals(_processedCache, processed))
                 _processedCache.Dispose();

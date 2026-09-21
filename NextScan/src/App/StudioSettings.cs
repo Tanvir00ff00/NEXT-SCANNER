@@ -96,6 +96,23 @@ namespace NextScan.App
         public int Contrast;
         public int BwThreshold = 128;
         public bool AdaptiveThreshold = true;
+
+        // ---- the advanced colour controls, 1.2 ----
+        // Zero and Off throughout, so a settings file written before these
+        // existed loads as the behaviour it had.
+        public AutoTone AutoTone = AutoTone.Off;
+        public int Saturation;
+        public int Vibrance;
+        public int Temperature;
+        public int Tint;
+        public int Highlights;
+        public int Shadows;
+
+        // ---- the clean-up pass ----
+        public int DescreenLpi;
+        public int Sharpen;
+        public int BackgroundClean;
+        public int Despeckle;
         public bool OpenInPhotoshop = true;
         public bool KeepFiles = true;
 
@@ -181,6 +198,20 @@ namespace NextScan.App
                             int pd;
                             if (int.TryParse(val, out pd) && pd > 0) s.PreviewDpi = pd;
                             break;
+                        case "autotone":
+                            try { s.AutoTone = (AutoTone)Enum.Parse(typeof(AutoTone), val, true); }
+                            catch { s.AutoTone = AutoTone.Off; }
+                            break;
+                        case "saturation": { int v; if (int.TryParse(val, out v) && v >= -100 && v <= 100) s.Saturation = v; break; }
+                        case "vibrance": { int v; if (int.TryParse(val, out v) && v >= -100 && v <= 100) s.Vibrance = v; break; }
+                        case "temperature": { int v; if (int.TryParse(val, out v) && v >= -100 && v <= 100) s.Temperature = v; break; }
+                        case "tint": { int v; if (int.TryParse(val, out v) && v >= -100 && v <= 100) s.Tint = v; break; }
+                        case "highlights": { int v; if (int.TryParse(val, out v) && v >= -100 && v <= 100) s.Highlights = v; break; }
+                        case "shadows": { int v; if (int.TryParse(val, out v) && v >= -100 && v <= 100) s.Shadows = v; break; }
+                        case "descreenlpi": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 400) s.DescreenLpi = v; break; }
+                        case "sharpen": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.Sharpen = v; break; }
+                        case "backgroundclean": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.BackgroundClean = v; break; }
+                        case "despeckle": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.Despeckle = v; break; }
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
                                 && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -291,6 +322,17 @@ namespace NextScan.App
                 lines.Add("previewmode=" + PreviewMode);
                 lines.Add("previewmatchesscan=" + (PreviewMatchesScan ? "on" : "off"));
                 lines.Add("usemodel=" + (UseModel ? "on" : "off"));
+                lines.Add("autotone=" + AutoTone);
+                lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));
+                lines.Add("vibrance=" + Vibrance.ToString(CultureInfo.InvariantCulture));
+                lines.Add("temperature=" + Temperature.ToString(CultureInfo.InvariantCulture));
+                lines.Add("tint=" + Tint.ToString(CultureInfo.InvariantCulture));
+                lines.Add("highlights=" + Highlights.ToString(CultureInfo.InvariantCulture));
+                lines.Add("shadows=" + Shadows.ToString(CultureInfo.InvariantCulture));
+                lines.Add("descreenlpi=" + DescreenLpi.ToString(CultureInfo.InvariantCulture));
+                lines.Add("sharpen=" + Sharpen.ToString(CultureInfo.InvariantCulture));
+                lines.Add("backgroundclean=" + BackgroundClean.ToString(CultureInfo.InvariantCulture));
+                lines.Add("despeckle=" + Despeckle.ToString(CultureInfo.InvariantCulture));
                 lines.Add("source=" + Source.ToString().ToLowerInvariant());
                 lines.Add("format=" + OutputFormat);
                 lines.Add("outdir=" + OutputDirectory);

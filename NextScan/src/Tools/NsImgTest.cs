@@ -48,6 +48,14 @@ namespace NextScan.Tools
             TestDeskewStrictGuardPreset();
             TestDeskewSourceAwareLimits();
 
+            // ---------------- clean-up pass (plan 9) ----------------
+            TestDescreenRemovesTheGrid();
+            TestDescreenKeepsAPhotograph();
+            TestSharpenSteepensAnEdge();
+            TestDespeckleRemovesSpecksNotLines();
+            TestBackgroundFlattensAndClearsBleedThrough();
+            TestCleanupCostsNothingWhenOff();
+
             Console.WriteLine();
             if (_failed > 0)
             {
@@ -158,6 +166,249 @@ namespace NextScan.Tools
         }
 
         // ---------------------------------------------------------------- detection tests
+        // =====================================================================
+        // The clean-up pass
+        //
+        // Every one of these filters compiles and runs whatever it does, so the
+        // only question worth asking is numerical: did the thing it claims to
+        // remove actually go, and did the thing it claims to keep actually stay.
+        // Each case therefore measures both.
+        // =====================================================================
+
+        static Bitmap MakeFlat(int w, int h, int level, int dpi)
+        {
+            Bitmap bmp = new Bitmap(w, h, System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            bmp.SetResolution(dpi, dpi);
+            using (Graphics g = Graphics.FromImage(bmp))
+                g.Clear(Color.FromArgb(level, level, level));
+            return bmp;
+        }
+
+        /// <summary>Mean absolute difference from the local 3x3 average: how textured a page is.</summary>
+        static double Texture(Bitmap bmp)
+        {
+            double total = 0;
+            int counted = 0;
+            for (int y = 1; y < bmp.Height - 1; y += 1)
+                for (int x = 1; x < bmp.Width - 1; x += 1)
+                {
+                    int sum = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++)
+                            sum += bmp.GetPixel(x + dx, y + dy).R;
+                    total += Math.Abs(bmp.GetPixel(x, y).R - sum / 9.0);
+                    counted++;
+                }
+            return counted == 0 ? 0 : total / counted;
+        }
+
+        static ToneSettings Plain()
+        {
+            // Nothing but the filter under test: no preset curve, no polish, so
+            // a change in the output can only have come from the filter.
+            ToneSettings s = ToneEngine.Defaults(TonePreset.OriginalColour);
+            s.Polish = 0;
+            return s;
+        }
+
+        /// <summary>
+        /// A halftone: a grid of dots at a known screen ruling, which is what
+        /// printed matter actually is under a scanner.
+        /// </summary>
+        static Bitmap MakeHalftone(int dpi, int lpi)
+        {
+            int w = 300, h = 300;
+            Bitmap bmp = MakeFlat(w, h, 170, dpi);
+            double pitch = (double)dpi / lpi;
+
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    bool dot = (Math.Floor(x / pitch) + Math.Floor(y / pitch)) % 2 < 1;
+                    int v = dot ? 90 : 240;
+                    bmp.SetPixel(x, y, Color.FromArgb(v, v, v));
+                }
+            return bmp;
+        }
+
+        static void TestDescreenRemovesTheGrid()
+        {
+            using (Bitmap src = MakeHalftone(300, 133))
+            {
+                double before = Texture(src);
+
+                ToneSettings s = Plain();
+                s.DescreenLpi = 133;
+                using (Bitmap outp = ToneEngine.Apply(src, s, ColorMode.Color24))
+                {
+                    double after = Texture(outp);
+                    Check("descreen_removes_the_grid", after < before * 0.35,
+                          "texture " + before.ToString("0.0") + " -> " + after.ToString("0.0") +
+                          ", wanted under " + (before * 0.35).ToString("0.0"));
+                }
+            }
+        }
+
+        static void TestDescreenKeepsAPhotograph()
+        {
+            // A smooth gradient has no dot grid to remove, so descreen should
+            // barely touch it. A filter that also flattens continuous tone is a
+            // blur wearing a different name.
+            int w = 300, h = 300;
+            using (Bitmap src = MakeFlat(w, h, 128, 300))
+            {
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int v = 20 + x * 200 / w;
+                        src.SetPixel(x, y, Color.FromArgb(v, v, v));
+                    }
+
+                ToneSettings s = Plain();
+                s.DescreenLpi = 133;
+                using (Bitmap outp = ToneEngine.Apply(src, s, ColorMode.Color24))
+                {
+                    double worst = 0;
+                    for (int x = 4; x < w - 4; x += 3)
+                        worst = Math.Max(worst, Math.Abs(src.GetPixel(x, 150).R - outp.GetPixel(x, 150).R));
+
+                    Check("descreen_keeps_a_photograph", worst <= 4,
+                          "a smooth ramp moved by " + worst.ToString("0") + " levels");
+                }
+            }
+        }
+
+        static void TestSharpenSteepensAnEdge()
+        {
+            int w = 120, h = 60;
+            using (Bitmap src = MakeFlat(w, h, 200, 300))
+            {
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        // A soft edge, so there is something for the mask to find.
+                        int v = x < w / 2 - 2 ? 60 : (x > w / 2 + 2 ? 220 : 60 + (x - (w / 2 - 2)) * 40);
+                        src.SetPixel(x, y, Color.FromArgb(v, v, v));
+                    }
+
+                // The steepest single step across the edge, which is what
+                // sharpening actually changes. Measuring two points either side
+                // of it instead would sit outside the mask's reach and report no
+                // change however well the filter worked.
+                int before = Steepest(src, 30);
+
+                ToneSettings s = Plain();
+                s.Sharpen = 70;
+                using (Bitmap outp = ToneEngine.Apply(src, s, ColorMode.Color24))
+                {
+                    int after = Steepest(outp, 30);
+                    Check("sharpen_steepens_an_edge", after > before + 8,
+                          "steepest step " + before + " -> " + after);
+                }
+            }
+        }
+
+        static int Steepest(Bitmap bmp, int row)
+        {
+            int worst = 0;
+            for (int x = 1; x < bmp.Width; x++)
+                worst = Math.Max(worst, Math.Abs(bmp.GetPixel(x, row).R - bmp.GetPixel(x - 1, row).R));
+            return worst;
+        }
+
+        static void TestDespeckleRemovesSpecksNotLines()
+        {
+            int w = 160, h = 160;
+            using (Bitmap src = MakeFlat(w, h, 250, 300))
+            {
+                // Isolated specks, and a line. One is dirt, the other is ink,
+                // and the difference is the whole job.
+                for (int i = 0; i < 40; i++)
+                    src.SetPixel(7 + (i * 13) % 140, 11 + (i * 29) % 140, Color.FromArgb(20, 20, 20));
+                for (int x = 20; x < 140; x++)
+                    for (int y = 80; y < 83; y++)
+                        src.SetPixel(x, y, Color.FromArgb(20, 20, 20));
+
+                ToneSettings s = Plain();
+                s.Despeckle = 80;
+                using (Bitmap outp = ToneEngine.Apply(src, s, ColorMode.Color24))
+                {
+                    int specksLeft = 0;
+                    for (int i = 0; i < 40; i++)
+                    {
+                        int x = 7 + (i * 13) % 140, y = 11 + (i * 29) % 140;
+                        if (y >= 78 && y <= 85) continue;              // sitting on the line
+                        if (outp.GetPixel(x, y).R < 128) specksLeft++;
+                    }
+
+                    int lineLeft = 0;
+                    for (int x = 30; x < 130; x++) if (outp.GetPixel(x, 81).R < 128) lineLeft++;
+
+                    Check("despeckle_removes_specks", specksLeft <= 4, specksLeft + " of 40 specks survived");
+                    Check("despeckle_keeps_lines", lineLeft >= 95, "only " + lineLeft + " of 100 line pixels survived");
+                }
+            }
+        }
+
+        static void TestBackgroundFlattensAndClearsBleedThrough()
+        {
+            int w = 240, h = 160;
+            using (Bitmap src = MakeFlat(w, h, 255, 300))
+            {
+                // Paper lit unevenly across the page, faint print showing through
+                // from the back, and real black text on the front.
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                    {
+                        int paper = 240 - x * 60 / w;
+                        src.SetPixel(x, y, Color.FromArgb(paper, paper, paper));
+                    }
+                for (int x = 30; x < 210; x++)
+                    for (int y = 40; y < 46; y++)
+                    {
+                        int paper = 240 - x * 60 / w;
+                        int ghost = paper - 22;                        // faint: the other side
+                        src.SetPixel(x, y, Color.FromArgb(ghost, ghost, ghost));
+                    }
+                for (int x = 30; x < 210; x++)
+                    for (int y = 100; y < 108; y++)
+                        src.SetPixel(x, y, Color.FromArgb(25, 25, 25));   // real ink
+
+                ToneSettings s = Plain();
+                s.BackgroundClean = 70;
+                using (Bitmap outp = ToneEngine.Apply(src, s, ColorMode.Color24))
+                {
+                    int paperLeft = outp.GetPixel(20, 20).R, paperRight = outp.GetPixel(220, 20).R;
+                    Check("background_flattens_the_paper",
+                          paperLeft >= 245 && paperRight >= 245,
+                          "paper went " + paperLeft + " on the left and " + paperRight + " on the right");
+
+                    int ghost = outp.GetPixel(120, 43).R;
+                    Check("background_clears_bleed_through", ghost >= 235,
+                          "the show-through is still at " + ghost);
+
+                    int ink = outp.GetPixel(120, 104).R;
+                    Check("background_keeps_the_ink", ink <= 60, "real ink lightened to " + ink);
+                }
+            }
+        }
+
+        static void TestCleanupCostsNothingWhenOff()
+        {
+            // The pass was added by splitting Apply in three. With every filter
+            // off the result has to be what it always was, byte for byte.
+            using (Bitmap src = MakeHalftone(300, 133))
+            using (Bitmap outp = ToneEngine.Apply(src, Plain(), ColorMode.Color24))
+            {
+                int worst = 0;
+                for (int y = 0; y < src.Height; y += 7)
+                    for (int x = 0; x < src.Width; x += 7)
+                        worst = Math.Max(worst, Math.Abs(src.GetPixel(x, y).R - outp.GetPixel(x, y).R));
+
+                Check("cleanup_off_changes_nothing", worst == 0, "pixels moved by up to " + worst);
+            }
+        }
+
         static void Check(string name, bool ok, string detail)
         {
             if (ok) Console.WriteLine("  ok   " + name);

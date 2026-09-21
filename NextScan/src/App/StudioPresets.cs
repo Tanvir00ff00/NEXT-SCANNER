@@ -130,6 +130,29 @@ namespace NextScan.App
         }
 
         /// <summary>
+        /// Puts the job back to its defaults, leaving the machine alone.
+        ///
+        /// The application does not start where it left off. Adjustments are the
+        /// reason: a page looks the way it does because of settings that are
+        /// invisible once the panel is scrolled past, and the failure they cause
+        /// is silent. Set Vivid and a heavy saturation for one job, come back the
+        /// next morning, and every scan of the day is wrong without anything on
+        /// screen having changed.
+        ///
+        /// So each run begins neutral, and a preset is how you get back to a
+        /// configured state -- which is what presets are for, and why this is
+        /// worth doing only now that they exist.
+        ///
+        /// What resets and what survives is not a second list: it is exactly the
+        /// split ApplyJob already draws. The scanner and the watched folder are
+        /// the machine, not the job, so they are still there in the morning.
+        /// </summary>
+        public static void ResetJob(StudioSettings live)
+        {
+            ApplyJob(new StudioSettings(), live);
+        }
+
+        /// <summary>
         /// Copies the fields that describe a job, and only those.
         ///
         /// A preset is written by saving the whole settings file, so it contains
@@ -188,6 +211,17 @@ namespace NextScan.App
             to.Contrast = from.Contrast;
             to.BwThreshold = from.BwThreshold;
             to.AdaptiveThreshold = from.AdaptiveThreshold;
+            to.AutoTone = from.AutoTone;
+            to.Saturation = from.Saturation;
+            to.Vibrance = from.Vibrance;
+            to.Temperature = from.Temperature;
+            to.Tint = from.Tint;
+            to.Highlights = from.Highlights;
+            to.Shadows = from.Shadows;
+            to.DescreenLpi = from.DescreenLpi;
+            to.Sharpen = from.Sharpen;
+            to.BackgroundClean = from.BackgroundClean;
+            to.Despeckle = from.Despeckle;
             to.CurvePointsRGB = Copy(from.CurvePointsRGB);
             to.CurvePointsR = Copy(from.CurvePointsR);
             to.CurvePointsG = Copy(from.CurvePointsG);
@@ -266,9 +300,40 @@ namespace NextScan.App
                     : "CARRIED - it is named in NotPartOfAJob and must not be"));
             }
 
+            // ---- and the same split, used the other way round ----
+            // ResetJob is ApplyJob from a fresh object, so it inherits the
+            // classification rather than repeating it. This checks that it
+            // really does: the job goes back to nothing, the machine does not.
+            StudioSettings used = new StudioSettings();
+            foreach (FieldInfo f in testable)
+            {
+                object a, b;
+                if (TwoValues(f.FieldType, out a, out b)) f.SetValue(used, b);
+            }
+
+            StudioSettings fresh = new StudioSettings();
+            ResetJob(used);
+
+            foreach (FieldInfo f in testable)
+            {
+                bool machine = Array.IndexOf(NotPartOfAJob, f.Name) >= 0;
+                bool back = Same(f.GetValue(used), f.GetValue(fresh));
+
+                if (machine && back)
+                {
+                    wrong++;
+                    say(string.Format("  {0,-26} {1}", f.Name, "RESET - it is the machine and must survive a restart"));
+                }
+                else if (!machine && !back)
+                {
+                    wrong++;
+                    say(string.Format("  {0,-26} {1}", f.Name, "NOT RESET - it would carry over into the next session"));
+                }
+            }
+
             say("");
             say(wrong == 0
-                ? "  ok: " + testable.Count + " fields, every one accounted for"
+                ? "  ok: " + testable.Count + " fields, carried and reset as they should be"
                 : "  FAILED: " + wrong + " field(s) on the wrong side");
             return wrong == 0 ? 0 : 1;
         }

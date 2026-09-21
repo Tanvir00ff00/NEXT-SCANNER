@@ -70,6 +70,12 @@ namespace NextScan.App
 
             StudioSettings settings = StudioSettings.Load();
 
+            // Every run starts neutral. The file still holds what was last used,
+            // and presets are how you get a configured state back; see
+            // StudioPresets.ResetJob for why remembering it was the wrong
+            // default.
+            StudioPresets.ResetJob(settings);
+
             bool noDialog = false;
             bool isJsx = false;
             string explicitOutPath = null;
