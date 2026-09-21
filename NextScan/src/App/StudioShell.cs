@@ -430,7 +430,11 @@ namespace NextScan.App
         // the detector finds is decided by the same press of Preview that
         // captures the page, and the operator was being made to cross the rail
         // to reach settings that belong beside the button they just used.
-        static readonly string[] SectionNames = { "Capture", "Look", "Output", "Batch", "Pages" };
+        // Output is not here. Format, naming, the colour profile and where files
+        // land are settings, not a step: they are chosen once for a way of
+        // working and then left alone, while these four are what an operator
+        // touches between one scan and the next. It lives under Settings.
+        static readonly string[] SectionNames = { "Capture", "Look", "Batch", "Pages" };
         static readonly string[] SectionIcons =
         {
             NsIcon.Capture, NsIcon.Look, NsIcon.Output, NsIcon.Batch, NsIcon.Pages
@@ -920,8 +924,7 @@ namespace NextScan.App
             {
                 case 0: BuildPresetGroup(ref y); BuildCaptureGroup(ref y); BuildDetectGroup(ref y); break;
                 case 1: BuildLookGroup(ref y); break;
-                case 2: BuildOutputGroup(ref y); break;
-                case 3: BuildBatchGroup(ref y); break;
+                case 2: BuildBatchGroup(ref y); break;
                 default: break;   // Pages is its own panel, built once
             }
 
@@ -938,7 +941,7 @@ namespace NextScan.App
             if (_inspHead != null) _inspHead.Invalidate();
         }
 
-        const int PagesSection = 4;
+        const int PagesSection = 3;
 
         void OnDrawerMouseWheel(object sender, MouseEventArgs e)
         {
@@ -1839,6 +1842,11 @@ namespace NextScan.App
 
         void BuildOutputGroup(ref int y)
         {
+            // It had no heading of its own while it was a rail section, because
+            // the rail was the heading. Inside Settings every other group names
+            // itself, and a nameless one reads as part of whatever is above it.
+            AddSectionLabel("Output", ref y);
+
             AddFieldLabel("Format", ref y);
             string[] formats = { "JPEG", "PNG", "TIFF", "PDF" };
             int fi = 0;
@@ -2215,8 +2223,22 @@ namespace NextScan.App
             // one place that can say so plainly is here.
             AddReadout("Detection model", ModelStatus(), ref y);
 
-            AddReadout("Source", AppInfo.Repository, ref y);
-            y += 2;
+            // Not a readout: a caption on the left and a value on the right
+            // needs the value to be short, and a repository address is not.
+            // Given its own line it simply fits.
+            AddFieldLabel("Source", ref y);
+            Label source = new Label
+            {
+                Text = AppInfo.Repository,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 18),
+                ForeColor = Theme.TextFaint,
+                BackColor = Color.Transparent,
+                Font = Theme.Ui(8f),
+                AutoEllipsis = true
+            };
+            _drawerHost.Controls.Add(source);
+            y += 26;
 
             AddFieldLabel("Diagnostics are written to", ref y);
             Label folder = new Label
@@ -2745,10 +2767,14 @@ namespace NextScan.App
             };
             _status.Controls.Add(_statusText);
 
-            AddViewButton(NsIcon.Fit, "Fit the page in the window", delegate { _canvas.ZoomFit(); });
-            AddViewButton(NsIcon.Actual, "Actual size", delegate { _canvas.ZoomTo(1.0); });
-            AddViewButton(NsIcon.ZoomOut, "Zoom out", delegate { _canvas.ZoomBy(1 / 1.25); });
-            AddViewButton(NsIcon.ZoomIn, "Zoom in", delegate { _canvas.ZoomBy(1.25); });
+            // The shortcut is named on the button, because there are no menus
+            // here to find it in and an unadvertised shortcut may as well not
+            // exist. These are Photoshop's, deliberately: anyone running both
+            // already has the habit.
+            AddViewButton(NsIcon.Fit, "Fit the page in the window  (Ctrl+0)", delegate { _canvas.ZoomFit(); });
+            AddViewButton(NsIcon.Actual, "Actual size  (Ctrl+1)", delegate { _canvas.ZoomTo(1.0); });
+            AddViewButton(NsIcon.ZoomOut, "Zoom out  (Ctrl+-)", delegate { _canvas.ZoomBy(1 / 1.25); });
+            AddViewButton(NsIcon.ZoomIn, "Zoom in  (Ctrl++)", delegate { _canvas.ZoomBy(1.25); });
             AddViewButton(NsIcon.RotateLeft, "Rotate left",
                           delegate { RotateActiveImage(RotateFlipType.Rotate270FlipNone); });
             AddViewButton(NsIcon.RotateRight, "Rotate right",
@@ -2826,7 +2852,11 @@ namespace NextScan.App
             done.Name = "settingsDone";
             _settingsHead.Controls.Add(done);
 
-            _settingsBody = new Panel { BackColor = Theme.Ground };
+            // AutoScroll, because the page does not fit. It never did on a
+            // window that is not maximised, and there was no way to reach what
+            // was below the fold: the columns simply ran off the bottom.
+            _settingsBody = new Panel { BackColor = Theme.Ground, AutoScroll = true };
+            _settingsBody.MouseWheel += OnSettingsWheel;
             _settingsPage.Controls.Add(_settingsBody);
         }
 
@@ -2881,7 +2911,7 @@ namespace NextScan.App
             // reads as a sheet, which is what it is.
             const int gutter = 44;
             int band = count * columnWidth + (count - 1) * gutter;
-            int originX = Math.Max(28, (_settingsBody.Width - band) / 2);
+            int originX = Math.Max(28, (_settingsBody.ClientSize.Width - band) / 2);
 
             Panel[] columns = new Panel[count];
             for (int i = 0; i < columns.Length; i++)
@@ -2892,12 +2922,17 @@ namespace NextScan.App
                     Location = new Point(originX + i * (columnWidth + gutter), 4),
                     Size = new Size(columnWidth, Math.Max(100, _settingsBody.Height - 8))
                 };
+                // A wheel turned over a column has to reach the panel that
+                // scrolls. Unhandled wheel messages climb to the parent, but
+                // only once something has focus, and nothing has focus on a page
+                // that has just opened.
+                columns[i].MouseWheel += OnSettingsWheel;
                 _settingsBody.Controls.Add(columns[i]);
             }
 
-            SectionBuilder[] parts = { BuildPreviewSettings, BuildAppearanceSettings,
-                                       BuildWatchGroup, BuildAboutSettings };
-            int[] into = { 0, 0, 1, 1 };
+            SectionBuilder[] parts = { BuildOutputGroup, BuildPreviewSettings,
+                                       BuildWatchGroup, BuildAppearanceSettings, BuildAboutSettings };
+            int[] into = { 0, 0, 1, 1, 1 };
             int tallest = 0;
             for (int i = 0; i < parts.Length; i++)
             {
@@ -2918,6 +2953,22 @@ namespace NextScan.App
 
             _settingsBody.ResumeLayout();
             _settingsBody.PerformLayout();
+
+            // Back to the top. Filling the page gives something focus, and
+            // WinForms scrolls whatever has focus into view, so the page opened
+            // at its own end with the first setting above the fold.
+            _settingsBody.AutoScrollPosition = new Point(0, 0);
+        }
+
+        void OnSettingsWheel(object sender, MouseEventArgs e)
+        {
+            if (_settingsBody == null) return;
+
+            int room = _settingsBody.DisplayRectangle.Height - _settingsBody.ClientSize.Height;
+            if (room <= 0) return;
+
+            int at = -_settingsBody.AutoScrollPosition.Y + (e.Delta > 0 ? -72 : 72);
+            _settingsBody.AutoScrollPosition = new Point(0, Math.Max(0, Math.Min(room, at)));
         }
 
         int SettingsColumns
@@ -6083,22 +6134,31 @@ namespace NextScan.App
                     if (e.Control) { SaveSession(); e.Handled = true; }
                     break;
 
+                // Both zeroes and both ones. The number row and the keypad are
+                // the same key to the person pressing it, and only one of them
+                // was listened to.
+                //
+                // SuppressKeyPress as well as Handled, or the keystroke goes on
+                // to whatever has focus and a zoom shortcut types a digit into
+                // a field.
                 case Keys.D0:
-                    if (e.Control) { _canvas.ZoomFit(); e.Handled = true; }
+                case Keys.NumPad0:
+                    if (e.Control) { _canvas.ZoomFit(); e.Handled = true; e.SuppressKeyPress = true; }
                     break;
 
                 case Keys.D1:
-                    if (e.Control) { _canvas.ZoomTo(1.0); e.Handled = true; }
+                case Keys.NumPad1:
+                    if (e.Control) { _canvas.ZoomTo(1.0); e.Handled = true; e.SuppressKeyPress = true; }
                     break;
 
                 case Keys.Oemplus:
                 case Keys.Add:
-                    if (e.Control) { _canvas.ZoomBy(1.25); e.Handled = true; }
+                    if (e.Control) { _canvas.ZoomBy(1.25); e.Handled = true; e.SuppressKeyPress = true; }
                     break;
 
                 case Keys.OemMinus:
                 case Keys.Subtract:
-                    if (e.Control) { _canvas.ZoomBy(1 / 1.25); e.Handled = true; }
+                    if (e.Control) { _canvas.ZoomBy(1 / 1.25); e.Handled = true; e.SuppressKeyPress = true; }
                     break;
             }
             UpdateStatus();

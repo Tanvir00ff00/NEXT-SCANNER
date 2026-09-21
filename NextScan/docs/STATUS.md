@@ -3197,3 +3197,69 @@ places described this scan -- the crop badge, the status bar, and the file that
 reached Photoshop -- and after the first fix two of them agreed at 300 while the
 third, the only one that was actually the product, was still 150. The one that
 left the building was the one that counted.
+
+## 19. Where things live, and reaching them, 2026-09-21
+
+### Output is a decision, not a step
+
+The rail is down to four sections: Capture, Look, Batch, Pages. Format,
+multi-page, the colour profile, the naming pattern, the folder and JPEG quality
+have all moved into Settings.
+
+The distinction is what the rail is for. Those four are what an operator touches
+between one scan and the next. Where files land and what they are called is
+chosen once for a way of working and then left alone, which is what Settings is.
+
+`BuildOutputGroup` gained a heading of its own on the way. It never had one,
+because as a rail section the rail *was* the heading; dropped into a page where
+every other group names itself, a nameless one reads as part of whatever sits
+above it.
+
+### The settings page could not be scrolled
+
+`_settingsBody` was a plain `Panel` with no `AutoScroll`. Its columns were sized
+to `Math.Max(tallest, body.Height)`, so when the content was taller than the
+window the columns simply ran off the bottom with no way to reach them. On a
+window that was not maximised, the lower half of Settings was unreachable.
+
+`AutoScroll` fixes the reaching. Two things had to be fixed around it, and
+neither was visible from the code:
+
+**It opened at its own end.** Filling the page gives some control focus, and
+WinForms scrolls whatever has focus into view, so the page arrived scrolled to
+the bottom with the first setting above the fold. The scroll position is now
+reset after filling.
+
+**The wheel did nothing until something was clicked.** Unhandled wheel messages
+climb to the parent, but only once the window has a focused control, and a page
+that has just opened has none. Each column now forwards the wheel to the panel
+that scrolls.
+
+Both were found by opening the page in a window that was not maximised and
+photographing it, which is the only way either would have shown up.
+
+### Two things the photographs caught
+
+The **Source** line in About was drawing its value over its own caption:
+`S`**github.com/Tanvir00ff00/NEXT-SCANNER**. A caption on the left and a value on
+the right needs the value to be short, and a repository address is not. It has
+its own line now.
+
+### Zoom shortcuts
+
+Reported as missing; they were not. Ctrl+0, Ctrl+1, Ctrl+plus and Ctrl+minus
+were all bound and all worked -- verified by driving the application and reading
+the zoom percentage, which went to 87% on two zoom-ins and back to 56% on
+Ctrl+0.
+
+Two real faults sat behind the report, though:
+
+- **The numeric keypad was not listened to.** Only `Keys.D0` and `Keys.D1` were
+  handled, never `NumPad0` or `NumPad1`. To the person pressing it, the keypad
+  zero *is* Ctrl+0.
+- **`SuppressKeyPress` was not set**, so the keystroke went on to whatever had
+  focus. Zooming with the cursor in a field also typed a digit into it.
+
+And the real problem was neither: nobody had been told the shortcuts existed.
+There are no menus here to find them in, so the zoom buttons now name them in
+their tooltips. An unadvertised shortcut may as well not exist.
