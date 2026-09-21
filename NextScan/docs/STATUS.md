@@ -1788,9 +1788,18 @@ Still outstanding:
   dropping, hot folder, naming templates) but there is one flat settings file
   and no way to name a set of settings and recall it. Every repeat job is set up
   by hand again.
-- **Film module, IT8** (§10.3–10.5) — not started.
-- **ICC colour management** (§10.6) — pages are tagged sRGB and Photoshop assigns
-  rather than converts; no device profile, no conversion. See section 12.
+- ~~**Film module** (§10.3–10.5)~~ — dropped on 2026-09-21. It is written for
+  people digitising negatives, and the LiDE 400 has no transparency unit, so
+  there is no hardware here to run it on or test it against. Infrared dust
+  removal was already ruled out for the same reason: no IR channel.
+- **IT8 / ICC scanner profiling** (§10.6) — still open, and the one part of the
+  film module that applies to paper. It is the other half of the "choose a
+  profile" control added in section 17: this is where the profile would come
+  from. It needs an IT8 target to be bought before there is anything to test
+  against, so it waits on that rather than on code.
+- **ICC colour management** (§10.6) — pages are tagged sRGB, or carry a profile
+  the device named or the operator chose, and Photoshop assigns rather than
+  converts. See sections 12 and 17.
 - **Quirks DB** (§7.6) — not started; two real entries are waiting for it.
 - ~~**Photoshop target modes** (§14.4)~~ — dropped on 2026-09-21, not deferred.
   A new document per item is what the owner actually wants; layer and smart
