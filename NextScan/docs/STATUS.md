@@ -3071,6 +3071,9 @@ and it is one click.
 - **1.0** — everything up to and including section 14.
 - **1.1** — named jobs.
 - **1.2** — advanced colour, the clean-up pass, and a neutral start.
+- **1.3** — the device's colour profile, 300 dpi previews, cuts taken from the
+  page rather than from the picture of the bed, Output moved into Settings, a
+  settings page that scrolls, and every shortcut written down.
 
 ## 17. Asking the scanner what its colours mean, 2026-09-21
 

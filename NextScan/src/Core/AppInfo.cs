@@ -21,7 +21,7 @@ namespace NextScan.Core
         /// second number is for features, the first for a release that changes
         /// how the thing is used.
         /// </summary>
-        public const string Version = "1.2";
+        public const string Version = "1.3";
 
         public const string Product = "NextScan Studio";
 
