@@ -54,6 +54,14 @@ namespace NextScan.App
                     return StudioPsBridge.SelfTest(Console.WriteLine);
                 }
 
+            foreach (string a in args)
+                if (string.Equals(a, "--preset-selftest", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("NextScan presets: what a job carries");
+                    Console.WriteLine();
+                    return StudioPresets.SelfTest(Console.WriteLine);
+                }
+
             // The acquire module starts us with a session id when the operator
             // picks File, Import, Next Scanner. Read before the shell is built,
             // so it knows from the start that a scan has somewhere to go.

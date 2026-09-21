@@ -2846,3 +2846,75 @@ side of the registry redirector is invisible from the other.
   line; the certificate has to be bought.
 - **No upgrade path.** Installing over an existing installation overwrites it,
   which works, but nothing checks versions or offers to repair.
+
+## 15. Named jobs, 2026-09-21  —  version 1.1
+
+The same documents keep coming back: identity cards at one resolution into one
+folder under one naming pattern, passports at another, photographs at a third.
+Every piece of machinery for each of those already existed. What did not was any
+way to say "this set, again", so every repeat was rebuilt by hand from memory.
+
+Presets sit at the top of the Capture section, which is the first section and
+the first thing in it, because recalling a job is the first thing done and not
+the last. Choosing one from the list applies it; there is no second click.
+
+### A preset is a settings file under another name
+
+`StudioSettings.Save` and `Load` already took a path, so a preset needed no new
+format, no new writer and no new reader. They live in
+`%LocalAppData%\NextScan\presets\<name>.ini` and can be read, diffed and edited
+in Notepad exactly like the settings file they are.
+
+Names are checked rather than trusted, because a name becomes a file name:
+letters, digits, spaces and `- _ ( ) +` only. No dots, no separators, nothing
+that can climb out of the folder or land on a reserved device name.
+
+### What a preset does not carry
+
+This is the part worth arguing about, and the answer is two things:
+
+| | why not |
+| --- | --- |
+| the scanner (`DeviceName`, `Transport`, `HostBitness`) | recalling "NID card" must not silently move the work to a different device, and a preset copied to another machine would name one that is not there |
+| the watched folder (`HotFolder*`) | a standing arrangement, not something to recall; repointing a running watcher from a dropdown is how files end up somewhere nobody asked for |
+
+`ApplyJob` names the fields it copies, one by one, rather than copying
+everything and subtracting the exceptions. That direction is deliberate: a field
+added to `StudioSettings` later is then *left out* of presets, which is a
+missing feature, instead of silently overwriting the operator's scanner, which
+is a bug.
+
+### The test that makes the forgetting impossible
+
+Naming fields by hand has exactly one failure mode: somebody adds a field and
+forgets this file. Presets quietly stop carrying it and nothing says so.
+
+So `--preset-selftest` does not compare against a list anybody wrote down. It
+reads the fields off `StudioSettings` by reflection, gives each one a value that
+differs between two objects, runs `ApplyJob`, and sees which ones moved.
+Anything that moved must not be in `NotPartOfAJob`; anything that did not move
+must be. A newly added field is therefore *required* to move unless somebody has
+deliberately named it as excluded:
+
+    ok: 47 fields, every one accounted for
+
+Confirmed by deleting one line from `ApplyJob`:
+
+    JpegQuality   NOT CARRIED - add it to ApplyJob, or name it in NotPartOfAJob
+    FAILED: 1 field(s) on the wrong side          (exit 1)
+
+It names the field and both valid remedies. This is the same shape as
+`--ps-selftest`: a check that lives in the application rather than in a separate
+test program, because the thing under test is in `src\App` and the test programs
+only compile the engine.
+
+### Versions
+
+The version now lives in `src\Core\AppInfo.cs` and nowhere else. `build.ps1`
+reads it back out to stamp the executable's file properties,
+`build_installer.ps1` takes its default from the same line, and the About panel
+prints it. Three copies of a version number disagree the first time somebody is
+in a hurry.
+
+- **1.0** — everything up to and including section 14.
+- **1.1** — named jobs.

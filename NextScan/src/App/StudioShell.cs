@@ -191,6 +191,8 @@ namespace NextScan.App
 
         NsPill _scanPill;
         NsPill _previewPill;
+        NsDropdown _presetPicker;
+        NsTextBox _presetName;
         NsIconButton _fullBedPill;
         bool _cancelling;
 
@@ -898,11 +900,13 @@ namespace NextScan.App
             _qualityNote = null;
             _tgMultiPage = null;
             _findAgainPill = null;
+            _presetPicker = null;
+            _presetName = null;
 
             int y = 14;
             switch (_activeSection)
             {
-                case 0: BuildCaptureGroup(ref y); BuildDetectGroup(ref y); break;
+                case 0: BuildPresetGroup(ref y); BuildCaptureGroup(ref y); BuildDetectGroup(ref y); break;
                 case 1: BuildLookGroup(ref y); break;
                 case 2: BuildOutputGroup(ref y); break;
                 case 3: BuildBatchGroup(ref y); break;
@@ -1082,6 +1086,137 @@ namespace NextScan.App
         /// splitter narrowed the panel, so labels clipped.
         /// </summary>
         int Dw { get { return Math.Max(120, InspectorContentWidth - Dx * 2); } }
+
+        /// <summary>
+        /// Named jobs, at the top of the first section because recalling one is
+        /// the first thing done and not the last.
+        /// </summary>
+        void BuildPresetGroup(ref int y)
+        {
+            AddSectionLabel("Presets", ref y);
+
+            List<string> saved = StudioPresets.Names();
+
+            // The first row is a prompt rather than a preset, so that opening
+            // the list does not apply whatever happens to be at the top of it.
+            List<string> shown = new List<string>();
+            shown.Add(saved.Count == 0 ? "Nothing saved yet" : "Choose a preset");
+            shown.AddRange(saved);
+
+            _presetPicker = new NsDropdown { Location = new Point(Dx, y), Size = new Size(Dw, 32) };
+            _presetPicker.SetItems(shown, 0);
+            _presetPicker.SelectedIndexChanged += delegate
+            {
+                if (_presetPicker == null || _presetPicker.SelectedIndex <= 0) return;
+                ApplyPreset(_presetPicker.SelectedText);
+            };
+            _drawerHost.Controls.Add(_presetPicker);
+            y += 38;
+
+            _presetName = new NsTextBox { Location = new Point(Dx, y), Size = new Size(Dw - 152, 32) };
+            _drawerHost.Controls.Add(_presetName);
+            _themedFields.Add(_presetName);
+
+            NsPill save = new NsPill
+            {
+                Text = "Save",
+                Kind = PillKind.Normal,
+                Radius = 7,
+                Location = new Point(Dx + Dw - 146, y),
+                Size = new Size(70, 32)
+            };
+            save.Click += delegate { SavePreset(); };
+            _drawerHost.Controls.Add(save);
+
+            NsPill remove = new NsPill
+            {
+                Text = "Delete",
+                Kind = PillKind.Quiet,
+                Radius = 7,
+                Location = new Point(Dx + Dw - 70, y),
+                Size = new Size(70, 32)
+            };
+            remove.Click += delegate { DeletePreset(); };
+            _drawerHost.Controls.Add(remove);
+            y += 38;
+
+            Label hint = new Label
+            {
+                Text = "Keeps everything but the scanner and the watched folder.",
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 16),
+                ForeColor = Theme.TextFaint,
+                BackColor = Color.Transparent,
+                Font = Theme.Ui(8f),
+                AutoEllipsis = true
+            };
+            _drawerHost.Controls.Add(hint);
+            y += 26;
+        }
+
+        void SavePreset()
+        {
+            string name = (_presetName == null ? "" : _presetName.Text).Trim();
+            if (!StudioPresets.IsUsableName(name))
+            {
+                SetStatus(name.Length == 0
+                    ? "Type a name for this preset first."
+                    : "A preset name can hold letters, digits, spaces, - _ ( ) and +.");
+                return;
+            }
+
+            bool replacing = StudioPresets.Exists(name);
+            if (!StudioPresets.Save(name, _settings))
+            {
+                SetStatus("Could not write the preset.");
+                return;
+            }
+
+            SetStatus(replacing ? "Preset \"" + name + "\" updated." : "Preset \"" + name + "\" saved.");
+            ShowSection(_activeSection);
+        }
+
+        void DeletePreset()
+        {
+            // The name in the box wins over the one in the list: it is the one
+            // being looked at, and the list resets to its prompt after every
+            // apply.
+            string name = (_presetName == null ? "" : _presetName.Text).Trim();
+            if (name.Length == 0 && _presetPicker != null && _presetPicker.SelectedIndex > 0)
+                name = _presetPicker.SelectedText;
+
+            if (!StudioPresets.Exists(name)) { SetStatus("No preset by that name."); return; }
+
+            StudioPresets.Delete(name);
+            SetStatus("Preset \"" + name + "\" deleted.");
+            ShowSection(_activeSection);
+        }
+
+        void ApplyPreset(string name)
+        {
+            if (!StudioPresets.Apply(name, _settings)) { SetStatus("Could not read that preset."); return; }
+
+            _settings.Save();
+
+            // The crop is part of the job, so it comes back with it, and the
+            // canvas has to be told: it holds its own copy for drawing.
+            _canvas.CropNorm = _settings.CropNorm;
+            _manualCrop = _settings.CropNorm.Width < 0.999f || _settings.CropNorm.Height < 0.999f;
+            _cropDrawnByUser = _manualCrop;
+
+            SetStatus("Preset \"" + name + "\" applied.");
+
+            // Rebuilt rather than individually updated: every control in this
+            // section reads a field that may have just changed, and a panel that
+            // shows the old numbers is worse than one that flickers.
+            ShowSection(_activeSection);
+
+            if (_presetName != null) _presetName.Text = name;
+
+            UpdateProcessedPreview();
+            UpdatePreviewCost();
+            UpdateStatus();
+        }
 
         void AddSectionLabel(string text, ref int y)
         {
