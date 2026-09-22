@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Threading;
 using NextScan.Ai;
 
 namespace NextScan.Tools
@@ -47,6 +48,10 @@ namespace NextScan.Tools
             Case("gemini_sdk_loads", () => AiSelfTest.Reach("gemini"));
             Case("redirects_resolved", RedirectsResolved);
 
+            Console.WriteLine("  the model list");
+            Case("models_are_not_declared", ModelsAreNotDeclared);
+            Case("no_key_no_list", NoKeyNoList);
+
             Console.WriteLine("  the key store");
             Case("key_round_trip", KeyRoundTrip);
             Case("key_never_shown_whole", KeyNeverShownWhole);
@@ -70,7 +75,8 @@ namespace NextScan.Tools
             foreach (IAiProvider p in all)
             {
                 if (string.IsNullOrEmpty(p.Info.Name)) throw new Exception(p.Info.Id + " has no name");
-                if (p.Info.Models.Length == 0) throw new Exception(p.Info.Id + " offers no model");
+                if (string.IsNullOrEmpty(p.Info.KeyHint)) throw new Exception(p.Info.Id + " does not say what its key looks like");
+                if (p.Info.Prefer.Length == 0) throw new Exception(p.Info.Id + " has no preference to fall back on");
                 names.Add(p.Info.Name);
             }
             return string.Join(", ", names.ToArray());
@@ -134,6 +140,57 @@ namespace NextScan.Tools
 
             foreach (string a in loaded) Console.WriteLine("           " + a);
             return loaded.Count + " assemblies";
+        }
+
+        // -- the model list --------------------------------------------------
+
+        /// <summary>
+        /// There is no list of model names anywhere in the layer.
+        ///
+        /// Checked by reflection over what a provider declares, because the
+        /// failure this guards against is somebody adding a convenient default
+        /// back: a name written here is a name that is wrong by the next model
+        /// release, with a menu that quietly hides whatever the operator is
+        /// actually paying for.
+        /// </summary>
+        static string ModelsAreNotDeclared()
+        {
+            foreach (IAiProvider provider in AiProviders.All())
+                foreach (string wanted in provider.Info.Prefer)
+                {
+                    // A preference is a fragment to match against the fetched
+                    // list. Anything that looks like a whole model id is a list
+                    // in disguise.
+                    if (wanted.Length > 24)
+                        throw new Exception(provider.Info.Id + " prefers '" + wanted + "', which is a model name, not a hint");
+                }
+
+            // Nothing is offered before the provider has been asked.
+            foreach (IAiProvider provider in AiProviders.All())
+                if (AiModels.Cached(provider) != null)
+                    throw new Exception(provider.Info.Id + " had a list before anybody asked for one");
+
+            return "preferences only";
+        }
+
+        /// <summary>
+        /// Without a key there is no account, so there is no list -- and the
+        /// answer has to be the refusal rather than an invented default.
+        /// </summary>
+        static string NoKeyNoList()
+        {
+            int refused = 0;
+            foreach (IAiProvider provider in AiProviders.All())
+            {
+                if (provider.Ready) continue;        // a real key is set on this machine
+                try
+                {
+                    provider.Models(CancellationToken.None).GetAwaiter().GetResult();
+                    throw new Exception(provider.Info.Id + " produced a model list with no key");
+                }
+                catch (AiTrouble) { refused++; }
+            }
+            return refused + " refused";
         }
 
         // -- the key store ---------------------------------------------------

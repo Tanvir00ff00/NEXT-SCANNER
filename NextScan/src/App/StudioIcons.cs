@@ -47,14 +47,8 @@ namespace NextScan.App
         public const string Assist = "assist";
         public const string Send = "send";
         public const string Stop = "stop";
-        public const string Suggest = "suggest";
-        public const string Identify = "identify";
-        public const string ReadText = "readtext";
-        public const string Translate = "translate";
-        public const string CheckScan = "checkscan";
-        public const string Summarise = "summarise";
+        public const string NewChat = "newchat";
         public const string Copy = "copy";
-        public const string Clear = "clear";
 
         /// <summary>
         /// Draws one icon centred in <paramref name="box"/>.
@@ -244,13 +238,11 @@ namespace NextScan.App
                     break;
 
                 case Assist:
-                case Suggest:
                     // A four-point spark with a smaller one trailing it. The
                     // shape everything else in this category uses, which is the
                     // reason to use it: it is already learned.
                     Spark(g, b, 9.5f, 9.5f, 6.5f);
                     Spark(g, b, 17.5f, 17f, 3.4f);
-                    if (name == Suggest) Spark(g, b, 18f, 6.5f, 2.6f);
                     break;
 
                 case Send:
@@ -266,77 +258,21 @@ namespace NextScan.App
                         g.FillPath(b, path);
                     break;
 
-                case Identify:
-                    // A sheet with its top corner turned: "which document is
-                    // this one", before anything has been read off it.
-                    g.DrawLines(p, new PointF[] { new PointF(14f, 3.5f), new PointF(5.5f, 3.5f),
-                                                  new PointF(5.5f, 20.5f), new PointF(18.5f, 20.5f),
-                                                  new PointF(18.5f, 8f), new PointF(14f, 3.5f),
-                                                  new PointF(14f, 8f), new PointF(18.5f, 8f) });
-                    g.DrawLine(p, 8.8f, 13f, 15.2f, 13f);
-                    g.DrawLine(p, 8.8f, 16.5f, 13f, 16.5f);
-                    break;
-
-                case ReadText:
-                    // Ruled lines with the last one short, the way a paragraph
-                    // ends. Four lines, because three reads as a menu.
-                    g.DrawLine(p, 4f, 5.5f, 20f, 5.5f);
-                    g.DrawLine(p, 4f, 10f, 20f, 10f);
-                    g.DrawLine(p, 4f, 14.5f, 20f, 14.5f);
-                    g.DrawLine(p, 4f, 19f, 13f, 19f);
-                    break;
-
-                case Translate:
-                    // One letter becoming another across an arrow. Drawn rather
-                    // than typed: a glyph here would be whatever font happened
-                    // to be installed, and half the scripts this is for are the
-                    // ones that go missing.
-                    g.DrawLines(p, new PointF[] { new PointF(3.5f, 11f), new PointF(6.8f, 3.5f),
-                                                  new PointF(10.1f, 11f) });
-                    g.DrawLine(p, 4.9f, 8.2f, 8.7f, 8.2f);
-                    g.DrawLines(p, new PointF[] { new PointF(13.9f, 20.5f), new PointF(17.2f, 13f),
-                                                  new PointF(20.5f, 20.5f) });
-                    g.DrawLine(p, 15.3f, 17.7f, 19.1f, 17.7f);
-                    g.DrawLines(p, new PointF[] { new PointF(6f, 15f), new PointF(6f, 19.5f),
-                                                  new PointF(10.5f, 19.5f) });
-                    g.DrawLine(p, 6f, 19.5f, 12.5f, 13f);
-                    break;
-
-                case CheckScan:
-                    // The page, and a tick on it. About the scan rather than
-                    // about what it says.
-                    g.DrawRectangle(p, 3.5f, 3.5f, 17f, 17f);
-                    g.DrawLines(p, new PointF[] { new PointF(7.5f, 12.2f), new PointF(10.8f, 15.5f),
-                                                  new PointF(16.5f, 8.5f) });
-                    break;
-
-                case Summarise:
-                    // A block of text, a chevron, one line left. Narrowing lines
-                    // were the first attempt and at 20 px they were the ReadText
-                    // mark with a slope on it -- two buttons side by side that
-                    // looked the same.
-                    g.DrawLine(p, 4f, 4f, 20f, 4f);
-                    g.DrawLine(p, 4f, 7.6f, 20f, 7.6f);
-                    g.DrawLine(p, 4f, 11.2f, 15.5f, 11.2f);
-                    g.DrawLines(p, new PointF[] { new PointF(9f, 14.8f), new PointF(12f, 17.6f),
-                                                  new PointF(15f, 14.8f) });
-                    g.DrawLine(p, 7.5f, 20.6f, 16.5f, 20.6f);
-                    break;
-
                 case Copy:
                     g.DrawRectangle(p, 8f, 3.5f, 12.5f, 12.5f);
                     g.DrawLines(p, new PointF[] { new PointF(16f, 20.5f), new PointF(3.5f, 20.5f),
                                                   new PointF(3.5f, 8f) });
                     break;
 
-                case Clear:
-                    // A bin, for a conversation rather than a file: the lid
-                    // line is what separates it from a plain box.
-                    g.DrawLine(p, 4f, 6.5f, 20f, 6.5f);
-                    g.DrawLines(p, new PointF[] { new PointF(9.5f, 6.5f), new PointF(9.5f, 3.5f),
-                                                  new PointF(14.5f, 3.5f), new PointF(14.5f, 6.5f) });
-                    g.DrawLines(p, new PointF[] { new PointF(6.5f, 6.5f), new PointF(7.6f, 20.5f),
-                                                  new PointF(16.4f, 20.5f), new PointF(17.5f, 6.5f) });
+                case NewChat:
+                    // A speech bubble with a plus in it. Not a bin: this starts
+                    // a new conversation, it does not throw the page away, and a
+                    // bin next to a scanned document reads as the worse one.
+                    g.DrawLines(p, new PointF[] { new PointF(12.5f, 19.5f), new PointF(8f, 19.5f),
+                                                  new PointF(4f, 22f), new PointF(4.6f, 19.2f) });
+                    g.DrawArc(p, 3.5f, 3.5f, 17f, 17f, 100, 250);
+                    g.DrawLine(p, 12f, 8.5f, 12f, 14.5f);
+                    g.DrawLine(p, 9f, 11.5f, 15f, 11.5f);
                     break;
 
                 default:
@@ -541,6 +477,9 @@ namespace NextScan.App
         /// </summary>
         public bool Raised;
 
+        /// <summary>A circular plate rather than a rounded square, for a send button.</summary>
+        public bool Circle;
+
         bool _checked;
 
         public bool Checked
@@ -608,11 +547,13 @@ namespace NextScan.App
                 Color fill = on > hot
                     ? Theme.Mix(rest, Theme.Accent, on)
                     : Theme.Mix(rest, hoverFill, hot);
-                using (GraphicsPath path = Theme.Round(plate, 7))
+                using (GraphicsPath path = Theme.Round(plate, Circle
+                                                       ? Math.Min(plate.Width, plate.Height) / 2
+                                                       : 7))
                 {
                     using (SolidBrush brush = new SolidBrush(fill))
                         g.FillPath(brush, path);
-                    if (Raised && on < 0.5 && Picture == null)
+                    if (Raised && on < 0.5 && Picture == null && !Circle)
                         using (Pen edge = new Pen(Theme.Mix(Theme.Line, Theme.Accent, hot * 0.6), 1f))
                             g.DrawPath(edge, path);
                 }

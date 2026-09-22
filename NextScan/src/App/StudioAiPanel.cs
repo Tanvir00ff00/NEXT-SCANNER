@@ -2,23 +2,34 @@
 // NextScan Studio - the assistant panel
 // Plan ref: docs/AI_LAYER.md.
 //
-// The right-hand panel, when the rail is on Assist: a transcript, a row of
-// one-press actions above it, and a box to type in below. It is the only file
-// in the application that names NextScan.Ai, which is what keeps the provider
-// SDKs out of the shell.
+// The right-hand panel, when the rail is on Assist. It is the only file in the
+// application that names NextScan.Ai, which is what keeps the provider SDKs out
+// of the shell.
 //
-// Two decisions are worth stating because they are not obvious from the code.
+// The layout is not ours. The first version of this panel was invented: a row
+// of icons across the top, a text box with a button beside it, and the model
+// and thinking level on the settings page. Claude, ChatGPT, Gemini and Copilot
+// were then looked at side by side, and all four agree with each other and none
+// of them agree with that:
 //
-// The model is sent the WHOLE page, never a crop. That was the owner's
-// correction to an earlier design and it was right: a model handed a rectangle
+//   * the input and its controls are ONE rounded plate, and the model and the
+//     effort sit along its bottom edge beside the send button;
+//   * they are chosen per question, so they are never on a settings page --
+//     Settings holds the key, which is the only part that belongs to the
+//     account rather than to the turn;
+//   * the empty state offers named suggestions, not a toolbar of icons that
+//     have to be learned before they mean anything.
+//
+// Two decisions of our own are worth stating.
+//
+// The model is sent the WHOLE page, never a crop. A model handed a rectangle
 // cut out of a form does not know it is looking at a form, and answers about
-// the rectangle. Measurements are a different job and are not asked of a model
-// at all.
+// the rectangle. Measurements are a different job and are not asked of a model.
 //
 // And nothing is sent until the operator presses something. There is no pass
-// over the page when the panel opens, no background call while they are looking
-// at it. Every call on this panel costs the shop money, and a cost they did not
-// ask for is one they cannot plan for.
+// over the page when the panel opens and no background call while they look at
+// it. Every call here costs the shop money, and a cost they did not ask for is
+// one they cannot plan for.
 // =============================================================================
 using System;
 using System.Collections.Generic;
@@ -43,7 +54,7 @@ namespace NextScan.App
         /// <summary>The page being talked about, or null when there is none.</summary>
         public Func<RawImage> PageSource;
 
-        /// <summary>Where that page came from, for the line under the transcript.</summary>
+        /// <summary>Where that page came from, for the chip on the composer.</summary>
         public Func<string> PageNote;
 
         /// <summary>The shell's status line.</summary>
@@ -56,17 +67,20 @@ namespace NextScan.App
 
         readonly List<AiMessage> _history = new List<AiMessage>();
         readonly List<NsBubble> _bubbles = new List<NsBubble>();
+        readonly List<NsPill> _chips = new List<NsPill>();
 
-        Panel _actions;
+        Panel _bar;                 // the thin strip at the top: new conversation
+        NsIconButton _fresh;
         Panel _scroll;
         Panel _column;
-        NsTextBox _composer;
+        Panel _welcome;             // the empty state, shown until the first turn
+        NsComposer _composer;
+        NsPill _modelButton;
         NsIconButton _send;
         Label _meter;
-        Label _hint;
+
         readonly System.Windows.Forms.Timer _tick = new System.Windows.Forms.Timer();
         readonly ToolTip _tips = new ToolTip();
-        readonly Dictionary<string, NsIconButton> _actionButtons = new Dictionary<string, NsIconButton>();
 
         CancellationTokenSource _cancel;
         NsBubble _live;
@@ -78,62 +92,61 @@ namespace NextScan.App
         ThinkingLevel _thinking = ThinkingLevel.Medium;
 
         /// <summary>
-        /// Which page this conversation is about, as the operator would name
-        /// it. Kept so the panel can say so when the page underneath changes.
+        /// Which page this conversation is about, as the operator would name it.
+        /// Kept so the panel can say so when the page underneath changes.
         /// </summary>
         string _pageFor = "";
 
         // =====================================================================
-        // The one-press actions
+        // The suggestions
         //
         // Data, not code: adding one is a line here. Each carries the whole
         // question, because a prompt assembled from fragments at the call site
         // is a prompt nobody can read in one place.
         // =====================================================================
-        class QuickAction
+        class Suggestion
         {
             public string Id = "";
-            public string Icon = "";
             public string Title = "";
             public string Ask = "";
         }
 
-        static readonly QuickAction[] Actions =
+        static readonly Suggestion[] Suggestions =
         {
-            new QuickAction
+            new Suggestion
             {
-                Id = "identify", Icon = NsIcon.Identify, Title = "What is this?",
+                Id = "identify", Title = "What is this document?",
                 Ask = "What document is this? Name the kind of document, who issued it if that is " +
                       "shown, and what it is used for. A few lines is enough."
             },
-            new QuickAction
+            new Suggestion
             {
-                Id = "read", Icon = NsIcon.ReadText, Title = "Read the text",
+                Id = "read", Title = "Read the text",
                 Ask = "Transcribe everything on this page, in the order it appears, keeping the " +
                       "layout: headings as headings, a table as rows, a form field as its label " +
                       "and its value. Do not translate it, do not correct it and do not summarise " +
                       "it -- transcribe it. Put [?] where you cannot read something rather than " +
                       "guessing at it."
             },
-            new QuickAction
+            new Suggestion
             {
-                Id = "translate", Icon = NsIcon.Translate, Title = "Translate",
+                Id = "translate", Title = "Translate it",
                 Ask = "Translate the text on this page. If it is in Bengali, translate it into " +
                       "English; otherwise translate it into Bengali. Keep the layout, and where a " +
                       "field has a label keep the original beside the translation. Leave names, " +
                       "numbers and dates as they are written."
             },
-            new QuickAction
+            new Suggestion
             {
-                Id = "check", Icon = NsIcon.CheckScan, Title = "Check the scan",
+                Id = "check", Title = "Check the scan",
                 Ask = "Look at this as a scan rather than as a document. Is any part cut off, out " +
                       "of focus, crooked, or too dark or too light to read? Say what to change on " +
                       "the scanner -- the crop, the resolution, straightening, the exposure. If " +
                       "there is nothing wrong with it, say so in one line."
             },
-            new QuickAction
+            new Suggestion
             {
-                Id = "summarise", Icon = NsIcon.Summarise, Title = "Summarise",
+                Id = "summarise", Title = "Summarise it",
                 Ask = "Summarise what this document says: who it concerns, what it is for, and any " +
                       "dates and amounts on it. A few lines."
             },
@@ -166,44 +179,107 @@ namespace NextScan.App
             BackColor = Theme.Surface;
             DoubleBuffered = true;
 
-            BuildActions();
+            BuildBar();
+            BuildTranscript();
+            BuildWelcome();
+            BuildComposer();
 
-            _scroll = new Panel { BackColor = Theme.Surface, AutoScroll = true };
+            _tick.Interval = 60;
+            _tick.Tick += delegate { if (_live != null && _live.Pending) _live.Invalidate(); };
+
+            UpdateModelButton();
+        }
+
+        void BuildBar()
+        {
+            _bar = new Panel { BackColor = Theme.Surface };
+            Controls.Add(_bar);
+
+            _fresh = new NsIconButton { Icon = NsIcon.NewChat };
+            _fresh.Click += delegate { Reset(); };
+            _tips.SetToolTip(_fresh, "Start again");
+            _bar.Controls.Add(_fresh);
+        }
+
+        void BuildTranscript()
+        {
+            _scroll = new Panel { BackColor = Theme.Surface, AutoScroll = true, Visible = false };
             Controls.Add(_scroll);
 
-            // The bubbles are placed in a column inside the scrolling panel
-            // rather than in the panel itself. Setting a child's bounds
-            // directly on an AutoScroll panel places it relative to the
-            // scrolled origin, so every re-layout while scrolled -- which is
-            // every token that arrives -- would walk the transcript up the
-            // window. The column is what moves; its contents never do.
+            // The bubbles go in a column inside the scrolling panel rather than
+            // in the panel itself. Setting a child's bounds directly on an
+            // AutoScroll panel places it relative to the scrolled origin, so
+            // every re-layout while scrolled -- which is every token that
+            // arrives -- would walk the transcript up the window.
             _column = new Panel { BackColor = Theme.Surface, Location = new Point(0, 0) };
             _scroll.Controls.Add(_column);
+        }
 
-            _hint = new Label
+        /// <summary>
+        /// The empty state: what this is for, and the questions worth asking
+        /// about a scanned page, by name.
+        /// </summary>
+        void BuildWelcome()
+        {
+            _welcome = new Panel { BackColor = Theme.Surface };
+            _welcome.Paint += delegate (object sender, PaintEventArgs e)
             {
-                BackColor = Color.Transparent,
-                ForeColor = Theme.TextFaint,
-                Font = Theme.Ui(7.5f),
-                AutoSize = false,
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-            Controls.Add(_hint);
+                Graphics g = e.Graphics;
+                g.Clear(Theme.Surface);
+                Theme.Smooth(g);
 
-            _composer = new NsTextBox { Multiline = true, ShowScroll = false };
-            _composer.TextCommitted += delegate { Send(_composer.Text, null); };
+                int top = WelcomeTop();
+                NsIcon.Draw(g, NsIcon.Assist, new RectangleF(_welcome.Width / 2f - 16, top, 32, 32),
+                            Theme.Mix(Theme.TextFaint, Theme.Accent, 0.7));
+
+                using (Font f = Theme.UiSemi(12f))
+                    TextRenderer.DrawText(g, "About this page", f,
+                        new Rectangle(12, top + 40, Math.Max(1, _welcome.Width - 24), 26), Theme.Text,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+            };
+            Controls.Add(_welcome);
+
+            foreach (Suggestion suggestion in Suggestions)
+            {
+                Suggestion which = suggestion;
+                NsPill chip = new NsPill { Text = suggestion.Title, Kind = PillKind.Normal, Radius = 17 };
+                chip.Font = Theme.Ui(8.75f);
+                chip.Click += delegate { Send(which.Title, which.Ask); };
+                _welcome.Controls.Add(chip);
+                _chips.Add(chip);
+            }
+        }
+
+        int WelcomeTop()
+        {
+            int block = 74 + _chips.Count * 40;
+            return Math.Max(14, (_welcome.Height - block) / 2 - 10);
+        }
+
+        void BuildComposer()
+        {
+            _composer = new NsComposer { Placeholder = "Ask about this page" };
+            _composer.Submit += delegate { Send(_composer.Text, null); };
+            _composer.Typed += delegate { UpdateSend(); };
+            _composer.HeightWanted += delegate { LayoutAll(); };
+            _composer.FootChanged += delegate { LayoutComposer(); };
             Controls.Add(_composer);
 
-            _send = new NsIconButton { Icon = NsIcon.Send, Raised = true };
+            // Model and effort, beside the send button. This is the one control
+            // every real chat interface agrees on the position of.
+            _modelButton = new NsPill { Kind = PillKind.Quiet, Radius = 11 };
+            _modelButton.Font = Theme.Ui(8f);
+            _modelButton.Click += delegate { OpenModelMenu(); };
+            _composer.Controls.Add(_modelButton);
+
+            _send = new NsIconButton { Icon = NsIcon.Send, Circle = true, Raised = true };
             _send.Click += delegate
             {
-                // One button, two jobs, the same way the Scan pill works: a stop
-                // button that is dead almost all the time is worse than the
-                // action changing meaning while it is actually running.
                 if (_busy) Stop();
                 else Send(_composer.Text, null);
             };
-            Controls.Add(_send);
+            _tips.SetToolTip(_send, "Send  (Enter)");
+            _composer.Controls.Add(_send);
 
             _meter = new Label
             {
@@ -211,50 +287,10 @@ namespace NextScan.App
                 ForeColor = Theme.TextFaint,
                 Font = Theme.Ui(7.5f),
                 AutoSize = false,
+                Visible = false,
                 TextAlign = ContentAlignment.MiddleLeft
             };
             Controls.Add(_meter);
-
-            // Only for the waiting dots, and only while something is waiting.
-            _tick.Interval = 60;
-            _tick.Tick += delegate { if (_live != null && _live.Pending) _live.Invalidate(); };
-
-            ShowWelcome();
-            UpdateMeter();
-        }
-
-        void BuildActions()
-        {
-            _actions = new Panel { BackColor = Theme.Surface };
-            _actions.Paint += delegate (object sender, PaintEventArgs e)
-            {
-                e.Graphics.Clear(Theme.Surface);
-                using (Pen pen = new Pen(Theme.LineSoft, 1f))
-                    e.Graphics.DrawLine(pen, 0, _actions.Height - 1, _actions.Width, _actions.Height - 1);
-            };
-            Controls.Add(_actions);
-
-            foreach (QuickAction action in Actions)
-            {
-                QuickAction which = action;
-                NsIconButton button = new NsIconButton { Icon = action.Icon, Raised = true };
-                button.Click += delegate { Send(which.Title, which.Ask); };
-                _tips.SetToolTip(button, action.Title);
-                _actions.Controls.Add(button);
-                _actionButtons[action.Id] = button;
-            }
-
-            NsIconButton suggest = new NsIconButton { Icon = NsIcon.Suggest, Raised = true };
-            suggest.Click += delegate { Suggest(); };
-            _tips.SetToolTip(suggest, "Ask which of these would help with this page");
-            _actions.Controls.Add(suggest);
-            _actionButtons["suggest"] = suggest;
-
-            NsIconButton clear = new NsIconButton { Icon = NsIcon.Clear, Raised = true };
-            clear.Click += delegate { Reset(); };
-            _tips.SetToolTip(clear, "Start again");
-            _actions.Controls.Add(clear);
-            _actionButtons["clear"] = clear;
         }
 
         // =====================================================================
@@ -269,21 +305,21 @@ namespace NextScan.App
                 if (id == _providerId) return;
                 _providerId = id;
                 _model = "";                 // a model name belongs to one provider
-                UpdateMeter();
+                UpdateModelButton();
                 Raise();
             }
         }
 
         public string Model
         {
-            get { return string.IsNullOrEmpty(_model) ? DefaultModel() : _model; }
-            set { _model = value ?? ""; UpdateMeter(); Raise(); }
+            get { return _model; }
+            set { _model = value ?? ""; UpdateModelButton(); Raise(); }
         }
 
         public ThinkingLevel Thinking
         {
             get { return _thinking; }
-            set { _thinking = value; UpdateMeter(); Raise(); }
+            set { _thinking = value; UpdateModelButton(); Raise(); }
         }
 
         void Raise() { if (ChoiceChanged != null) ChoiceChanged(this, EventArgs.Empty); }
@@ -294,17 +330,197 @@ namespace NextScan.App
             return found ?? AiProviders.All()[0];
         }
 
-        string DefaultModel()
-        {
-            string[] models = Provider().Info.Models;
-            return models.Length > 0 ? models[0] : "";
-        }
-
         /// <summary>Re-reads what Settings may have changed while the panel was hidden.</summary>
         public void Rebind()
         {
-            UpdateMeter();
+            UpdateModelButton();
             LayoutAll();
+        }
+
+        // =====================================================================
+        // The model menu
+        // =====================================================================
+
+        /// <summary>
+        /// Providers, their models, and the effort, in one menu.
+        ///
+        /// The model list is the provider's own, fetched with the operator's key
+        /// and never written down here: what an account can reach depends on the
+        /// account, and a list in our source would be wrong by the next release
+        /// with nothing to say so. The first time this opens for a key it has
+        /// nothing to show, so it says it is asking and has them by the time the
+        /// menu is opened again.
+        /// </summary>
+        void OpenModelMenu()
+        {
+            NsChoiceMenu menu = new NsChoiceMenu();
+            bool anyKey = false;
+            bool anyMissing = false;
+
+            foreach (IAiProvider provider in AiProviders.All())
+            {
+                if (!provider.Ready)
+                {
+                    menu.Header(provider.Info.Name, "no key");
+                    continue;
+                }
+
+                anyKey = true;
+                menu.Header(provider.Info.Name, "");
+
+                IList<AiModel> models = AiModels.Cached(provider);
+                if (models == null)
+                {
+                    menu.Note("asking " + provider.Info.Name + "...");
+                    anyMissing = true;
+                    BeginFetch(provider);
+                    continue;
+                }
+                if (models.Count == 0) { menu.Note("no models on this key"); continue; }
+
+                foreach (AiModel model in models)
+                {
+                    AiModel which = model;
+                    IAiProvider owner = provider;
+                    menu.Item(model.ToString(), "",
+                              owner.Info.Id == _providerId && which.Id == _model,
+                              new Chosen { Provider = owner.Info.Id, Model = which.Id });
+                }
+            }
+
+            if (!anyKey)
+            {
+                menu.Note("No key has been set.");
+                menu.Note("Settings, under Assistant.");
+            }
+            else
+            {
+                menu.Rule();
+                menu.Header("Effort", "");
+
+                IAiProvider now = Provider();
+                foreach (ThinkingLevel level in new[] { ThinkingLevel.Low, ThinkingLevel.Medium,
+                                                        ThinkingLevel.High, ThinkingLevel.Max })
+                {
+                    ThinkingLevel which = level;
+                    string note = level > now.Info.Ceiling
+                        ? "uses " + now.Info.Ceiling.ToString().ToLowerInvariant()
+                        : "";
+                    menu.Item(which.ToString(), note, which == _thinking, new Chosen { Effort = which });
+                }
+            }
+
+            menu.Picked += delegate (object tag) { Took(tag); };
+            menu.Show(_modelButton, Math.Max(210, Width - 28));
+
+            if (anyMissing) Say("Asking the provider which models this key can reach");
+        }
+
+        class Chosen
+        {
+            public string Provider;
+            public string Model;
+            public ThinkingLevel? Effort;
+        }
+
+        void Took(object tag)
+        {
+            Chosen chosen = tag as Chosen;
+            if (chosen == null) return;
+
+            if (chosen.Effort.HasValue) { Thinking = chosen.Effort.Value; return; }
+
+            _providerId = chosen.Provider;
+            _model = chosen.Model;
+            UpdateModelButton();
+            Raise();
+        }
+
+        // ---- fetching the list ----------------------------------------------
+
+        readonly List<string> _asking = new List<string>();
+
+        /// <summary>
+        /// Asks a provider for its models, once per key.
+        ///
+        /// Fire and forget: the menu that triggered it has already been drawn
+        /// without them, and the point is that the next time it opens they are
+        /// there. If it fails while nobody is looking at the menu, the status
+        /// line is where that is said.
+        /// </summary>
+        void BeginFetch(IAiProvider provider)
+        {
+            string id = provider.Info.Id;
+            if (_asking.Contains(id)) return;
+            _asking.Add(id);
+
+            CancellationToken token = new CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
+            Task.Run(delegate { return AiModels.Fetch(provider, false, token); })
+                .ContinueWith(delegate (Task<IList<AiModel>> done)
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    try { BeginInvoke((MethodInvoker)delegate { Fetched(provider, done); }); }
+                    catch (InvalidOperationException) { }
+                });
+        }
+
+        void Fetched(IAiProvider provider, Task<IList<AiModel>> done)
+        {
+            _asking.Remove(provider.Info.Id);
+
+            if (done.IsFaulted || done.IsCanceled)
+            {
+                Say("Could not reach " + provider.Info.Name + ": " + Plain(done.Exception));
+                return;
+            }
+
+            // Nothing was chosen yet, or what was chosen is not on this key.
+            if (provider.Info.Id == _providerId && !Has(done.Result, _model))
+            {
+                _model = AiModels.Default(provider, done.Result);
+                Raise();
+            }
+
+            UpdateModelButton();
+            Say(provider.Info.Name + ": " + done.Result.Count +
+                (done.Result.Count == 1 ? " model" : " models"));
+        }
+
+        static bool Has(IList<AiModel> list, string id)
+        {
+            if (list == null || string.IsNullOrEmpty(id)) return false;
+            foreach (AiModel model in list) if (model.Id == id) return true;
+            return false;
+        }
+
+        void UpdateModelButton()
+        {
+            if (_modelButton == null) return;
+
+            IAiProvider provider = Provider();
+
+            if (!provider.Ready)
+            {
+                _modelButton.Text = "Add a key  ⌄";
+                _tips.SetToolTip(_modelButton, "Settings, under Assistant, takes the key");
+            }
+            else if (string.IsNullOrEmpty(_model))
+            {
+                _modelButton.Text = provider.Info.Name + "  ⌄";
+                _tips.SetToolTip(_modelButton, "Choose a model");
+            }
+            else
+            {
+                _modelButton.Text = AiModels.NameOf(provider, _model) + "   " +
+                                    _thinking.ToString().ToLowerInvariant() + "  ⌄";
+                string note = provider.Info.Describe(_thinking);
+                _tips.SetToolTip(_modelButton, note.Length > 0
+                    ? provider.Info.Name + " — " + note
+                    : provider.Info.Name + " — model and effort");
+            }
+
+            LayoutComposer();
+            UpdateChip();
         }
 
         // =====================================================================
@@ -313,8 +529,8 @@ namespace NextScan.App
 
         /// <summary>
         /// One turn. <paramref name="ask"/> is the full question when it came
-        /// from an action button, and null when the operator typed it, in which
-        /// case <paramref name="shown"/> is both.
+        /// from a suggestion, and null when the operator typed it, in which case
+        /// <paramref name="shown"/> is both.
         /// </summary>
         void Send(string shown, string ask)
         {
@@ -334,9 +550,9 @@ namespace NextScan.App
             RawImage page = PageSource == null ? null : PageSource();
             byte[] image = null;
 
-            // The page rides on the first turn only. Sending it again on every
-            // turn would be the single largest cost in this panel, and the
-            // model already has it in the conversation.
+            // The page rides on the first turn only. Sending it again every turn
+            // would be the single largest cost in this panel, and the model
+            // already has it in the conversation.
             if (_history.Count == 0)
             {
                 if (page == null)
@@ -354,6 +570,7 @@ namespace NextScan.App
             }
 
             _composer.Text = "";
+            UpdateSend();
             AddBubble(shown ?? text, true, false);
 
             AiMessage turn = AiMessage.FromUser(text);
@@ -364,101 +581,26 @@ namespace NextScan.App
             Ask(provider);
         }
 
-        /// <summary>
-        /// Asks which actions fit this page, and marks those that do.
-        ///
-        /// A separate, cheap call rather than a pass that runs on its own when
-        /// the panel opens: the operator presses it, so they know they are
-        /// spending, and it is at the lowest thinking level because it answers
-        /// with a list of five words.
-        /// </summary>
-        void Suggest()
-        {
-            if (_busy) return;
-
-            IAiProvider provider = Provider();
-            if (!provider.Ready)
-            {
-                AddNote("No key has been set for " + provider.Info.Name +
-                        ". Settings, under Assistant, takes one.", true);
-                return;
-            }
-
-            RawImage page = PageSource == null ? null : PageSource();
-            if (page == null)
-            {
-                AddNote("There is no page to look at yet. Preview or scan something first.", true);
-                return;
-            }
-
-            var ids = new List<string>();
-            foreach (QuickAction a in Actions) ids.Add(a.Id);
-
-            var request = new AiRequest
-            {
-                Model = Model,
-                Thinking = ThinkingLevel.Low,
-                MaxOutputTokens = 64,
-                Instruction = Instruction,
-            };
-            AiMessage turn = AiMessage.FromUser(
-                "Which of these would be useful on this page? Answer with ids only, separated by " +
-                "commas, and nothing else. ids: " + string.Join(", ", ids.ToArray()));
-            turn.Image = Encode(page);
-            turn.ImageMediaType = "image/jpeg";
-            if (turn.Image == null) { AddNote("That page could not be prepared for sending.", true); return; }
-            request.Messages.Add(turn);
-
-            Busy(true);
-            Say("Asking " + provider.Info.Name + " which actions fit this page");
-
-            _cancel = new CancellationTokenSource();
-            CancellationToken token = _cancel.Token;
-
-            Task.Run(delegate { return provider.Ask(request, null, token); })
-                .ContinueWith(delegate (Task<AiReply> done)
-                {
-                    if (IsDisposed || !IsHandleCreated) return;
-                    BeginInvoke((MethodInvoker)delegate { SuggestionsArrived(done); });
-                });
-        }
-
-        void SuggestionsArrived(Task<AiReply> done)
-        {
-            Busy(false);
-
-            if (done.IsCanceled) { Say("Stopped"); return; }
-            if (done.IsFaulted)
-            {
-                AddNote(Plain(done.Exception), true);
-                Say("");
-                return;
-            }
-
-            string answer = done.Result == null ? "" : (done.Result.Text ?? "");
-            int marked = 0;
-            foreach (QuickAction a in Actions)
-            {
-                bool fits = answer.IndexOf(a.Id, StringComparison.OrdinalIgnoreCase) >= 0;
-                NsIconButton button;
-                if (_actionButtons.TryGetValue(a.Id, out button))
-                {
-                    button.Checked = fits;
-                    if (fits) marked++;
-                }
-            }
-
-            Count(done.Result);
-            Say(marked == 0
-                ? "Nothing here stood out as useful on this page"
-                : marked + (marked == 1 ? " action is" : " actions are") + " marked for this page");
-        }
-
         void Ask(IAiProvider provider)
         {
+            string model = string.IsNullOrEmpty(_model)
+                ? AiModels.Default(provider, AiModels.Cached(provider))
+                : _model;
+
+            if (string.IsNullOrEmpty(model))
+            {
+                // No list yet for this key, so there is nothing to send to.
+                // Fetch it and say so rather than guessing at a model name.
+                BeginFetch(provider);
+                AddNote("Asking " + provider.Info.Name + " which models this key can reach. " +
+                        "Try again in a moment.", true);
+                _history.RemoveAt(_history.Count - 1);
+                return;
+            }
+
             var request = new AiRequest
             {
-                Model = Model,
+                Model = model,
                 Thinking = _thinking,
                 MaxOutputTokens = 4096,
                 Instruction = Instruction,
@@ -490,7 +632,8 @@ namespace NextScan.App
                 .ContinueWith(delegate (Task<AiReply> done)
                 {
                     if (IsDisposed || !IsHandleCreated) return;
-                    BeginInvoke((MethodInvoker)delegate { ReplyArrived(done); });
+                    try { BeginInvoke((MethodInvoker)delegate { ReplyArrived(done); }); }
+                    catch (InvalidOperationException) { }
                 });
         }
 
@@ -518,7 +661,7 @@ namespace NextScan.App
                 else AddNote(trouble, true);
 
                 // The turn did not happen, so it does not belong in the history
-                // that the next one is built from.
+                // the next one is built from.
                 if (_history.Count > 0) _history.RemoveAt(_history.Count - 1);
                 _live = null;
                 LayoutTranscript(true);
@@ -530,11 +673,7 @@ namespace NextScan.App
             string text = reply == null ? "" : (reply.Text ?? "");
             if (text.Trim().Length == 0) text = "(the model returned nothing)";
 
-            if (_live != null)
-            {
-                _live.Pending = false;
-                _live.Text = text;
-            }
+            if (_live != null) { _live.Pending = false; _live.Text = text; }
             _history.Add(AiMessage.FromAssistant(text));
             _live = null;
 
@@ -554,9 +693,17 @@ namespace NextScan.App
             _busy = on;
             _send.Icon = on ? NsIcon.Stop : NsIcon.Send;
             _tips.SetToolTip(_send, on ? "Stop" : "Send  (Enter)");
-            foreach (KeyValuePair<string, NsIconButton> pair in _actionButtons)
-                if (pair.Key != "clear") pair.Value.Enabled = !on;
-            _send.Invalidate();
+            foreach (NsPill chip in _chips) chip.Enabled = !on;
+            _modelButton.Enabled = !on;
+            UpdateSend();
+        }
+
+        void UpdateSend()
+        {
+            if (_send == null) return;
+            // Filled while there is something to send, and while one is running,
+            // which is the state the button acts on. Every one of these does it.
+            _send.Checked = _busy || _composer.Text.Trim().Length > 0;
         }
 
         void Say(string what) { if (Status != null) Status(what); }
@@ -564,8 +711,8 @@ namespace NextScan.App
         /// <summary>
         /// An exception the operator can read.
         ///
-        /// AiTrouble is already written for them; anything else is the SDK's
-        /// own message, which is usually the HTTP status and is more use than a
+        /// AiTrouble is already written for them; anything else is the SDK's own
+        /// message, which is usually the HTTP status and is more use than a
         /// sentence of ours pretending to know what went wrong.
         /// </summary>
         static string Plain(AggregateException ex)
@@ -593,8 +740,9 @@ namespace NextScan.App
         }
 
         /// <summary>
-        /// The line under the box: which model, how hard it is thinking, and
-        /// what has been spent.
+        /// What this conversation has cost, under the box. Hidden until there is
+        /// something to report -- which is why none of the interfaces this panel
+        /// follows shows one: their users are not billed per page scanned.
         ///
         /// The counts come from the provider's own reply and are never computed
         /// here. Tokenizers differ between providers and between generations of
@@ -605,26 +753,16 @@ namespace NextScan.App
         {
             if (_meter == null) return;
 
-            IAiProvider provider = Provider();
+            bool any = _inTotal + _outTotal > 0;
+            if (_meter.Visible != any) { _meter.Visible = any; LayoutAll(); }
+            if (!any) return;
+
             var line = new StringBuilder();
-            line.Append(provider.Info.Name).Append("  ").Append(Model);
-            line.Append("   ").Append(_thinking.ToString().ToLowerInvariant());
-
-            string note = provider.Info.Describe(_thinking);
-            if (note.Length > 0) line.Append(" (").Append(provider.Info.Ceiling.ToString().ToLowerInvariant()).Append(")");
-
-            if (_inTotal + _outTotal > 0)
-            {
-                line.Append("   ").Append(Tokens(_inTotal)).Append(" in / ").Append(Tokens(_outTotal)).Append(" out");
-                if (_cachedTotal > 0) line.Append(", ").Append(Tokens(_cachedTotal)).Append(" cached");
-            }
-
-            if (!provider.Ready) line.Append("   ·  no key set");
+            line.Append(Tokens(_inTotal)).Append(" in / ").Append(Tokens(_outTotal)).Append(" out");
+            if (_cachedTotal > 0) line.Append(", ").Append(Tokens(_cachedTotal)).Append(" cached");
+            line.Append("   counted by ").Append(Provider().Info.Name);
 
             _meter.Text = line.ToString();
-            _tips.SetToolTip(_meter, provider.Ready
-                ? "Counted by " + provider.Info.Name + " for " + Model + ", not estimated here"
-                : "Settings, under Assistant, takes the key");
         }
 
         static string Tokens(long n)
@@ -646,6 +784,10 @@ namespace NextScan.App
             }
             _bubbles.Add(bubble);
             _column.Controls.Add(bubble);
+
+            // The suggestions are the empty state, and this is no longer empty.
+            if (_bubbles.Count == 1) ShowTranscript(true);
+
             LayoutTranscript(true);
             return bubble;
         }
@@ -653,7 +795,7 @@ namespace NextScan.App
         void AddNote(string text, bool trouble)
         {
             AddBubble(text, false, trouble, false);
-            Say(trouble ? text : "");
+            if (trouble) Say(text);
         }
 
         void CopyOut(string text)
@@ -663,15 +805,10 @@ namespace NextScan.App
             catch (Exception ex) { Say("Could not copy: " + ex.Message); }
         }
 
-        void ShowWelcome()
+        void ShowTranscript(bool on)
         {
-            AddBubble(
-                "This looks at the page you have scanned.\n\n" +
-                "Press one of the marks above for the usual jobs, or ask about the page in your " +
-                "own words — in Bengali or in English. The whole page is sent, so it is read in " +
-                "context rather than a piece at a time.\n\n" +
-                "Enter sends. Shift+Enter starts a new line.",
-                false, false, false);
+            _scroll.Visible = on;
+            _welcome.Visible = !on;
         }
 
         /// <summary>Starts a new conversation. The page is sent again with the first turn.</summary>
@@ -688,10 +825,9 @@ namespace NextScan.App
             foreach (NsBubble bubble in _bubbles) { _column.Controls.Remove(bubble); bubble.Dispose(); }
             _bubbles.Clear();
 
-            foreach (KeyValuePair<string, NsIconButton> pair in _actionButtons) pair.Value.Checked = false;
-
-            ShowWelcome();
+            ShowTranscript(false);
             UpdateMeter();
+            UpdateChip();
             Say("");
         }
 
@@ -733,8 +869,8 @@ namespace NextScan.App
                             g.DrawImage(full, new Rectangle(0, 0, tw, th));
                         }
 
-                        // JPEG at 92 rather than PNG: a 1568 px scan of a page
-                        // is about ten times smaller this way, and at 92 the
+                        // JPEG at 92 rather than PNG: a 1568 px scan of a page is
+                        // about ten times smaller this way, and at 92 the
                         // artefacts are below the size of the type. PNG would be
                         // exact and would cost ten times as much on every page.
                         using (var stream = new MemoryStream())
@@ -744,7 +880,8 @@ namespace NextScan.App
 
                             using (var parameters = new EncoderParameters(1))
                             {
-                                parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 92L);
+                                parameters.Param[0] =
+                                    new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 92L);
                                 small.Save(stream, jpeg, parameters);
                             }
                             return stream.ToArray();
@@ -772,51 +909,86 @@ namespace NextScan.App
         }
 
         const int Pad = 14;
-        const int ActionsHeight = 50;
-        const int ComposerHeight = 66;
-        const int MeterHeight = 18;
-        const int HintHeight = 16;
+        const int BarHeight = 32;
+        const int MeterHeight = 16;
 
         void LayoutAll()
         {
-            if (_actions == null || Width <= 0 || Height <= 0) return;
+            if (_bar == null || Width <= 0 || Height <= 0) return;
 
-            int inner = Math.Max(60, Width - Pad * 2);
+            _bar.SetBounds(0, 0, Width, BarHeight);
+            _fresh.SetBounds(Width - Pad - 26, 4, 26, 24);
 
-            _actions.SetBounds(0, 0, Width, ActionsHeight);
-            LayoutActionRow();
+            int bottom = Height - 8;
 
-            int bottom = Height;
-            _meter.SetBounds(Pad, bottom - MeterHeight - 6, inner, MeterHeight);
-            bottom -= MeterHeight + 8;
+            if (_meter.Visible)
+            {
+                _meter.SetBounds(Pad + 4, bottom - MeterHeight, Math.Max(40, Width - Pad * 2 - 8), MeterHeight);
+                bottom -= MeterHeight + 2;
+            }
 
-            _send.SetBounds(Width - Pad - 42, bottom - ComposerHeight + (ComposerHeight - 42) / 2, 42, 42);
-            _composer.SetBounds(Pad, bottom - ComposerHeight, Math.Max(40, inner - 50), ComposerHeight);
-            bottom -= ComposerHeight + 4;
+            int composerHeight = Math.Max(72, Math.Min(Height / 2, _composer.PreferredHeight));
+            _composer.SetBounds(Pad, bottom - composerHeight, Math.Max(80, Width - Pad * 2), composerHeight);
+            LayoutComposer();
+            bottom -= composerHeight + 8;
 
-            _hint.SetBounds(Pad, bottom - HintHeight, inner, HintHeight);
-            bottom -= HintHeight;
+            int top = BarHeight;
+            int middle = Math.Max(40, bottom - top);
+            _scroll.SetBounds(0, top, Width, middle);
+            _welcome.SetBounds(0, top, Width, middle);
 
-            _scroll.SetBounds(0, ActionsHeight, Width, Math.Max(40, bottom - ActionsHeight));
-            UpdateHint();
+            LayoutWelcome();
             LayoutTranscript(false);
         }
 
-        void LayoutActionRow()
+        void LayoutComposer()
         {
-            int count = _actions.Controls.Count;
-            if (count == 0) return;
+            if (_composer == null || _send == null) return;
 
-            const int square = 34;
-            int gap = Math.Max(4, Math.Min(10, (Width - Pad * 2 - square * count) / Math.Max(1, count - 1)));
-            int total = square * count + gap * (count - 1);
-            int x = Math.Max(Pad, (Width - total) / 2);
-            int y = (ActionsHeight - square) / 2;
+            int foot = _composer.FootBottom;
+            int right = _composer.Width - 8;
 
-            for (int i = 0; i < count; i++)
+            const int round = 30;
+            _send.SetBounds(right - round, foot - round, round, round);
+            right -= round + 6;
+
+            int modelWidth = Math.Min(Math.Max(90, TextWidth(_modelButton) + 18), Math.Max(60, right - 14));
+            _modelButton.SetBounds(right - modelWidth, foot - 28, modelWidth, 26);
+        }
+
+        static int TextWidth(NsPill pill)
+        {
+            return TextRenderer.MeasureText(pill.Text, pill.Font).Width;
+        }
+
+        /// <summary>What the question is about, at the left of the composer's strip.</summary>
+        void UpdateChip()
+        {
+            if (_composer == null) return;
+
+            string page = PageNote == null ? "" : (PageNote() ?? "");
+
+            // The conversation is about the page it started on. Saying so is the
+            // difference between a stale answer and a wrong one.
+            bool moved = _history.Count > 0 && _pageFor.Length > 0 && _pageFor != page;
+
+            _composer.FootNote = moved ? "about " + _pageFor
+                               : page.Length > 0 ? page
+                               : "nothing scanned yet";
+        }
+
+        void LayoutWelcome()
+        {
+            if (_welcome == null || _chips.Count == 0) return;
+
+            int inner = Math.Max(120, Math.Min(300, _welcome.Width - Pad * 2));
+            int x = (_welcome.Width - inner) / 2;
+            int y = WelcomeTop() + 78;
+
+            foreach (NsPill chip in _chips)
             {
-                _actions.Controls[i].SetBounds(x, y, square, square);
-                x += square + gap;
+                chip.SetBounds(x, y, inner, 34);
+                y += 40;
             }
         }
 
@@ -828,9 +1000,6 @@ namespace NextScan.App
         {
             if (_scroll == null) return;
 
-            // The width the bubbles get is the panel's, less the scrollbar if
-            // one is showing. Measuring against the full width and then having
-            // the bar appear is what makes a transcript reflow as it grows.
             int inner = Math.Max(80, _scroll.ClientSize.Width - Pad * 2);
 
             int y = 10;
@@ -849,34 +1018,17 @@ namespace NextScan.App
                 _scroll.ScrollControlIntoView(_bubbles[_bubbles.Count - 1]);
         }
 
-        void UpdateHint()
-        {
-            if (_hint == null) return;
-
-            string page = PageNote == null ? "" : (PageNote() ?? "");
-            if (_history.Count > 0 && _pageFor.Length > 0 && _pageFor != page)
-            {
-                // The conversation is about the page it started on. Saying so is
-                // the difference between a stale answer and a wrong one.
-                _hint.ForeColor = Theme.Warn;
-                _hint.Text = "Talking about " + _pageFor + " — start again to use " + page;
-                return;
-            }
-
-            _hint.ForeColor = Theme.TextFaint;
-            _hint.Text = page.Length > 0 ? page : "Nothing scanned yet";
-        }
-
         /// <summary>Re-reads the palette after a light/dark switch.</summary>
         public void ApplyTheme()
         {
             BackColor = Theme.Surface;
             if (_scroll != null) _scroll.BackColor = Theme.Surface;
             if (_column != null) _column.BackColor = Theme.Surface;
-            if (_actions != null) _actions.BackColor = Theme.Surface;
+            if (_welcome != null) _welcome.BackColor = Theme.Surface;
+            if (_bar != null) _bar.BackColor = Theme.Surface;
             if (_composer != null) _composer.ApplyTheme();
             if (_meter != null) _meter.ForeColor = Theme.TextFaint;
-            UpdateHint();
+            UpdateChip();
             Invalidate(true);
         }
 

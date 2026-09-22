@@ -1105,7 +1105,10 @@ namespace NextScan.App
 
             Ai.IAiProvider provider = Ai.AiProviders.ById(_aiPanel.ProviderId);
             if (provider == null) return "";
-            return provider.Info.Name + " · " + (provider.Ready ? _aiPanel.Model : "no key");
+            if (!provider.Ready) return provider.Info.Name + " · no key";
+
+            string model = Ai.AiModels.NameOf(provider, _aiPanel.Model);
+            return provider.Info.Name + (model.Length > 0 ? " · " + model : "");
         }
 
         string BatchSummary()
@@ -2646,11 +2649,21 @@ namespace NextScan.App
         }
 
         /// <summary>
-        /// Which model, how hard it thinks, and the key to reach it.
+        /// The keys, and only the keys.
         ///
-        /// The key box is write-only. What is already stored is never put back
-        /// on screen -- the panel says the last four characters, which is enough
-        /// to answer "is the right key in there" and no use to anybody reading
+        /// Which model and how hard it thinks used to be here, and that was
+        /// wrong: they are chosen per question, and Claude, ChatGPT, Gemini and
+        /// Copilot all keep them on the composer beside the send button. What is
+        /// left is the one part that belongs to the account rather than to the
+        /// turn.
+        ///
+        /// All three are shown at once rather than behind a picker. The question
+        /// this page answers is "which of these can I use", and a control that
+        /// shows one at a time cannot answer it.
+        ///
+        /// Each box is write-only. What is already stored is never put back on
+        /// screen -- the row says the last four characters, which is enough to
+        /// tell whether the right key is in there and no use to anybody reading
         /// over a shoulder.
         /// </summary>
         void BuildAssistantSettings(ref int y)
@@ -2665,119 +2678,83 @@ namespace NextScan.App
                 return;
             }
 
-            IReadOnlyList<Ai.IAiProvider> all = Ai.AiProviders.All();
-            List<string> names = new List<string>();
-            int chosen = 0;
-            for (int i = 0; i < all.Count; i++)
+            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
             {
-                names.Add(all[i].Info.Name);
-                if (string.Equals(all[i].Info.Id, _aiPanel.ProviderId, StringComparison.OrdinalIgnoreCase))
-                    chosen = i;
+                Ai.IAiProvider which = provider;
+                AddFieldLabel(provider.Info.Name, ref y);
+
+                NsTextBox key = new NsTextBox
+                {
+                    Secret = true,
+                    Location = new Point(Dx, y),
+                    Size = new Size(Math.Max(60, Dw - 82), 32)
+                };
+                _themedFields.Add(key);
+                _drawerHost.Controls.Add(key);
+
+                NsPill keep = new NsPill
+                {
+                    Text = "Save",
+                    Kind = PillKind.Normal,
+                    Radius = 7,
+                    Location = new Point(Dx + Math.Max(60, Dw - 78), y),
+                    Size = new Size(78, 32)
+                };
+                _drawerHost.Controls.Add(keep);
+                y += 36;
+
+                Label state = AddFieldLabel("", ref y);
+                y += 6;
+
+                Action show = delegate
+                {
+                    string tail = Ai.AiKeys.Tail(which.Info.Id);
+                    state.Text = tail.Length > 0
+                        ? "Saved   " + tail
+                        : "No key. It looks like " + which.Info.KeyHint;
+                    state.ForeColor = tail.Length > 0 ? Theme.Good : Theme.TextDim;
+                };
+                show();
+
+                keep.Click += delegate
+                {
+                    string typed = key.Text.Trim();
+                    try
+                    {
+                        // An empty box means remove, not store nothing. Clearing
+                        // it is the only way to take a key off a shared machine.
+                        Ai.AiKeys.Set(which.Info.Id, typed);
+
+                        // The list of models belongs to the key that fetched it.
+                        // A new key is a different account and may not reach the
+                        // same models at all.
+                        Ai.AiModels.Forget(which);
+
+                        SetStatus(typed.Length == 0
+                            ? "The " + which.Info.Name + " key has been removed."
+                            : which.Info.Name + " key saved.");
+                    }
+                    catch (Exception ex) { SetStatus("Could not store the key: " + ex.Message); }
+
+                    key.Text = "";
+                    show();
+                    _aiPanel.Rebind();
+                    if (_inspHead != null) _inspHead.Invalidate();
+                };
             }
 
-            NsSegment who = AddSegment(names.ToArray(), chosen, ref y);
-
-            AddFieldLabel("Model", ref y);
-            NsDropdown model = AddDropdown(new string[0], 0, ref y);
-
-            AddFieldLabel("API key", ref y);
-            NsTextBox key = new NsTextBox
-            {
-                Secret = true,
-                Location = new Point(Dx, y),
-                Size = new Size(Math.Max(60, Dw - 82), 34)
-            };
-            _themedFields.Add(key);
-            _drawerHost.Controls.Add(key);
-
-            NsPill keep = new NsPill
-            {
-                Text = "Save",
-                Kind = PillKind.Normal,
-                Radius = 7,
-                Location = new Point(Dx + Math.Max(60, Dw - 78), y),
-                Size = new Size(78, 34)
-            };
-            _drawerHost.Controls.Add(keep);
-            y += 40;
-
-            Label keyState = AddFieldLabel("", ref y);
-            Label keyWhere = AddFieldLabel(
+            Label where = AddFieldLabel(
                 "Encrypted under this Windows account. Never written to the settings file " +
                 "or to a preset.", ref y);
-            keyWhere.ForeColor = Theme.TextFaint;
-            keyWhere.Size = new Size(Dw, 30);
-            y += 20;
+            where.ForeColor = Theme.TextFaint;
+            where.Size = new Size(Dw, 30);
+            y += 24;
 
-            AddFieldLabel("Thinking", ref y);
-            NsSegment think = AddSegment(new string[] { "Low", "Medium", "High", "Max" },
-                                         (int)_aiPanel.Thinking, ref y);
-            Label thinkNote = AddFieldLabel("", ref y);
-            y += 4;
-
-            // One place that re-reads everything the chosen provider decides, so
-            // the model list, the key state and the thinking note cannot drift
-            // apart from each other.
-            Action refresh = delegate
-            {
-                Ai.IAiProvider provider = Ai.AiProviders.ById(_aiPanel.ProviderId);
-                if (provider == null) return;
-
-                List<string> models = new List<string>(provider.Info.Models);
-                int at = Math.Max(0, models.IndexOf(_aiPanel.Model));
-                model.SetItems(models, at);
-
-                string tail = Ai.AiKeys.Tail(provider.Info.Id);
-                keyState.Text = tail.Length > 0
-                    ? "A key is saved   " + tail
-                    : "No key saved. It looks like " + provider.Info.KeyHint;
-                keyState.ForeColor = tail.Length > 0 ? Theme.Good : Theme.TextDim;
-
-                string note = provider.Info.Describe(_aiPanel.Thinking);
-                thinkNote.Text = note;
-                thinkNote.ForeColor = Theme.Warn;
-
-                if (_inspHead != null) _inspHead.Invalidate();
-            };
-            refresh();
-
-            who.SelectedIndexChanged += delegate
-            {
-                int i = who.SelectedIndex;
-                if (i >= 0 && i < all.Count) _aiPanel.ProviderId = all[i].Info.Id;
-                key.Text = "";
-                refresh();
-            };
-
-            model.SelectedIndexChanged += delegate { _aiPanel.Model = model.SelectedText; refresh(); };
-
-            think.SelectedIndexChanged += delegate
-            {
-                _aiPanel.Thinking = (Ai.ThinkingLevel)think.SelectedIndex;
-                refresh();
-            };
-
-            keep.Click += delegate
-            {
-                Ai.IAiProvider provider = Ai.AiProviders.ById(_aiPanel.ProviderId);
-                if (provider == null) return;
-
-                string typed = key.Text.Trim();
-                try
-                {
-                    // An empty box means remove, not store nothing. Clearing it
-                    // is the only way to take a key off a shared machine.
-                    Ai.AiKeys.Set(provider.Info.Id, typed);
-                    SetStatus(typed.Length == 0
-                        ? "The " + provider.Info.Name + " key has been removed."
-                        : provider.Info.Name + " key saved.");
-                }
-                catch (Exception ex) { SetStatus("Could not store the key: " + ex.Message); }
-
-                key.Text = "";
-                refresh();
-                _aiPanel.Rebind();
-            };
+            Label pick = AddFieldLabel(
+                "The model and the effort are on the box in the Assist panel.", ref y);
+            pick.ForeColor = Theme.TextFaint;
+            pick.Size = new Size(Dw, 30);
+            y += 22;
         }
 
         void BuildAppearanceSettings(ref int y)

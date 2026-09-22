@@ -17,7 +17,7 @@ namespace NextScan.Ai
             Id = "openai",
             Name = "OpenAI",
             KeyHint = "sk-...",
-            Models = new[] { "gpt-5", "gpt-5-mini" },
+            Prefer = new[] { "gpt-5", "gpt-4.1", "o4", "gpt-4o" },
 
             // Three levels, not four. The panel says so rather than offering a
             // Max that quietly behaves like High.
@@ -25,6 +25,54 @@ namespace NextScan.Ai
         };
 
         public bool Ready { get { return AiKeys.Has(Info.Id); } }
+
+        /// <summary>
+        /// Everything else this endpoint returns: embeddings, speech, images,
+        /// moderation, transcription. There is no capability flag on an OpenAI
+        /// model, so the only way to tell a chat model from a text-to-speech one
+        /// is its name. This is a guess, and it is written down as one -- a
+        /// model wrongly excluded here is a model the operator has paid for and
+        /// cannot select.
+        /// </summary>
+        static readonly string[] NotForChat =
+        {
+            "embedding", "tts", "whisper", "dall-e", "audio", "realtime",
+            "transcribe", "image", "moderation", "search", "computer-use",
+        };
+
+        public async Task<IList<AiModel>> Models(CancellationToken cancel)
+        {
+            string key = AiKeys.Get(Info.Id);
+            if (string.IsNullOrEmpty(key)) throw new AiTrouble("No OpenAI key has been set.");
+
+            var client = new OpenAI.Models.OpenAIModelClient(key);
+            var found = new List<AiModel>();
+
+            OpenAI.Models.OpenAIModelCollection all =
+                await client.GetModelsAsync(cancel).ConfigureAwait(false);
+
+            foreach (OpenAI.Models.OpenAIModel model in all)
+            {
+                string id = model.Id ?? "";
+                if (id.Length == 0) continue;
+
+                // The chat models are the gpt- and o-series. Anything else on
+                // this endpoint is a different kind of model entirely.
+                bool couldChat = id.StartsWith("gpt", StringComparison.OrdinalIgnoreCase) ||
+                                 (id.Length > 1 && id[0] == 'o' && char.IsDigit(id[1]));
+                if (!couldChat) continue;
+
+                bool ruled = false;
+                foreach (string no in NotForChat)
+                    if (id.IndexOf(no, StringComparison.OrdinalIgnoreCase) >= 0) { ruled = true; break; }
+                if (ruled) continue;
+
+                found.Add(new AiModel { Id = id, Name = id });
+            }
+
+            found.Sort(delegate (AiModel a, AiModel b) { return string.CompareOrdinal(a.Id, b.Id); });
+            return found;
+        }
 
         static ChatReasoningEffortLevel EffortFor(ThinkingLevel level)
         {

@@ -100,7 +100,61 @@ Keys are entered in Settings, stored encrypted, never written to the settings
 `.ini`, and never logged — including in the diagnostics folder, which is the
 easy mistake.
 
-## 7. An open question for the owner: SDK or raw HTTP
+## 7a. What a chat interface actually looks like
+
+Researched 2026-09-22, after the first version of this panel was built by
+invention and rejected. Five were compared side by side: Claude Code, the Claude
+side panel, ChatGPT, Gemini and Copilot Chat in VS Code.
+
+They agree, and the agreement is the finding:
+
+| | where the model and effort live |
+| --- | --- |
+| Claude Code | under the box, bottom right — `Opus 5  High` |
+| ChatGPT | in the box's bottom row — `GPT-6 Astra  Medium ⌄` |
+| Copilot Chat | in the box's bottom row — `⫽ Agent   Models` |
+| Claude side panel | in the box's bottom row — `Opus 5 ⌄` |
+| Gemini | top left of the header — `Flash  Extended ⌄` |
+
+**None of them puts it on a settings page.** The model and the effort are
+chosen per question, so they sit where the question is written. Anthropic's own
+help says it plainly: the menu next to the send button controls the model, the
+effort and whether it thinks.
+
+Three more things all of them do:
+
+* the input and its controls are **one rounded container**, not a box with
+  buttons beside it;
+* the empty state is a greeting and **named suggestions** — `/check-doc`,
+  `/copy-edit` — not a toolbar of icons;
+* the header carries new-conversation and history, and nothing else.
+
+What belongs on our settings page is therefore the API key alone: it is the one
+part that belongs to the account rather than to the turn.
+
+## 7b. The model list is fetched, never written down
+
+Also the owner's correction. A list of model names in our source is wrong by the
+next release, and worse, it hides whatever the account can actually reach.
+
+All three providers list their own:
+
+| provider | call |
+| --- | --- |
+| Claude | `client.Models.List()` → `ModelInfo.ID`, `DisplayName` |
+| OpenAI | `OpenAIModelClient.GetModelsAsync()` → `OpenAIModel.Id` |
+| Gemini | `client.Models.ListAsync()` → `Model.Name`, `SupportedActions` |
+
+Gemini says which actions each model supports, so the filter there is the
+provider's own answer. OpenAI's endpoint returns embeddings, speech and image
+models with no capability flag at all, so that filter is a guess about names and
+is written down as one. Anthropic's endpoint returns only message models, so
+nothing is filtered.
+
+The list is cached against the key, not the provider: a new key is a different
+account and may not reach the same models.
+
+## 7c. An open question for the owner: SDK or raw HTTP
 
 Each provider ships an official SDK. This project has no NuGet packages at all —
 the ONNX Runtime is bound by hand over its C API rather than taking a
@@ -118,6 +172,10 @@ Two ways forward:
 Raw HTTP fits the project as it stands, and three providers behind one interface
 argues for it too. But it is the owner's call, because it is the first real
 crack in the no-dependency rule.
+
+**Decided 2026-09-22: the official SDKs.** The AI layer is the one part of this
+repository with dependencies, it is built by the .NET SDK rather than by csc,
+and its output is kept in `bini` behind a single reference. See STATUS 20.
 
 ---
 

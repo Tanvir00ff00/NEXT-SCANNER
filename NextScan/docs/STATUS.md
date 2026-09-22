@@ -3470,3 +3470,95 @@ profile, because an uninstaller that takes someone's scans with it is a worse
 fault than one that leaves a folder behind — but an API key is money, and this
 is the one thing under that profile where leaving it behind has a cost. Left as
 it is, deliberately and with this note, because it is the owner's call.
+
+## 22. The panel again, from what the real ones do, 2026-09-22
+
+The owner rejected the panel built in section 21, and was right to. It had been
+invented: a toolbar of drawn icons across the top, a text box with a button
+beside it, the model and the thinking level on the settings page. His
+instruction was to go and look at what actual chat interfaces do — Copilot,
+ChatGPT, Gemini, Claude — and then build that. He sent five screenshots.
+
+### They all agree, and none of them agreed with me
+
+| | where the model and effort live |
+| --- | --- |
+| Claude Code | under the box, bottom right — `Opus 5  High` |
+| ChatGPT | in the box's bottom row — `GPT-6 Astra  Medium ⌄` |
+| Copilot Chat | in the box's bottom row — `⫽ Agent   Models` |
+| Claude side panel | in the box's bottom row — `Opus 5 ⌄` |
+| Gemini | top left of the header — `Flash  Extended ⌄` |
+
+**Not one of them puts it on a settings page.** The reason is not fashion: the
+model and the effort are chosen per question, and a control that is chosen per
+question belongs where the question is written. Anthropic's own help says it in
+one sentence — the menu next to the send button controls the model, the effort
+and whether it thinks.
+
+Three more things all of them do, and the first version did none of:
+
+* the input and its controls are **one rounded plate**, not a box with buttons
+  arranged around it;
+* the empty state is a greeting and **suggestions with names on them** —
+  `/check-doc`, `/copy-edit` — not icons that have to be learned first;
+* the top strip carries new-conversation and nothing else.
+
+So the panel is now: a thin strip with one button, the suggestions or the
+transcript, and the composer. `NsComposer` is the plate. `NsChoiceMenu` is what
+the model button opens — headed sections, a tick on the current one, and the
+effort under a rule, which is the shape Claude's own menu has. Settings keeps
+the three keys and nothing else, all visible at once, because the question a
+settings page answers is "which of these can I use".
+
+Seven drawn marks were deleted. The suggestions say what they do in words now,
+which is also the end of the problem section 21 had of two icons looking the
+same.
+
+### The model list was mine to make up, and should not have been
+
+The second correction: model names were hardcoded — `claude-opus-5`,
+`gpt-5-mini`, `gemini-3-flash`. They are now fetched from the provider with the
+operator's own key. All three list their own: `client.Models.List()`,
+`GetModelsAsync()`, `Models.ListAsync()`.
+
+What is left in our source is an ordered list of *preferences* — "opus",
+"sonnet", "haiku" — used only to pick a default out of whatever came back.
+Nothing is offered that the provider did not return. `nsaitest` holds that:
+a preference longer than 24 characters is a model name in disguise and fails
+the test, and a provider that produces a list with no key set fails it too.
+
+Gemini says which actions each of its models supports, so that filter is the
+provider's own answer. OpenAI's endpoint hands back embeddings, speech and image
+models with no capability flag at all, so that one is a guess about names and is
+written down in the code as a guess.
+
+The list is cached against the key rather than the provider, because a new key
+is a different account and may not reach the same models. Saving a key in
+Settings forgets the list that the old one fetched.
+
+### What the screenshots found this time
+
+**The placeholder never appeared.** `Placeholder` was a field, so the object
+initialiser assigned it *after* the constructor had already tried to show it,
+and the box came up blank. It is a property now.
+
+**Two buttons drew themselves white rectangles.** `Theme.BackOf` walks up to the
+nearest opaque ancestor to decide what a transparent control should clear with,
+and the composer was transparent — so the model button and the send button
+looked past the plate they sit on and cleared with the panel behind it. The
+composer is opaque and field-coloured now; its own clear is unaffected, because
+`BackOf` starts at the parent.
+
+**The page note sat outside the plate.** As a disabled child control it kept
+bounds from before the plate had its real height, while the two real buttons
+next to it were placed correctly — and I could not work out why from the code.
+It is not interactive, so it had no business being a control: the composer
+paints it. The whole class of bug went with it. The strip is also measured from
+the bottom edge now, which is the edge it is against, and the composer tells the
+panel when it has resized instead of the panel remembering to ask.
+
+### Still not proved
+
+No key is set on this machine, so no turn has actually been sent. The model
+list, the streaming, the caching and the token counts are all written and all
+unexercised against a real endpoint. That is the part a screenshot cannot show.

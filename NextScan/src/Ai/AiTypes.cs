@@ -67,14 +67,38 @@ namespace NextScan.Ai
     }
 
     /// <summary>
-    /// What a provider is and what it can actually do, for the settings panel.
+    /// One model, as the provider itself named it.
+    ///
+    /// Never written down here. What a provider offers changes without us, and
+    /// a list in our source is a list that is wrong by the next release and
+    /// silently hides whatever the operator is actually paying for.
+    /// </summary>
+    public class AiModel
+    {
+        public string Id = "";
+
+        /// <summary>The provider's own display name, or the id where it gives none.</summary>
+        public string Name = "";
+
+        public override string ToString() { return Name.Length > 0 ? Name : Id; }
+    }
+
+    /// <summary>
+    /// What a provider is and what it can actually do.
     /// </summary>
     public class AiProviderInfo
     {
         public string Id = "";
         public string Name = "";
         public string KeyHint = "";
-        public string[] Models = new string[0];
+
+        /// <summary>
+        /// Ordered preferences, used only to choose a default out of the list
+        /// the provider returned. It is not a menu: nothing here is ever
+        /// offered, and a model that is not in the fetched list is not picked
+        /// however high it sits here.
+        /// </summary>
+        public string[] Prefer = new string[0];
 
         /// <summary>
         /// The highest level this provider really has. Asking for Max where

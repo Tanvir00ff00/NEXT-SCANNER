@@ -20,11 +20,48 @@ namespace NextScan.Ai
             Id = "gemini",
             Name = "Gemini",
             KeyHint = "AIza...",
-            Models = new[] { "gemini-3-pro", "gemini-3-flash" },
+            Prefer = new[] { "gemini-3-pro", "gemini-3", "gemini-2.5-pro", "gemini" },
             Ceiling = ThinkingLevel.Max,
         };
 
         public bool Ready { get { return AiKeys.Has(Info.Id); } }
+
+        /// <summary>
+        /// The models that can actually answer a question about a page.
+        ///
+        /// Gemini says so itself -- every model carries the list of actions it
+        /// supports -- so unlike OpenAI this is not a guess about names. The
+        /// list also carries embedding and tuning models, which support other
+        /// actions and not this one.
+        /// </summary>
+        public async Task<IList<AiModel>> Models(CancellationToken cancel)
+        {
+            string key = AiKeys.Get(Info.Id);
+            if (string.IsNullOrEmpty(key)) throw new AiTrouble("No Gemini key has been set.");
+
+            var client = new Google.GenAI.Client(apiKey: key);
+            var found = new List<AiModel>();
+
+            var page = await client.Models.ListAsync(
+                new Google.GenAI.Types.ListModelsConfig { QueryBase = true }, cancel).ConfigureAwait(false);
+
+            await foreach (Google.GenAI.Types.Model model in page.WithCancellation(cancel))
+            {
+                if (model.SupportedActions == null ||
+                    !model.SupportedActions.Contains("generateContent")) continue;
+
+                // Returned as "models/gemini-3-pro". The request wants the bare
+                // name, so the prefix is taken off here rather than at the two
+                // places that would otherwise each have to remember.
+                string id = model.Name ?? "";
+                if (id.StartsWith("models/", StringComparison.Ordinal)) id = id.Substring(7);
+                if (id.Length == 0) continue;
+
+                found.Add(new AiModel { Id = id, Name = model.DisplayName ?? id });
+            }
+
+            return found;
+        }
 
         static string LevelFor(ThinkingLevel level)
         {

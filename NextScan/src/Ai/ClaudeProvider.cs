@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Anthropic;
 using Anthropic.Core;
 using Anthropic.Models.Messages;
+using Anthropic.Models.Models;
 
 namespace NextScan.Ai
 {
@@ -19,11 +20,32 @@ namespace NextScan.Ai
             Id = "claude",
             Name = "Claude",
             KeyHint = "sk-ant-...",
-            Models = new[] { "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5" },
+            Prefer = new[] { "opus", "sonnet", "haiku" },
             Ceiling = ThinkingLevel.Max,
         };
 
         public bool Ready { get { return AiKeys.Has(Info.Id); } }
+
+        /// <summary>
+        /// Everything /v1/models returns. No filtering: this endpoint lists the
+        /// message models and nothing else, so anything dropped here would be a
+        /// model the account has and the panel does not offer.
+        /// </summary>
+        public async Task<IList<AiModel>> Models(CancellationToken cancel)
+        {
+            string key = AiKeys.Get(Info.Id);
+            if (string.IsNullOrEmpty(key)) throw new AiTrouble("No Claude key has been set.");
+
+            var client = new AnthropicClient(new ClientOptions { ApiKey = key });
+            var found = new List<AiModel>();
+
+            ModelListPage page = await client.Models.List(new ModelListParams(), cancellationToken: cancel)
+                                                    .ConfigureAwait(false);
+            foreach (ModelInfo model in page.Items)
+                found.Add(new AiModel { Id = model.ID, Name = model.DisplayName ?? model.ID });
+
+            return found;
+        }
 
         /// <summary>
         /// Depth is set through effort, not a token budget.
