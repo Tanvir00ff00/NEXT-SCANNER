@@ -36,7 +36,13 @@ namespace NextScan.App
         static readonly string[] NotPartOfAJob =
         {
             "DeviceName", "Transport", "HostBitness", "ColorProfilePath",
-            "HotFolderPath", "HotFolderGroupPerBatch", "HotFolderDisposition"
+            "HotFolderPath", "HotFolderGroupPerBatch", "HotFolderDisposition",
+
+            // Which model the operator talks to is a choice about their own
+            // account, not about how identity cards are scanned. A preset that
+            // carried it would point somebody else's machine at a provider they
+            // have no key for, and reset it every time they loaded a job.
+            "AiProvider", "AiModel", "AiThinking"
         };
 
         public static string Folder

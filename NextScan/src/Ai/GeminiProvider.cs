@@ -47,11 +47,25 @@ namespace NextScan.Ai
             // Gemini has no separate assistant role name: a reply is "model".
             var contents = new List<Google.GenAI.Types.Content>();
             foreach (AiMessage m in request.Messages)
+            {
+                var parts = new List<Google.GenAI.Types.Part>();
+                if (m.Image != null)
+                    parts.Add(new Google.GenAI.Types.Part
+                    {
+                        InlineData = new Google.GenAI.Types.Blob
+                        {
+                            Data = m.Image,
+                            MimeType = m.ImageMediaType ?? "image/jpeg",
+                        },
+                    });
+                parts.Add(new Google.GenAI.Types.Part { Text = m.Text ?? "" });
+
                 contents.Add(new Google.GenAI.Types.Content
                 {
                     Role = m.Role == AiRole.User ? "user" : "model",
-                    Parts = new List<Google.GenAI.Types.Part> { new Google.GenAI.Types.Part { Text = m.Text } },
+                    Parts = parts,
                 });
+            }
 
             var config = new Google.GenAI.Types.GenerateContentConfig
             {

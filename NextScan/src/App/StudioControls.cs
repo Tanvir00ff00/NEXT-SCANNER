@@ -481,10 +481,16 @@ namespace NextScan.App
                 BackColor = Theme.Field
             };
             _box.GotFocus += delegate { Invalidate(); };
-            _box.LostFocus += delegate { Invalidate(); Commit(); };
+
+            // Leaving a settings field means the value is settled, so it
+            // commits. Leaving a message box does not mean send -- clicking
+            // anything at all would post a half-written question.
+            _box.LostFocus += delegate { Invalidate(); if (!_multiline) Commit(); };
+
             _box.KeyDown += delegate (object sender, KeyEventArgs e)
             {
                 if (e.KeyCode != Keys.Enter) return;
+                if (_multiline && e.Shift) return;   // Shift+Enter is the new line
                 // Otherwise the form beeps: a single-line TextBox has nothing to
                 // do with Enter and passes it on as an unhandled input key.
                 e.Handled = true;
@@ -506,6 +512,75 @@ namespace NextScan.App
             set { if (_box != null) _box.Text = value ?? ""; }
         }
 
+        bool _multiline;
+
+        /// <summary>
+        /// Several lines, and Enter sends rather than inserting one.
+        ///
+        /// That is a chat convention rather than a text-box one, and it lives
+        /// here rather than in the caller because otherwise every caller
+        /// decides separately what Enter does in a box that is plainly a
+        /// message. Shift+Enter is the new line.
+        /// </summary>
+        public bool Multiline
+        {
+            get { return _multiline; }
+            set
+            {
+                if (_multiline == value || _box == null) return;
+                _multiline = value;
+                _box.Multiline = value;
+                _box.WordWrap = value;
+                _box.AcceptsReturn = value;
+                _box.ScrollBars = (value && _showScroll) ? ScrollBars.Vertical : ScrollBars.None;
+                Layout_();
+            }
+        }
+
+        bool _showScroll = true;
+
+        /// <summary>
+        /// Whether a multi-line box shows a scrollbar.
+        ///
+        /// WinForms shows it always or never, not when it is needed, so on a
+        /// short composer it is a permanent grey stripe on a box that is
+        /// usually empty. Off, the box still scrolls to keep the caret in view,
+        /// which is all a three-line field has to do.
+        /// </summary>
+        public bool ShowScroll
+        {
+            get { return _showScroll; }
+            set
+            {
+                if (_showScroll == value || _box == null) return;
+                _showScroll = value;
+                _box.ScrollBars = (_multiline && value) ? ScrollBars.Vertical : ScrollBars.None;
+            }
+        }
+
+        /// <summary>
+        /// Dots instead of characters, for an API key being typed.
+        ///
+        /// The system password character rather than one of ours, because a
+        /// screen reader and a password manager both recognise that and neither
+        /// recognises a box we have merely drawn asterisks into.
+        /// </summary>
+        public bool Secret
+        {
+            get { return _box != null && _box.UseSystemPasswordChar; }
+            set { if (_box != null) _box.UseSystemPasswordChar = value; }
+        }
+
+        /// <summary>Puts the caret at the end, for a box that was just filled.</summary>
+        public void ToEnd()
+        {
+            if (_box == null) return;
+            _box.SelectionStart = _box.TextLength;
+            _box.SelectionLength = 0;
+        }
+
+        public void TakeFocus() { if (_box != null) _box.Focus(); }
+
         protected override void OnSizeChanged(EventArgs e)
         {
             base.OnSizeChanged(e);
@@ -515,6 +590,16 @@ namespace NextScan.App
         void Layout_()
         {
             if (_box == null) return;
+
+            if (_multiline)
+            {
+                // A multi-line box fills the height it was given. Centring one
+                // line inside it would leave the first line floating in the
+                // middle and the rest running off the bottom.
+                _box.SetBounds(10, 7, Math.Max(10, Width - 20), Math.Max(12, Height - 14));
+                return;
+            }
+
             // Centred vertically by height rather than by anchoring: the TextBox
             // sizes itself to its font and ignores a height we set.
             _box.SetBounds(10, Math.Max(2, (Height - _box.PreferredHeight) / 2 + 1),
@@ -1043,6 +1128,165 @@ namespace NextScan.App
                 using (Pen p = new Pen(Theme.Line, 1f)) g.DrawLine(p, x - 5, 8, x - 5, Height - 8);
                 TextRenderer.DrawText(g, Sub, Theme.Ui(8.25f), new Rectangle(x, 0, Width - x - 10, Height),
                     Theme.TextDim, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Chat bubble
+    // =========================================================================
+    /// <summary>
+    /// One turn in the assistant transcript.
+    ///
+    /// Owner-drawn like everything else here, and for a reason beyond
+    /// consistency: a Label with AutoSize and a MaximumSize wraps correctly but
+    /// cannot be given a rounded plate, and a RichTextBox per turn is a window
+    /// handle per turn in a conversation that may run all day.
+    ///
+    /// The cost of drawing it is that the text cannot be selected with the
+    /// mouse, so every reply carries a copy button instead. For this panel that
+    /// is the better trade anyway: what an operator wants from a transcription
+    /// is all of it, not a dragged-out part of it.
+    /// </summary>
+    public class NsBubble : NsBase
+    {
+        const int PadX = 13;
+        const int PadY = 10;
+
+        /// <summary>The operator's own turn. Tinted and inset; the reply is not.</summary>
+        public bool Mine;
+
+        /// <summary>Waiting for the first token. Paints moving dots instead of text.</summary>
+        public bool Pending;
+
+        /// <summary>Something went wrong in this turn, so it is not a reply to be read.</summary>
+        public bool Trouble;
+
+        /// <summary>Fired when the copy mark in the corner is clicked.</summary>
+        public event EventHandler CopyWanted;
+
+        bool _overCopy;
+
+        public NsBubble()
+        {
+            Font = Theme.Ui(9f);
+            Cursor = Cursors.Default;
+
+            // A bubble is read, not operated. Without this the base class takes
+            // focus on every click, which would pull the caret out of the box
+            // the operator is typing their next question into.
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+        }
+
+        /// <summary>
+        /// The height this bubble needs at a given width. The transcript asks
+        /// before placing it, because a wrapped paragraph has no other way to
+        /// say how tall it is.
+        /// </summary>
+        public int MeasureHeight(int width)
+        {
+            if (Pending) return 38;
+            int inner = Math.Max(20, width - Indent() - PadX * 2);
+            Size size = TextRenderer.MeasureText(Text ?? "", Font,
+                new Size(inner, int.MaxValue), Flags);
+            return Math.Max(34, size.Height + PadY * 2);
+        }
+
+        /// <summary>
+        /// How far the operator's own turns are pulled in from the left.
+        ///
+        /// A reply gets the full column. A question is short and is the thing
+        /// being answered, so the inset is what separates the two without a
+        /// name label on every single turn.
+        /// </summary>
+        int Indent() { return Mine ? Math.Min(46, Width / 5) : 0; }
+
+        static TextFormatFlags Flags
+        {
+            get { return TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding; }
+        }
+
+        Rectangle CopyMark()
+        {
+            return new Rectangle(Width - 26, 6, 18, 18);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            bool over = !Mine && !Pending && CopyWanted != null && CopyMark().Contains(e.Location);
+            if (over != _overCopy) { _overCopy = over; Cursor = over ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (_overCopy) { _overCopy = false; Cursor = Cursors.Default; Invalidate(); }
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (_overCopy && CopyWanted != null) CopyWanted(this, EventArgs.Empty);
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            ClearBack(g);
+            Theme.Smooth(g);
+
+            int indent = Indent();
+            Rectangle r = new Rectangle(indent, 0, Math.Max(1, Width - indent - 1), Math.Max(1, Height - 1));
+            if (r.Width <= 2 || r.Height <= 2) return;
+
+            Color fill = Mine ? Theme.Mix(Theme.Surface, Theme.Accent, Theme.IsLight ? 0.14 : 0.24)
+                             : Theme.Mix(Theme.Surface, Theme.Ground, 0.5);
+            Color edge = Trouble ? Theme.Danger
+                       : Mine ? Theme.Mix(Theme.Line, Theme.Accent, 0.45) : Theme.LineSoft;
+
+            using (GraphicsPath path = Theme.Round(r, 10))
+            {
+                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+                using (Pen pen = new Pen(edge, 1f)) g.DrawPath(pen, path);
+            }
+
+            if (Pending) { PaintDots(g, r); return; }
+
+            Rectangle text = new Rectangle(r.X + PadX, r.Y + PadY,
+                                           Math.Max(10, r.Width - PadX * 2), Math.Max(10, r.Height - PadY * 2));
+            TextRenderer.DrawText(g, Text ?? "", Font, text,
+                Trouble ? Theme.Danger : Theme.Text, Flags);
+
+            // The copy mark sits over the reply's own top-right corner rather
+            // than in a toolbar: it belongs to this turn, and a transcript that
+            // has scrolled has no toolbar next to the turn being read.
+            if (_overCopy)
+                NsIcon.Draw(g, NsIcon.Copy, CopyMark(), Theme.Mix(Theme.TextFaint, Theme.Accent, 0.8));
+        }
+
+        /// <summary>
+        /// Three dots rising in turn while the reply is on its way.
+        ///
+        /// Driven from the clock rather than from the shared Animator, which
+        /// eases once between two values and stops. This has to keep going for
+        /// as long as the model takes, and the panel's own timer repaints it.
+        /// </summary>
+        void PaintDots(Graphics g, Rectangle r)
+        {
+            int cx = r.X + PadX + 4;
+            int cy = r.Y + r.Height / 2;
+            double phase = (Environment.TickCount % 1200) / 1200.0;
+
+            for (int i = 0; i < 3; i++)
+            {
+                double at = phase - i * 0.16;
+                if (at < 0) at += 1.0;
+                double lift = Math.Max(0, Math.Sin(at * Math.PI * 2)) ;
+                int alpha = 90 + (int)(120 * lift);
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(alpha, Theme.TextDim)))
+                    g.FillEllipse(b, cx + i * 11, cy - 3 - (float)(lift * 2.5), 6, 6);
             }
         }
     }

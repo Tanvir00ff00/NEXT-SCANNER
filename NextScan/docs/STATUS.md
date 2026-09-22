@@ -3369,3 +3369,104 @@ list written by hand is a list somebody forgets to update.
 It travels as a folder instead, with a size floor and four named members that
 must be inside it. That catches the case the size checks above it were written
 for: a folder that exists, and is missing the thing that matters.
+
+## 21. The assistant panel, 2026-09-22
+
+A fifth rail section, Assist, and with it the right-hand panel becomes a chat
+about the page that has been scanned. Five one-press actions above it, a box to
+type in below, and the provider, model, key and thinking level in Settings.
+
+### One file names the AI layer
+
+`StudioAiPanel.cs` and nothing else. The shell reaches into `NextScan.Ai` in
+four places — the panel, the settings group, the header note and the thinking
+level read out of the settings file — and each of them says `Ai.` at the point
+of use, from an alias rather than a `using`. A plain import would make the
+dependency invisible the day a fifth appeared.
+
+`-NoAi` is gone. It lasted one commit. It existed for a machine without the
+.NET SDK, and the moment the shell had a panel that names these types it stopped
+being a switch that skips a feature and became a switch that builds a different
+product. A build that quietly produces something other than what we ship is
+worse than a build that needs one more free download.
+
+### The whole page, once
+
+The page is sent with the first turn and never again. That is the largest cost
+in this panel and the easiest to remove: the model already has it in the
+conversation, and on Claude the image block carries `cache_control` so the
+prefix behind it is read from cache rather than re-read at full price.
+
+Which meant the providers had to be able to send an image at all, and none of
+them could — all three built a text-only message and the `Image` on `AiMessage`
+went nowhere. The shapes were read off the SDK assemblies with a reflection
+probe rather than recalled: Claude takes a list of `ContentBlockParam` with a
+`Base64ImageSource`, OpenAI a `ChatMessageContentPart.CreateImagePart`, Gemini a
+`Part` with `InlineData`. Claude's `MessageParam.Content` is init-only and
+required, which is why the content is built first and the message second.
+
+The page goes at 1568 px on the long edge, as JPEG at 92. All three providers
+resize anything larger before they look at it, so a 3500 px scan is paying to
+upload pixels that are thrown away, and PNG would be exact at about ten times
+the size on every page.
+
+### Nothing is sent that nobody asked for
+
+There is no pass over the page when the panel opens and no background call while
+it is being looked at. Every call here spends the shop's money, and a cost they
+did not ask for is one they cannot plan for. The suggestion pass — which marks
+the actions that fit this page — is a button, and it runs at the lowest thinking
+level because it answers with a list of five words.
+
+### What the screenshots found
+
+The panel was built, and then looked at, which is not the same thing.
+
+**It offered a page before anything had been scanned.** The hint line read
+"Preview 851 x 1169 100 dpi" on a window that had never scanned anything.
+`PageToCutFrom` falls back to `_canvas.Image`, and before the first preview the
+canvas holds a blank placeholder sheet — a perfectly valid `RawImage` of
+nothing. Pressing any action would have sent the model a white page and paid for
+the answer. `PageForAssistant` checks `IsPlaceholder` and hands back nothing.
+
+**Two of the seven marks were the same picture.** Summarise was drawn as lines
+narrowing to a point, which at 20 px is the Read-the-text mark with a slope on
+it. It is now a block of text, a chevron, and one line left.
+
+**The hint line lost the half that mattered.** The page note and the keyboard
+convention did not both fit in 270 px, and the one that got cut was the page
+note. The convention only matters once, so it moved into the opening message.
+
+**The composer wore a permanent scrollbar.** WinForms shows it always or never,
+so an empty three-line box had a grey stripe down it. Off, and the box still
+scrolls to keep the caret in view, which is all a box that size has to do.
+
+### Two things that were already wrong
+
+`SectionIcons` still had Output's icon in it from when Output was a rail
+section, so every icon after it was off by one: Batch wore the download mark and
+Pages wore Batch's. `SectionHint` had the same off-by-one in its switch — the
+Batch panel's header note was showing the output format. Both had been shipping
+since 1.3.
+
+### Where the keys are, and are not
+
+In DPAPI, under the operator's own Windows account. The settings file carries
+which provider and which model, because those belong to the machine — a preset
+that carried them would point somebody else's install at an account they have no
+key for. `NotPartOfAJob` says so, and the preset self-test holds it to that: 62
+fields now, and it fails if a new one is not deliberately placed on one side or
+the other.
+
+The key box is write-only. What is stored is never put back on screen; the panel
+shows the last four characters, which answers "is the right key in there" and is
+no use to anybody reading over a shoulder.
+
+### Still open
+
+Uninstalling removes the program and leaves the keys. That follows the
+uninstaller's own rule — it does not touch anything under the operator's
+profile, because an uninstaller that takes someone's scans with it is a worse
+fault than one that leaves a folder behind — but an API key is money, and this
+is the one thing under that profile where leaving it behind has a cost. Left as
+it is, deliberately and with this note, because it is the owner's call.

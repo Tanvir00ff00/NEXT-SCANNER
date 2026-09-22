@@ -31,6 +31,25 @@ namespace NextScan.App
         /// lie about anyone else's.
         /// </summary>
         public string ColorProfilePath = "";
+
+        // ---- the assistant ----------------------------------------------------
+        //
+        // Which model the operator talks to, and how hard it thinks. Filed with
+        // the machine rather than with the job, alongside the scanner and its
+        // colour profile: a preset that carried a provider would hand the next
+        // machine a choice about somebody else's account.
+        //
+        // Stored as text rather than as NextScan.Ai types on purpose. This file
+        // is read and written by the engine's own ini code, and a settings
+        // reader that could not run without the provider SDKs present would be
+        // a dependency in the one place that has none.
+        //
+        // The API keys are NOT here. They are secrets, they live encrypted
+        // under DPAPI, and this file is copied around as a preset.
+        public string AiProvider = "claude";
+        public string AiModel = "";
+        public string AiThinking = "Medium";
+
         public int Dpi = 300;
         public ColorMode Mode = ColorMode.Color24;
 
@@ -228,6 +247,9 @@ namespace NextScan.App
                         case "backgroundclean": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.BackgroundClean = v; break; }
                         case "despeckle": { int v; if (int.TryParse(val, out v) && v >= 0 && v <= 100) s.Despeckle = v; break; }
                         case "colorprofile": s.ColorProfilePath = val; break;
+                        case "aiprovider": if (val.Length > 0) s.AiProvider = val.ToLowerInvariant(); break;
+                        case "aimodel": s.AiModel = val; break;
+                        case "aithinking": if (val.Length > 0) s.AiThinking = val; break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
                                 && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -339,6 +361,9 @@ namespace NextScan.App
                 lines.Add("previewmatchesscan=" + (PreviewMatchesScan ? "on" : "off"));
                 lines.Add("usemodel=" + (UseModel ? "on" : "off"));
                 lines.Add("colorprofile=" + ColorProfilePath);
+                lines.Add("aiprovider=" + AiProvider);
+                lines.Add("aimodel=" + AiModel);
+                lines.Add("aithinking=" + AiThinking);
                 lines.Add("autotone=" + AutoTone);
                 lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));
                 lines.Add("vibrance=" + Vibrance.ToString(CultureInfo.InvariantCulture));

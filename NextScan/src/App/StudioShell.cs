@@ -23,6 +23,11 @@ using System.Windows.Forms;
 using NextScan.Core;
 using ColorMode = NextScan.Core.ColorMode;
 
+// Aliased rather than imported. The shell reaches into the AI layer in four
+// places and nowhere else, and naming it at each of them is what keeps that
+// true -- a plain using would make it invisible when a fifth appeared.
+using Ai = NextScan.Ai;
+
 namespace NextScan.App
 {
     public class StudioShell : Form
@@ -48,6 +53,7 @@ namespace NextScan.App
         Panel _inspScroll;
         Panel _inspFoot;
         Panel _pagesPanel;
+        StudioAiPanel _aiPanel;
         NsPill _savePill;
 
         /// <summary>The container the section builders fill.</summary>
@@ -434,10 +440,18 @@ namespace NextScan.App
         // land are settings, not a step: they are chosen once for a way of
         // working and then left alone, while these four are what an operator
         // touches between one scan and the next. It lives under Settings.
-        static readonly string[] SectionNames = { "Capture", "Look", "Batch", "Pages" };
+        // Assist is last because it is the only one that is not part of getting
+        // the page: the four before it are the scan, and it is what you do with
+        // the scan once it exists.
+        static readonly string[] SectionNames = { "Capture", "Look", "Batch", "Pages", "Assist" };
+
+        // One icon per name, in the same order. Output's icon was left in this
+        // list when Output stopped being a rail section, which shifted every
+        // icon after it by one: Batch was wearing the download mark and Pages
+        // was wearing Batch's.
         static readonly string[] SectionIcons =
         {
-            NsIcon.Capture, NsIcon.Look, NsIcon.Output, NsIcon.Batch, NsIcon.Pages
+            NsIcon.Capture, NsIcon.Look, NsIcon.Batch, NsIcon.Pages, NsIcon.Assist
         };
 
         public StudioShell(StudioSettings settings)
@@ -792,6 +806,11 @@ namespace NextScan.App
             _savePill.Click += delegate { SaveSession(); };
             _pagesPanel.Controls.Add(_savePill);
 
+            // Built once and kept, for the same reason the Pages panel is:
+            // ShowSection disposes everything in the section host, and a
+            // conversation has to survive a rail click.
+            BuildAiPanel();
+
             _inspFoot = new Panel { BackColor = Theme.Surface };
             _inspFoot.Paint += delegate (object sender, PaintEventArgs e)
             {
@@ -806,6 +825,86 @@ namespace NextScan.App
             ShowSection(0);
         }
 
+        /// <summary>
+        /// The assistant panel.
+        ///
+        /// Wrapped, because it is the only part of the shell that depends on an
+        /// assembly loaded from a subfolder at run time. Every other failure
+        /// here would be a bug; this one can be an install that lost a file, and
+        /// it must cost the operator the Assist section rather than the window.
+        /// </summary>
+        void BuildAiPanel()
+        {
+            try
+            {
+                _aiPanel = new StudioAiPanel { Visible = false };
+                _aiPanel.PageSource = delegate { return PageForAssistant(); };
+                _aiPanel.PageNote = delegate { return AssistantPageNote(); };
+                _aiPanel.Status = delegate (string text) { if (text.Length > 0) SetStatus(text); };
+                _aiPanel.ChoiceChanged += delegate
+                {
+                    _settings.AiProvider = _aiPanel.ProviderId;
+                    _settings.AiModel = _aiPanel.Model;
+                    _settings.AiThinking = _aiPanel.Thinking.ToString();
+                };
+
+                _aiPanel.ProviderId = _settings.AiProvider;
+                _aiPanel.Model = _settings.AiModel;
+                _aiPanel.Thinking = ThinkingFromSettings();
+
+                _inspector.Controls.Add(_aiPanel);
+            }
+            catch (Exception ex)
+            {
+                _aiPanel = null;
+                Log("the assistant could not be loaded: " + ex.Message);
+            }
+        }
+
+        Ai.ThinkingLevel ThinkingFromSettings()
+        {
+            try
+            {
+                return (Ai.ThinkingLevel)Enum.Parse(
+                    typeof(Ai.ThinkingLevel), _settings.AiThinking, true);
+            }
+            catch { return Ai.ThinkingLevel.Medium; }
+        }
+
+        /// <summary>
+        /// The page the assistant talks about.
+        ///
+        /// A saved session page wins over whatever is on the canvas: a page in
+        /// the filmstrip is a finished scan the operator chose, and the preview
+        /// underneath it is scaffolding. Falls back to the preview, because
+        /// asking about what is on the glass before saving it is the normal
+        /// case, not an edge one.
+        /// </summary>
+        RawImage PageForAssistant()
+        {
+            if (_film != null && _film.SelectedImage != null) return _film.SelectedImage;
+            if (_capturePage != null && _capturePage.IsValid) return _capturePage;
+
+            // Deliberately not PageToCutFrom. Before the first preview the
+            // canvas holds a blank sheet, which is a perfectly valid RawImage of
+            // nothing: the panel offered it as "Preview 851 x 1169" and pressing
+            // any action would have sent the model a white page and paid for the
+            // answer.
+            if (_canvas == null || _canvas.IsPlaceholder) return null;
+            return _canvas.Image;
+        }
+
+        string AssistantPageNote()
+        {
+            RawImage page = PageForAssistant();
+            if (page == null || !page.IsValid) return "";
+
+            bool saved = _film != null && _film.SelectedImage == page;
+            return (saved ? "Page " + (_film.SelectedIndex + 1) : "Preview") + "  " +
+                   page.Width + " x " + page.Height + "  " +
+                   Math.Round(page.XDpi) + " dpi";
+        }
+
         /// <summary>The right-hand note on the panel header: state, not a label.</summary>
         string SectionHint(int index)
         {
@@ -813,9 +912,9 @@ namespace NextScan.App
             {
                 case 0: return CaptureSummary() + " · " + DetectSummary();
                 case 1: return LookSummary();
-                case 2: return OutputSummary();
-                case 3: return BatchSummary();
-                default: return _film == null ? "" : _film.Count + (_film.Count == 1 ? " page" : " pages");
+                case 2: return BatchSummary();
+                case 3: return _film == null ? "" : _film.Count + (_film.Count == 1 ? " page" : " pages");
+                default: return AssistantSummary();
             }
         }
 
@@ -925,7 +1024,7 @@ namespace NextScan.App
                 case 0: BuildPresetGroup(ref y); BuildCaptureGroup(ref y); BuildDetectGroup(ref y); break;
                 case 1: BuildLookGroup(ref y); break;
                 case 2: BuildBatchGroup(ref y); break;
-                default: break;   // Pages is its own panel, built once
+                default: break;   // Pages and Assist are their own panels, built once
             }
 
             _drawerHost.ResumeLayout();
@@ -942,6 +1041,7 @@ namespace NextScan.App
         }
 
         const int PagesSection = 3;
+        const int AiSection = 4;
 
         void OnDrawerMouseWheel(object sender, MouseEventArgs e)
         {
@@ -994,10 +1094,18 @@ namespace NextScan.App
             return name + " · " + _settings.Polish + "/" + _settings.Brightness + "/" + _settings.Contrast;
         }
 
-        string OutputSummary()
+        /// <summary>
+        /// OutputSummary used to be here. It was the header note for the Output
+        /// rail section, which became a settings group in 1.3, and the only
+        /// thing still calling it was a switch arm that was off by one.
+        /// </summary>
+        string AssistantSummary()
         {
-            string format = (_settings.OutputFormat ?? "jpg").ToUpperInvariant();
-            return format + (_settings.OpenInPhotoshop ? " · Photoshop" : " · file only");
+            if (_aiPanel == null) return "not available";
+
+            Ai.IAiProvider provider = Ai.AiProviders.ById(_aiPanel.ProviderId);
+            if (provider == null) return "";
+            return provider.Info.Name + " · " + (provider.Ready ? _aiPanel.Model : "no key");
         }
 
         string BatchSummary()
@@ -2537,6 +2645,141 @@ namespace NextScan.App
             _previewCost.Invalidate();
         }
 
+        /// <summary>
+        /// Which model, how hard it thinks, and the key to reach it.
+        ///
+        /// The key box is write-only. What is already stored is never put back
+        /// on screen -- the panel says the last four characters, which is enough
+        /// to answer "is the right key in there" and no use to anybody reading
+        /// over a shoulder.
+        /// </summary>
+        void BuildAssistantSettings(ref int y)
+        {
+            AddSectionLabel("Assistant", ref y);
+
+            if (_aiPanel == null)
+            {
+                Label gone = AddFieldLabel("The assistant did not load on this machine.", ref y);
+                gone.ForeColor = Theme.Warn;
+                y += 10;
+                return;
+            }
+
+            IReadOnlyList<Ai.IAiProvider> all = Ai.AiProviders.All();
+            List<string> names = new List<string>();
+            int chosen = 0;
+            for (int i = 0; i < all.Count; i++)
+            {
+                names.Add(all[i].Info.Name);
+                if (string.Equals(all[i].Info.Id, _aiPanel.ProviderId, StringComparison.OrdinalIgnoreCase))
+                    chosen = i;
+            }
+
+            NsSegment who = AddSegment(names.ToArray(), chosen, ref y);
+
+            AddFieldLabel("Model", ref y);
+            NsDropdown model = AddDropdown(new string[0], 0, ref y);
+
+            AddFieldLabel("API key", ref y);
+            NsTextBox key = new NsTextBox
+            {
+                Secret = true,
+                Location = new Point(Dx, y),
+                Size = new Size(Math.Max(60, Dw - 82), 34)
+            };
+            _themedFields.Add(key);
+            _drawerHost.Controls.Add(key);
+
+            NsPill keep = new NsPill
+            {
+                Text = "Save",
+                Kind = PillKind.Normal,
+                Radius = 7,
+                Location = new Point(Dx + Math.Max(60, Dw - 78), y),
+                Size = new Size(78, 34)
+            };
+            _drawerHost.Controls.Add(keep);
+            y += 40;
+
+            Label keyState = AddFieldLabel("", ref y);
+            Label keyWhere = AddFieldLabel(
+                "Encrypted under this Windows account. Never written to the settings file " +
+                "or to a preset.", ref y);
+            keyWhere.ForeColor = Theme.TextFaint;
+            keyWhere.Size = new Size(Dw, 30);
+            y += 20;
+
+            AddFieldLabel("Thinking", ref y);
+            NsSegment think = AddSegment(new string[] { "Low", "Medium", "High", "Max" },
+                                         (int)_aiPanel.Thinking, ref y);
+            Label thinkNote = AddFieldLabel("", ref y);
+            y += 4;
+
+            // One place that re-reads everything the chosen provider decides, so
+            // the model list, the key state and the thinking note cannot drift
+            // apart from each other.
+            Action refresh = delegate
+            {
+                Ai.IAiProvider provider = Ai.AiProviders.ById(_aiPanel.ProviderId);
+                if (provider == null) return;
+
+                List<string> models = new List<string>(provider.Info.Models);
+                int at = Math.Max(0, models.IndexOf(_aiPanel.Model));
+                model.SetItems(models, at);
+
+                string tail = Ai.AiKeys.Tail(provider.Info.Id);
+                keyState.Text = tail.Length > 0
+                    ? "A key is saved   " + tail
+                    : "No key saved. It looks like " + provider.Info.KeyHint;
+                keyState.ForeColor = tail.Length > 0 ? Theme.Good : Theme.TextDim;
+
+                string note = provider.Info.Describe(_aiPanel.Thinking);
+                thinkNote.Text = note;
+                thinkNote.ForeColor = Theme.Warn;
+
+                if (_inspHead != null) _inspHead.Invalidate();
+            };
+            refresh();
+
+            who.SelectedIndexChanged += delegate
+            {
+                int i = who.SelectedIndex;
+                if (i >= 0 && i < all.Count) _aiPanel.ProviderId = all[i].Info.Id;
+                key.Text = "";
+                refresh();
+            };
+
+            model.SelectedIndexChanged += delegate { _aiPanel.Model = model.SelectedText; refresh(); };
+
+            think.SelectedIndexChanged += delegate
+            {
+                _aiPanel.Thinking = (Ai.ThinkingLevel)think.SelectedIndex;
+                refresh();
+            };
+
+            keep.Click += delegate
+            {
+                Ai.IAiProvider provider = Ai.AiProviders.ById(_aiPanel.ProviderId);
+                if (provider == null) return;
+
+                string typed = key.Text.Trim();
+                try
+                {
+                    // An empty box means remove, not store nothing. Clearing it
+                    // is the only way to take a key off a shared machine.
+                    Ai.AiKeys.Set(provider.Info.Id, typed);
+                    SetStatus(typed.Length == 0
+                        ? "The " + provider.Info.Name + " key has been removed."
+                        : provider.Info.Name + " key saved.");
+                }
+                catch (Exception ex) { SetStatus("Could not store the key: " + ex.Message); }
+
+                key.Text = "";
+                refresh();
+                _aiPanel.Rebind();
+            };
+        }
+
         void BuildAppearanceSettings(ref int y)
         {
             AddSectionLabel("Appearance", ref y);
@@ -2626,6 +2869,7 @@ namespace NextScan.App
             if (_inspScroll != null) _inspScroll.BackColor = Theme.Surface;
             if (_inspFoot != null) _inspFoot.BackColor = Theme.Surface;
             if (_pagesPanel != null) _pagesPanel.BackColor = Theme.Surface;
+            if (_aiPanel != null) _aiPanel.ApplyTheme();
             if (_rail != null) _rail.BackColor = Theme.Surface;
             if (_settingsPage != null) _settingsPage.BackColor = Theme.Ground;
             if (_settingsHead != null) _settingsHead.BackColor = Theme.Surface;
@@ -2951,8 +3195,9 @@ namespace NextScan.App
             }
 
             SectionBuilder[] parts = { BuildOutputGroup, BuildPreviewSettings, BuildShortcutSettings,
-                                       BuildWatchGroup, BuildAppearanceSettings, BuildAboutSettings };
-            int[] into = { 0, 0, 0, 1, 1, 1 };
+                                       BuildAssistantSettings, BuildWatchGroup,
+                                       BuildAppearanceSettings, BuildAboutSettings };
+            int[] into = { 0, 0, 0, 1, 1, 1, 1 };
             int tallest = 0;
             for (int i = 0; i < parts.Length; i++)
             {
@@ -3169,20 +3414,37 @@ namespace NextScan.App
             int width = _inspector.Width;
             int bodyHeight = _inspector.Height;
             int inner = Math.Max(1, width - 1);
-            int footHeight = Math.Min(FooterHeight, Math.Max(92, bodyHeight - 120));
+
+            bool pages = (_activeSection == PagesSection);
+            bool assist = (_activeSection == AiSection) && _aiPanel != null;
+
+            // A chat is its box pinned to the bottom, and the action footer
+            // would take 136 px from the one panel that needs every one of
+            // them. So on Assist it goes -- with one exception. A scan that is
+            // running must always have a visible way to stop it, so the footer
+            // comes back at the height of one button, carrying nothing but the
+            // button that stops the scan.
+            int footHeight = assist
+                ? (_busy ? CompactFooterHeight : 0)
+                : Math.Min(FooterHeight, Math.Max(92, bodyHeight - 120));
             int middle = Math.Max(1, bodyHeight - InspectorHeadHeight - footHeight);
 
             _inspHead.SetBounds(1, 0, inner, InspectorHeadHeight);
             _inspFoot.SetBounds(1, Math.Max(0, bodyHeight - footHeight), inner, footHeight);
+            _inspFoot.Visible = footHeight > 0;
 
-            bool pages = (_activeSection == PagesSection);
             _inspScroll.SetBounds(1, InspectorHeadHeight, inner, middle);
             _pagesPanel.SetBounds(1, InspectorHeadHeight, inner, middle);
-            _inspScroll.Visible = !pages;
+            _inspScroll.Visible = !pages && !assist;
             _pagesPanel.Visible = pages;
+            if (_aiPanel != null)
+            {
+                _aiPanel.SetBounds(1, InspectorHeadHeight, inner, middle);
+                _aiPanel.Visible = assist;
+            }
             if (pages) LayoutPagesPanel(inner, middle);
 
-            LayoutFooter(inner);
+            if (footHeight > 0) LayoutFooter(inner, assist);
             UpdateDrawerScroll();
         }
 
@@ -3205,11 +3467,26 @@ namespace NextScan.App
             if (_savePill != null) _savePill.SetBounds(pad, y, inner, 36);
         }
 
-        void LayoutFooter(int width)
+        /// <summary>The pinned action footer. Compact carries the stop button alone.</summary>
+        const int CompactFooterHeight = 56;
+
+        void LayoutFooter(int width, bool compact)
         {
             if (_planLabel == null) return;
 
             int inner = Math.Max(60, width - Dx * 2);
+
+            if (compact)
+            {
+                _planLabel.Visible = _previewPill.Visible = _fullBedPill.Visible = false;
+                _batchPill.Visible = _toPsPill.Visible = false;
+                _scanPill.Visible = true;
+                _scanPill.SetBounds(Dx, 9, inner, 38);
+                return;
+            }
+
+            _planLabel.Visible = _previewPill.Visible = _fullBedPill.Visible = true;
+            _batchPill.Visible = _toPsPill.Visible = _scanPill.Visible = true;
             _planLabel.SetBounds(Dx, 10, inner, 30);
 
             const int gap = 8;
@@ -4024,6 +4301,10 @@ namespace NextScan.App
 
             if (_previewPill != null) _previewPill.Enabled = !_busy;
             if (_fullBedPill != null) _fullBedPill.Enabled = !_busy;
+
+            // On Assist the footer is not there at all unless a scan is
+            // running, so the panel has to be re-measured when that changes.
+            if (_activeSection == AiSection) LayoutInspectorBody();
             _scanPill.Invalidate();
         }
 
@@ -6167,7 +6448,7 @@ namespace NextScan.App
                 new Shortcut { Group = "View", Does = "Zoom", Keys_ = "Ctrl+wheel" },
                 new Shortcut { Group = "View", Does = "Pan the page", Keys_ = "hold Space" },
 
-                new Shortcut { Group = "Panels", Does = "Capture, Look, Batch, Pages", Keys_ = "Alt+1 to 4" },
+                new Shortcut { Group = "Panels", Does = "Capture, Look, Batch, Pages, Assist", Keys_ = "Alt+1 to 5" },
                 new Shortcut { Group = "Panels", Does = "Settings", Keys_ = "Ctrl+comma" },
             };
         }

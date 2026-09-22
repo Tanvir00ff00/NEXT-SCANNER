@@ -47,9 +47,15 @@ namespace NextScan.Ai
             if (!string.IsNullOrEmpty(request.Instruction))
                 messages.Add(ChatMessage.CreateSystemMessage(request.Instruction));
             foreach (AiMessage m in request.Messages)
-                messages.Add(m.Role == AiRole.User
-                    ? (ChatMessage)ChatMessage.CreateUserMessage(m.Text)
-                    : ChatMessage.CreateAssistantMessage(m.Text));
+            {
+                if (m.Role != AiRole.User) { messages.Add(ChatMessage.CreateAssistantMessage(m.Text)); continue; }
+                if (m.Image == null) { messages.Add(ChatMessage.CreateUserMessage(m.Text)); continue; }
+
+                messages.Add(ChatMessage.CreateUserMessage(
+                    ChatMessageContentPart.CreateImagePart(
+                        BinaryData.FromBytes(m.Image), m.ImageMediaType ?? "image/jpeg", null),
+                    ChatMessageContentPart.CreateTextPart(m.Text ?? "")));
+            }
 
             var options = new ChatCompletionOptions { ReasoningEffortLevel = EffortFor(request.Thinking) };
 

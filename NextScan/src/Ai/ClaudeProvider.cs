@@ -44,6 +44,14 @@ namespace NextScan.Ai
             }
         }
 
+        static MediaType MediaFor(string mime)
+        {
+            if (string.Equals(mime, "image/png", StringComparison.OrdinalIgnoreCase)) return MediaType.ImagePng;
+            if (string.Equals(mime, "image/gif", StringComparison.OrdinalIgnoreCase)) return MediaType.ImageGif;
+            if (string.Equals(mime, "image/webp", StringComparison.OrdinalIgnoreCase)) return MediaType.ImageWebP;
+            return MediaType.ImageJpeg;
+        }
+
         public async Task<AiReply> Ask(AiRequest request, AiTextArrived onText, CancellationToken cancel)
         {
             string key = AiKeys.Get(Info.Id);
@@ -53,11 +61,41 @@ namespace NextScan.Ai
 
             var messages = new List<MessageParam>();
             foreach (AiMessage m in request.Messages)
+            {
+                MessageParamContent content;
+
+                if (m.Image == null) content = m.Text;
+                else
+                {
+                    // Image first, then the question. Not a style choice: the
+                    // page is the stable part of the prefix and the question is
+                    // not, and a cache breakpoint can only be placed after
+                    // everything it covers.
+                    var blocks = new List<ContentBlockParam>
+                    {
+                        new ContentBlockParam(new ImageBlockParam(new Base64ImageSource
+                        {
+                            Data = Convert.ToBase64String(m.Image),
+                            MediaType = MediaFor(m.ImageMediaType),
+                        })
+                        {
+                            // The whole point of sending the page once. Without
+                            // this the same scan is re-read at full price on
+                            // every turn of the conversation, and the only sign
+                            // is an input count that never drops.
+                            CacheControl = new CacheControlEphemeral(),
+                        }, null),
+                        new ContentBlockParam(new TextBlockParam(m.Text ?? ""), null),
+                    };
+                    content = blocks;
+                }
+
                 messages.Add(new MessageParam
                 {
                     Role = m.Role == AiRole.User ? Role.User : Role.Assistant,
-                    Content = m.Text,
+                    Content = content,
                 });
+            }
 
             var parameters = new MessageCreateParams
             {
