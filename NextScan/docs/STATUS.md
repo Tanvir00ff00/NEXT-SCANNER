@@ -3298,3 +3298,74 @@ The rewrite was verified rather than assumed: driving the application with real
 virtual key codes, `Ctrl` with the keypad plus twice reached 87%, and `Ctrl`
 with the keypad zero returned it to 56%. The second of those did nothing at all
 before today.
+
+## 20. Building the AI layer, 2026-09-22
+
+Every other assembly in this repository is compiled by `csc.exe` from a list of
+source files and the framework, and that is the whole toolchain: Windows plus
+.NET Framework 4.x, which every target machine already has. The provider SDKs
+cannot be built that way -- they come from NuGet and they need C# features
+newer than the 7.3 the rest of the code is compiled at.
+
+So `src/Ai` is the one SDK-style project here, `build.ps1` runs `dotnet build`
+on it before anything else, and `-NoAi` builds everything else on a machine
+without the .NET SDK. The shell still compiles the way it always did and gains
+exactly one reference: `NextScan.Ai.dll`. It never names a provider's SDK.
+
+### The output does not go in bin
+
+It goes in `bin\ai`. Three SDKs bring thirty-one files with them, and thirty-one
+files sitting beside six of ours would make it impossible to see at a glance
+what this product actually consists of.
+
+That choice is what makes the next part necessary.
+
+### A config file no compiler ever reads
+
+Three of those packages target netstandard2.0, which on .NET Framework means
+fifteen assembly binding redirects. MSBuild writes them -- and writes them to
+`NextScan.Ai.dll.config`, beside the library, where the CLR never looks. **A
+binding redirect only applies from the config of the executable that is
+running.** So `build.ps1` copies them into `NextScanner.exe.config`, and adds a
+`<probing privatePath="ai"/>` so the CLR looks in the subfolder at all.
+
+The probing element got an `<assemblyBinding>` of its own, for a reason worth
+writing down. MSBuild emits one `<assemblyBinding>` per redirect -- fifteen
+separate elements -- so there is no single element to attach it to. Asking
+PowerShell for `.configuration.runtime.assemblyBinding` returns all fifteen, and
+appending one node to that walks the collection and leaves the node in whichever
+came last. The first attempt did exactly that. It worked. It worked by accident,
+and it would have gone on working until the day MSBuild emitted them in a
+different order.
+
+None of this fails at build time. All fifteen could be wrong and every target
+would still compile clean, ship clean, and throw on the first question a user
+asked.
+
+### So the test loads them for real
+
+`nsaitest` builds all three clients with a stand-in key -- no network call, no
+spending -- and reports the file the CLR actually opened. Twelve assemblies
+resolve out of `bin\ai`, including the four the redirects exist for. A config
+that looks correct is not evidence; the assembly list is.
+
+It also tests the boundary, by how it is compiled rather than by what it
+asserts. Its command line carries one reference, `NextScan.Ai.dll`, and no
+mention of Anthropic, OpenAI or Google.GenAI anywhere. It drives all three
+providers regardless. If it can, the shell can, and adding a fourth provider
+stays a one-file change.
+
+Writing it found one real hole: `AiKeys` validated a provider id by looping
+over its characters and rejecting anything not alphanumeric. An empty id has no
+characters, passed without objection, and produced a file called `.key`.
+
+### The installer carries a folder
+
+`build_installer.ps1` verifies its payload by name and by size, deliberately, so
+that a missing model cannot ship silently. The AI layer would have meant
+thirty-three more entries, all of which change whenever any SDK is updated -- a
+list written by hand is a list somebody forgets to update.
+
+It travels as a folder instead, with a size floor and four named members that
+must be inside it. That catches the case the size checks above it were written
+for: a folder that exists, and is missing the thing that matters.

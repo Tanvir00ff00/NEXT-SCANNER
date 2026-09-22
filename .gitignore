@@ -14,6 +14,7 @@
 
 # --- build output / runtime data (applies inside NextScan/ too) ---
 bin/
+obj/
 out/
 scans/
 tmp/

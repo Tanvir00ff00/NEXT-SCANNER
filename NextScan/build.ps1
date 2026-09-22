@@ -5,6 +5,7 @@
 #   .\build.ps1              build everything
 #   .\build.ps1 -Clean       wipe bin first
 #   .\build.ps1 -Test        build, then run a device probe
+#   .\build.ps1 -NoAi        skip the AI layer (the one part needing the .NET SDK)
 #
 # Deliberately uses csc.exe directly rather than MSBuild: there is no .NET SDK on
 # the target machines, and this keeps the toolchain requirement to "Windows +
@@ -13,7 +14,8 @@
 param(
     [switch]$Clean,
     [switch]$Test,
-    [switch]$NoWait
+    [switch]$NoWait,
+    [switch]$NoAi
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,7 +77,7 @@ if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null 
 
 function Build-Target {
     param([string]$Name, [string]$Out, [string]$Platform, [string]$Kind, [string[]]$Sources, [string]$EntryPoint,
-          [string]$Icon, [string[]]$Extra)
+          [string]$Icon, [string[]]$Extra, [string[]]$ExtraRefs)
 
     $files = @()
     foreach ($s in $Sources) {
@@ -86,6 +88,7 @@ function Build-Target {
 
     $args = @("-nologo", "-target:$Kind", "-platform:$Platform", "-out:$Out",
               "-unsafe", "-langversion:7.3", "-optimize+", "-warn:3") + $refs
+    foreach ($r in $ExtraRefs) { $args += "-r:$r" }
     if ($EntryPoint) { $args += "-main:$EntryPoint" }
     if ($Icon -and (Test-Path $Icon)) { $args += "-win32icon:$Icon" }
     $args += $files
@@ -120,6 +123,58 @@ using System.Reflection;
 [assembly: AssemblyVersion("$fileVersion")]
 [assembly: AssemblyFileVersion("$fileVersion")]
 "@ | Set-Content $stamp -Encoding UTF8
+
+# ---------------------------------------------------------------------------
+# The AI layer
+#
+# The only part of this repository with dependencies, so it is the only part
+# built by the .NET SDK rather than by csc directly. Its output goes to bin\ai
+# rather than bin: thirty-one files from three provider SDKs sitting beside the
+# application would make it impossible to see at a glance what we actually ship.
+# ---------------------------------------------------------------------------
+$aiProject = Join-Path $src "Ai\NextScan.Ai.csproj"
+$aiOut = Join-Path $bin "ai"
+$aiDll = Join-Path $aiOut "NextScan.Ai.dll"
+
+if (-not $NoAi) {
+    $dotnet = Join-Path $env:ProgramFiles "dotnet\dotnet.exe"
+    if (-not (Test-Path $dotnet)) { $dotnet = (Get-Command dotnet -ErrorAction SilentlyContinue).Source }
+    if (-not $dotnet) {
+        throw "The .NET SDK is needed for the AI layer. Install it, or pass -NoAi to build without the AI panel."
+    }
+
+    Write-Host "  building NextScan.Ai" -NoNewline
+    $aiLog = & $dotnet build $aiProject -c Release -v q --nologo -p:OutputPath="$aiOut\" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  FAILED" -ForegroundColor Red
+        $aiLog | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+        throw "build failed: NextScan.Ai"
+    }
+    Write-Host "  ok" -ForegroundColor Green
+
+    # Binding redirects only count in the config of the program that runs.
+    # MSBuild writes them next to the library, where the CLR never looks, so
+    # they are carried over to each executable's own config below. The probing
+    # path is what lets the CLR find the SDKs in bin\ai at all.
+    $fromAi = Join-Path $aiOut "NextScan.Ai.dll.config"
+    if (Test-Path $fromAi) {
+        [xml]$aiConfig = Get-Content $fromAi
+        $ns = "urn:schemas-microsoft-com:asm.v1"
+
+        # The probing element gets an assemblyBinding of its own. MSBuild
+        # writes one per redirect -- fifteen of them -- so there is no single
+        # element to hang this off, and asking PowerShell for "the"
+        # assemblyBinding walks all fifteen and leaves the node in whichever
+        # came last. That happens to work and is not a thing to rely on.
+        $holder = $aiConfig.CreateElement("assemblyBinding", $ns)
+        $probing = $aiConfig.CreateElement("probing", $ns)
+        $probing.SetAttribute("privatePath", "ai")
+        $holder.AppendChild($probing) | Out-Null
+
+        $runtime = $aiConfig.configuration.runtime
+        $runtime.InsertBefore($holder, $runtime.FirstChild) | Out-Null
+    }
+}
 
 $engine = @("Core\*.cs", "Twain\*.cs", "Wia\*.cs", "Net\*.cs")
 $host_  = $engine + @("Host\*.cs")
@@ -160,8 +215,32 @@ Build-Target -Name "NextScan.Engine" -Out "$bin\NextScan.Engine.dll" -Platform "
 # Dedicated standalone studio application (Master Plan section 13)
 $app_ = $engine + @("App\*.cs")
 $appIcon = Join-Path $src "App\NextScanner.ico"
+# One reference, not thirty-one: the shell only ever sees our own facade, and
+# the provider SDKs behind it are loaded at run time from bin\ai.
+$appRefs = @()
+if (-not $NoAi -and (Test-Path $aiDll)) { $appRefs += $aiDll }
+
 Build-Target -Name "NextScanner"     -Out "$bin\NextScanner.exe"     -Platform "anycpu" -Kind "winexe" `
-             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon -Extra @($stamp)
+             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon -Extra @($stamp) `
+             -ExtraRefs $appRefs
+
+# The AI layer loads, and stays behind its boundary (docs/AI_LAYER.md). Built
+# with the same single reference the shell gets: if this can drive all three
+# providers without naming one of their SDKs, so can the application.
+if (-not $NoAi -and (Test-Path $aiDll)) {
+    Build-Target -Name "nsaitest"    -Out "$bin\nsaitest.exe"    -Platform "anycpu" -Kind "exe" `
+                 -Sources ($engine + @("Tools\NsAiTest.cs")) -EntryPoint "NextScan.Tools.NsAiTest" `
+                 -ExtraRefs $appRefs
+}
+
+# Every executable that reaches the AI layer needs the redirects, not just the
+# application: a test that passes because it was run from a different folder
+# proves nothing about the thing we ship.
+if ($aiConfig) {
+    foreach ($exe in @("NextScanner.exe", "nsaitest.exe")) {
+        if (Test-Path (Join-Path $bin $exe)) { $aiConfig.Save((Join-Path $bin ($exe + ".config"))) }
+    }
+}
 
 # Deploy NextScan.Engine.dll to the parent directory for scanhelper compatibility
 Copy-Item "$bin\NextScan.Engine.dll" (Join-Path (Split-Path -Parent $root) "NextScan.Engine.dll") -Force -ErrorAction SilentlyContinue

@@ -80,6 +80,18 @@ $payload = @(
     @{ From = "$bin\onnxruntime.dll";     To = "onnxruntime.dll";     Least = 5MB;   Why = "without it the model layer is off" }
     @{ From = "$models\mobile_sam_image_encoder.onnx"; To = "models\mobile_sam_image_encoder.onnx"; Least = 20MB; Why = "segmentation encoder" }
     @{ From = "$models\sam_mask_decoder_multi.onnx";   To = "models\sam_mask_decoder_multi.onnx";   Least = 10MB; Why = "segmentation decoder" }
+
+    # The AI layer travels as a folder, not as thirty-three named entries. Its
+    # contents are whatever three provider SDKs currently depend on, and that
+    # list changes when any of them is updated -- a payload written out by hand
+    # would be a list to forget to update. The floor and the named members do
+    # the same job the size checks do above: catch a folder that exists and is
+    # missing the thing that matters.
+    @{ From = "$bin\NextScanner.exe.config"; To = "NextScanner.exe.config"; Least = 2KB
+       Why = "without it the AI panel cannot load a single provider" }
+    @{ From = "$bin\ai"; To = "ai"; Least = 15MB; Folder = $true
+       Needs = @("NextScan.Ai.dll", "Anthropic.dll", "OpenAI.dll", "Google.GenAI.dll")
+       Why = "the AI layer and the provider SDKs" }
 )
 if (-not $NoConnector) {
     $payload += @{ From = $connector; To = "NextScanner.8ba"; Least = 50KB; Why = "the Photoshop connector" }
@@ -95,7 +107,18 @@ foreach ($item in $payload) {
         Write-Host ("    {0,-34} MISSING   {1}" -f $name, $item.Why) -ForegroundColor Red
         $missing += "$name ($($item.Why))"; continue
     }
-    $size = (Get-Item $item.From).Length
+
+    if ($item.Folder) {
+        $inside = Get-ChildItem $item.From -Recurse -File
+        $absent = @($item.Needs | Where-Object { $inside.Name -notcontains $_ })
+        if ($absent.Count -gt 0) {
+            Write-Host ("    {0,-34} INCOMPLETE  no {1}" -f "$name\", ($absent -join ", ")) -ForegroundColor Red
+            $missing += "$name\ (no $($absent -join ', '))"; continue
+        }
+        $size = ($inside | Measure-Object Length -Sum).Sum
+        $name = "$name\  ($($inside.Count) files)"
+    }
+    else { $size = (Get-Item $item.From).Length }
     if ($size -lt $item.Least) {
         Write-Host ("    {0,-34} TOO SMALL {1:N0} bytes" -f $name, $size) -ForegroundColor Red
         $missing += "$name (only $size bytes)"; continue
@@ -106,8 +129,10 @@ foreach ($item in $payload) {
 if ($missing.Count -gt 0) {
     Write-Host ""
     throw ("Refusing to build an installer missing " + ($missing -join ", ") +
-           ". These are gitignored and must be fetched separately; an installer without them " +
-           "works and detects worse, with nothing on screen to say why.")
+           ". The models and onnxruntime.dll are gitignored and must be fetched separately; " +
+           "everything else comes out of build.ps1, so run that first. An installer without " +
+           "any of them still installs and still starts -- it just detects worse, or has no " +
+           "AI panel, with nothing on screen to say why.")
 }
 Write-Host ("    {0,-34} {1,12:N0} bytes total" -f "", $total)
 
@@ -120,7 +145,8 @@ foreach ($item in $payload) {
     $target = Join-Path $stage $item.To
     $parent = Split-Path $target -Parent
     if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    Copy-Item $item.From $target -Force
+    if ($item.Folder) { Copy-Item $item.From $target -Recurse -Force }
+    else { Copy-Item $item.From $target -Force }
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
