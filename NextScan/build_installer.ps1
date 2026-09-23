@@ -92,6 +92,15 @@ $payload = @(
     @{ From = "$bin\ai"; To = "ai"; Least = 15MB; Folder = $true
        Needs = @("NextScan.Ai.dll", "Anthropic.dll", "OpenAI.dll", "Google.GenAI.dll")
        Why = "the AI layer and the provider SDKs" }
+    # The document workspace: WebView2, the ONLYOFFICE editors, the converter
+    # and the font tool (docs/DOCUMENT_WORKSPACE.md). Hundreds of megabytes,
+    # most of it the editors' JavaScript; the floor catches an engine that
+    # was never fetched.
+    @{ From = "$bin\docs"; To = "docs"; Least = 250MB; Folder = $true
+       Needs = @("NextScan.Docs.dll", "Microsoft.Web.WebView2.Core.dll", "WebView2Loader.dll",
+                 "host.html", "shim.js", "api.js", "x2t.exe", "graphics.dll", "nsfonts.exe",
+                 "ONLYOFFICE-LICENSE.txt")
+       Why = "the document workspace (Assist)" }
 )
 if (-not $NoConnector) {
     $payload += @{ From = $connector; To = "NextScanner.8ba"; Least = 50KB; Why = "the Photoshop connector" }

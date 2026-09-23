@@ -14,3 +14,7 @@ psplugins/
 
 # The built installer.
 dist/
+
+# The document editor engine (ONLYOFFICE 9.4, ~500 MB). Fetched from the
+# official releases and verified by tools/get_onlyoffice.ps1; never committed.
+vendor/

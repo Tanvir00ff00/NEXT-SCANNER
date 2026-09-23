@@ -166,11 +166,97 @@ if (Test-Path $fromAi) {
     # and is not a thing to rely on.
     $holder = $aiConfig.CreateElement("assemblyBinding", $ns)
     $probing = $aiConfig.CreateElement("probing", $ns)
-    $probing.SetAttribute("privatePath", "ai")
+    $probing.SetAttribute("privatePath", "ai;docs")
     $holder.AppendChild($probing) | Out-Null
 
     $runtime = $aiConfig.configuration.runtime
     $runtime.InsertBefore($holder, $runtime.FirstChild) | Out-Null
+}
+
+# ---------------------------------------------------------------------------
+# The document layer (docs/DOCUMENT_WORKSPACE.md)
+#
+# WebView2's wrapper comes from NuGet, so this is built by the .NET SDK like the
+# AI layer, into bin\docs. Beside it goes the editor engine, which is not in the
+# repository: tools\get_onlyoffice.ps1 fetches and verifies it into
+# vendor\onlyoffice, and it is mirrored from there.
+# ---------------------------------------------------------------------------
+$docsProject = Join-Path $src "Docs\NextScan.Docs.csproj"
+$docsOut = Join-Path $bin "docs"
+$docsDll = Join-Path $docsOut "NextScan.Docs.dll"
+
+Write-Host "  building NextScan.Docs" -NoNewline
+$docsLog = & $dotnet build $docsProject -c Release -v q --nologo -p:OutputPath="$docsOut\" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  FAILED" -ForegroundColor Red
+    $docsLog | ForEach-Object { Write-Host "    $_" -ForegroundColor Red }
+    throw "build failed: NextScan.Docs"
+}
+Write-Host "  ok" -ForegroundColor Green
+
+$vendor = Join-Path $root "vendor\onlyoffice"
+if (Test-Path (Join-Path $vendor "editors\sdkjs")) {
+    # Mirrored, not copied: robocopy only touches what changed, which after the
+    # first build is nothing, and 500 MB is not copied again on every build.
+    foreach ($part in "editors", "converter") {
+        & robocopy (Join-Path $vendor $part) (Join-Path $docsOut $part) /MIR /R:1 /W:1 /NJH /NJS /NFL /NDL /NP /XF nsfonts.exe msvcp140.dll vcruntime140.dll vcruntime140_1.dll | Out-Null
+        if ($LASTEXITCODE -ge 8) { throw "could not copy the editor engine ($part)" }
+    }
+    foreach ($f in "LICENSE.txt", "3rd-Party.txt") {
+        if (Test-Path (Join-Path $vendor $f)) { Copy-Item (Join-Path $vendor $f) (Join-Path $docsOut ("ONLYOFFICE-" + $f)) -Force }
+    }
+    Write-Host "  editor engine              mirrored" -ForegroundColor Green
+
+    # x2t, graphics.dll and nsfonts link the Visual C++ runtime dynamically,
+    # and ONLYOFFICE's zip relies on its own installer to put that in place.
+    # A shop PC without Office may not have it, so the three files go beside
+    # the converter -- the app-local deployment Microsoft's redistribution
+    # terms allow for exactly these.
+    foreach ($crt in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+        $from = Join-Path $env:WINDIR "System32\$crt"
+        $to = Join-Path $docsOut "converter\$crt"
+        if ((Test-Path $from) -and -not (Test-Path $to)) { Copy-Item $from $to }
+    }
+
+    # nsfonts drives graphics.dll's font worker, which is C++, so it is C++
+    # too (src\Docs\native). Built with MSVC when there is one; without it the
+    # engine still works, but with no fonts but the editor's defaults.
+    $vcvars = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+    if (-not (Test-Path $vcvars)) {
+        $vcvars = Get-Item "${env:ProgramFiles}\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
+                  Select-Object -First 1 -ExpandProperty FullName
+    }
+    $nsfonts = Join-Path $docsOut "converter\nsfonts.exe"
+    $nsSource = Join-Path $src "Docs\native\nsfonts.cpp"
+    $stale = -not (Test-Path $nsfonts) -or ((Get-Item $nsSource).LastWriteTime -gt (Get-Item $nsfonts).LastWriteTime)
+    if ($vcvars -and $stale) {
+        Write-Host "  building nsfonts           (x64, native)" -NoNewline
+        $work = Join-Path $env:TEMP "nextscan_nsfonts"
+        New-Item -ItemType Directory -Force $work | Out-Null
+        @"
+LIBRARY graphics.dll
+EXPORTS
+??0CApplicationFontsWorker@@QEAA@XZ
+??1CApplicationFontsWorker@@QEAA@XZ
+?Check@CApplicationFontsWorker@@QEAAPEAVIApplicationFonts@NSFonts@@XZ
+?CheckThumbnails@CApplicationFontsWorker@@QEAAXXZ
+"@ | Set-Content (Join-Path $work "graphics.def") -Encoding ASCII
+        $cmd = "call `"$vcvars`" >nul 2>&1 && cd /d `"$work`" && lib /nologo /def:graphics.def /machine:x64 /out:graphics.lib >nul && " +
+               "cl /nologo /EHsc /MD /O2 /W3 /wd4251 /std:c++17 `"$nsSource`" /Fe:nsfonts.exe /link graphics.lib >nul 2>&1"
+        cmd /c $cmd
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $work "nsfonts.exe"))) {
+            Write-Host "  FAILED" -ForegroundColor Red
+            throw "build failed: nsfonts"
+        }
+        Copy-Item (Join-Path $work "nsfonts.exe") $nsfonts -Force
+        Write-Host "  ok" -ForegroundColor Green
+    }
+    elseif (-not $vcvars -and -not (Test-Path $nsfonts)) {
+        Write-Host "  ! no C++ compiler: nsfonts not built, documents will use the editor's own fonts only" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host "  ! editor engine missing: run tools\get_onlyoffice.ps1 (the Assist workspace will say so)" -ForegroundColor Yellow
 }
 
 $engine = @("Core\*.cs", "Twain\*.cs", "Wia\*.cs", "Net\*.cs")
@@ -214,7 +300,7 @@ $app_ = $engine + @("App\*.cs")
 $appIcon = Join-Path $src "App\NextScanner.ico"
 # One reference, not thirty-one: the shell only ever sees our own facade, and
 # the provider SDKs behind it are loaded at run time from bin\ai.
-$appRefs = @($aiDll)
+$appRefs = @($aiDll, $docsDll)
 
 Build-Target -Name "NextScanner"     -Out "$bin\NextScanner.exe"     -Platform "anycpu" -Kind "winexe" `
              -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon -Extra @($stamp) `

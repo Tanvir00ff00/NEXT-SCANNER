@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The document layer: the editor engine (ONLYOFFICE, docs/DOCUMENT_WORKSPACE.md)
+    running inside a WebView2, and the bridge between it and the shell.
+
+    It is its own assembly for the same reason the AI layer is: WebView2's .NET
+    wrapper comes from NuGet, and everything else here builds with csc.exe and
+    no packages. The shell sees one reference, NextScan.Docs.dll, and nothing in
+    its public surface names a WebView2 type, so the shell never needs one.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>NextScan.Docs</AssemblyName>
+    <RootNamespace>NextScan.Docs</RootNamespace>
+    <UseWindowsForms>true</UseWindowsForms>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The page each document lives in, and the shim injected into the
+         editor's frame. Plain files, served from bin\docs\host. -->
+    <None Include="host\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="host" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Microsoft's own, and the only package in this project. The runtime it
+         drives is the Edge WebView2 runtime Windows 11 ships. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+  </ItemGroup>
+
+</Project>

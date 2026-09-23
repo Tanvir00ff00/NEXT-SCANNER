@@ -27,6 +27,7 @@ using ColorMode = NextScan.Core.ColorMode;
 // places and nowhere else, and naming it at each of them is what keeps that
 // true -- a plain using would make it invisible when a fifth appeared.
 using Ai = NextScan.Ai;
+using Docs = NextScan.Docs;
 
 namespace NextScan.App
 {
@@ -70,6 +71,12 @@ namespace NextScan.App
         bool _settingsOpen;
 
         StudioCanvasView _canvas;
+
+        /// <summary>
+        /// What the middle of the window is while Assist is chosen: documents,
+        /// not the scanner bed (docs/DOCUMENT_WORKSPACE.md).
+        /// </summary>
+        StudioWorkspace _workspace;
         StudioFilmstripView _film;
         NsBatchBar _batchBar;
         NsIconButton _batchPill;
@@ -1050,6 +1057,8 @@ namespace NextScan.App
             // finds in the host, and the session's thumbnails must outlive that.
             LayoutInspectorBody();
             if (_inspHead != null) _inspHead.Invalidate();
+            ApplyStageMode();
+            LayoutStatusBar();
         }
 
         const int PagesSection = 3;
@@ -2363,6 +2372,34 @@ namespace NextScan.App
             _drawerHost.Controls.Add(source);
             y += 26;
 
+            // Who made the parts NextScan is built on. The document editors are
+            // ONLYOFFICE's, and their licence asks for exactly this: an About
+            // that names them as the original developer, says the program was
+            // changed, and points at the licence (docs/DOCUMENT_WORKSPACE.md).
+            AddFieldLabel("Built with", ref y);
+            string credits =
+                "Document, spreadsheet, presentation and PDF editors: ONLYOFFICE Docs 9.4, " +
+                "by Ascensio System SIA (onlyoffice.com), under the GNU AGPL v3. NextScan runs " +
+                "them offline inside its own window, with its own file handling and fonts; " +
+                "that is the change made to them. ONLYOFFICE is a trademark of Ascensio System SIA.\n\n" +
+                "Browser engine for the editors: Microsoft Edge WebView2.\n\n" +
+                "Assistant: the official SDKs of Anthropic (Claude), OpenAI and Google (Gemini).\n\n" +
+                "Licence texts: the ONLYOFFICE-LICENSE.txt and ONLYOFFICE-3rd-Party.txt files in " +
+                "the docs folder of this installation, and gnu.org/licenses/agpl-3.0.html.";
+            Label thanks = new Label
+            {
+                Text = credits,
+                Location = new Point(Dx, y),
+                ForeColor = Theme.TextDim,
+                BackColor = Color.Transparent,
+                Font = Theme.Ui(8f),
+                AutoSize = false
+            };
+            thanks.Size = new Size(Dw, TextRenderer.MeasureText(credits, thanks.Font, new Size(Dw, int.MaxValue),
+                                                               TextFormatFlags.WordBreak).Height + 4);
+            _drawerHost.Controls.Add(thanks);
+            y += thanks.Height + 12;
+
             AddFieldLabel("Diagnostics are written to", ref y);
             Label folder = new Label
             {
@@ -3070,6 +3107,8 @@ namespace NextScan.App
             _canvas = new StudioCanvasView();
             Controls.Add(_canvas);
 
+            BuildWorkspace();
+
             _splitDrawer = new NsSplitter();
             _splitDrawer.Dragged += delegate (object o, NsSplitter.DeltaEventArgs e)
             {
@@ -3230,6 +3269,199 @@ namespace NextScan.App
             };
             _status.Controls.Add(_zoomText);
         }
+
+        void BuildWorkspace()
+        {
+            _workspace = new StudioWorkspace { Visible = false };
+            _workspace.Status = delegate (string text) { SetStatus(text); };
+            _workspace.ScannedPages = delegate { return _film == null ? 0 : _film.Count; };
+            _workspace.PdfFromPages = PdfOfSessionPages;
+            _workspace.CurrentChanged += delegate { if (_inspHead != null) _inspHead.Invalidate(); };
+            _workspace.MakeSurface = MakeDocSurface;
+            _workspace.ConfirmClose = ConfirmDocClose;
+            Controls.Add(_workspace);
+
+            // The font catalog is built from this machine's fonts the first
+            // time and whenever they change. Twelve seconds on a fresh machine,
+            // so it starts now rather than when the first document is opened.
+            if (Docs.DocsEngine.IsInstalled)
+            {
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    Docs.DocsEngine.SweepWork();
+                    Docs.DocsEngine.EnsureFontsAsync();
+                });
+            }
+        }
+
+        /// <summary>
+        /// The editor for one tab: ONLYOFFICE in a WebView2 (NextScan.Docs).
+        /// Opening is asynchronous; the tab appears at once and the document
+        /// draws into it when the converter and the editor are done.
+        /// </summary>
+        Control MakeDocSurface(DocTab tab)
+        {
+            if (!Docs.DocsEngine.IsInstalled)
+            {
+                SetStatus("The document editor is not installed. Run tools\\get_onlyoffice.ps1, then build again.");
+                return null;
+            }
+
+            Docs.DocView view = new Docs.DocView();
+            view.SetDark(!Theme.IsLight);
+            view.Status = delegate (string text) { SetStatus(text.Length > 0 ? text : "Ready."); };
+            view.Trouble += delegate (object sender, Docs.DocsMessageEventArgs e) { SetStatus(e.Message); };
+            view.AskSavePath = AskDocSavePath;
+
+            view.DirtyChanged += delegate
+            {
+                tab.Dirty = view.Dirty;
+                _workspace.Changed(tab);
+                if (!view.Dirty && _closeAfterSave.Remove(tab)) _workspace.Close(tab);
+            };
+            view.PathChanged += delegate
+            {
+                tab.Path = view.FilePath;
+                _workspace.Changed(tab);
+            };
+
+            string ext = tab.Path.Length > 0 ? "" : NewExtension(tab.Kind);
+            System.Threading.Tasks.Task opening = tab.Path.Length > 0
+                ? view.OpenAsync(tab.Path)
+                : view.NewAsync(ext, tab.Title);
+            opening.ContinueWith(done =>
+            {
+                if (!done.IsFaulted) return;
+                string why = done.Exception.GetBaseException().Message;
+                try { BeginInvoke((MethodInvoker)delegate { SetStatus("Could not open " + tab.Title + ": " + why); }); }
+                catch { }
+            });
+            return view;
+        }
+
+        static string NewExtension(DocKind kind)
+        {
+            switch (kind)
+            {
+                case DocKind.Sheet: return "xlsx";
+                case DocKind.Slides: return "pptx";
+                default: return "docx";
+            }
+        }
+
+        readonly HashSet<DocTab> _closeAfterSave = new HashSet<DocTab>();
+
+        string AskDocSavePath(string name, string ext)
+        {
+            string chosen = null;
+            MethodInvoker ask = delegate
+            {
+                using (SaveFileDialog dialog = new SaveFileDialog
+                {
+                    Title = "Save",
+                    FileName = name + "." + ext,
+                    DefaultExt = ext,
+                    AddExtension = true,
+                    OverwritePrompt = true,
+                    Filter = SaveFilter(ext),
+                    InitialDirectory = Directory.Exists(_settings.OutputDirectory) ? _settings.OutputDirectory : ""
+                })
+                {
+                    if (dialog.ShowDialog(this) == DialogResult.OK) chosen = dialog.FileName;
+                }
+            };
+            if (InvokeRequired) Invoke(ask); else ask();
+            return chosen;
+        }
+
+        static string SaveFilter(string ext)
+        {
+            switch (ext)
+            {
+                case "xlsx": return "Excel workbook (*.xlsx)|*.xlsx";
+                case "pptx": return "PowerPoint presentation (*.pptx)|*.pptx";
+                case "pdf": return "PDF (*.pdf)|*.pdf";
+                case "odt": return "OpenDocument text (*.odt)|*.odt";
+                case "ods": return "OpenDocument spreadsheet (*.ods)|*.ods";
+                case "rtf": return "Rich text (*.rtf)|*.rtf";
+                case "txt": return "Plain text (*.txt)|*.txt";
+                case "csv": return "CSV (*.csv)|*.csv";
+                default: return "Word document (*.docx)|*.docx";
+            }
+        }
+
+        /// <summary>
+        /// Asked before a changed document closes. Save saves first and closes
+        /// when the save has landed; the save is not waited for here because
+        /// it runs through the editor and the converter, off this thread.
+        /// </summary>
+        bool ConfirmDocClose(DocTab tab)
+        {
+            DialogResult answer = MessageBox.Show(this,
+                "Save the changes to " + tab.Title + " before closing it?",
+                "NextScan", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (answer == DialogResult.No) return true;
+            if (answer == DialogResult.Cancel) return false;
+
+            Docs.DocView view = tab.Surface as Docs.DocView;
+            if (view == null) return true;
+            _closeAfterSave.Add(tab);
+            view.Save();
+            return false;
+        }
+
+        /// <summary>
+        /// Writes the session's pages to a PDF in the output folder and returns
+        /// its path, so "PDF from pages" on Home can open it straight away.
+        /// </summary>
+        string PdfOfSessionPages()
+        {
+            List<RawImage> pages = _film == null ? null : _film.AllImages();
+            if (pages == null || pages.Count == 0) { SetStatus("There are no scanned pages in this session."); return null; }
+
+            try
+            {
+                Directory.CreateDirectory(_settings.OutputDirectory);
+                string path = Path.Combine(_settings.OutputDirectory,
+                    "pages_" + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".pdf");
+                if (!StudioExport.SavePdf(pages, path)) { SetStatus("Could not write the PDF."); return null; }
+                SetStatus(pages.Count + (pages.Count == 1 ? " page" : " pages") + " written to " + path);
+                return path;
+            }
+            catch (Exception ex) { SetStatus("Could not write the PDF: " + ex.Message); return null; }
+        }
+
+        /// <summary>
+        /// Swaps the middle of the window between the scanner bed and the
+        /// document workspace, and hides the scanner's own controls with it.
+        ///
+        /// Nothing is torn down: the canvas, its crop and the batch strip are
+        /// only hidden, so going back to Capture finds them exactly as left.
+        /// </summary>
+        void ApplyStageMode()
+        {
+            if (_workspace == null || _canvas == null) return;
+            bool docs = _activeSection == AiSection;
+
+            _workspace.Visible = docs;
+            _canvas.Visible = !docs;
+            if (_deviceBar != null) _deviceBar.Visible = !docs;
+
+            foreach (NsIconButton button in _viewButtons)
+            {
+                if (docs)
+                {
+                    if (button.Visible) { _hiddenForDocs.Add(button); button.Visible = false; }
+                }
+                else if (_hiddenForDocs.Contains(button)) button.Visible = true;
+            }
+            if (!docs) _hiddenForDocs.Clear();
+            if (_zoomText != null) _zoomText.Visible = !docs;
+
+            if (docs) _workspace.BringToFront();
+        }
+
+        readonly HashSet<NsIconButton> _hiddenForDocs = new HashSet<NsIconButton>();
 
         NsIconButton AddViewButton(string icon, string tip, EventHandler onClick)
         {
@@ -3487,6 +3719,7 @@ namespace NextScan.App
                 _railButtons[i].SetBounds(0, 8 + i * (RailItemHeight + 2), railWidth, RailItemHeight);
 
             _canvas.SetBounds(railWidth, top, stageWidth, bodyHeight);
+            if (_workspace != null) _workspace.SetBounds(railWidth, top, stageWidth, bodyHeight);
 
             _inspector.SetBounds(ClientSize.Width - inspWidth, top, inspWidth, bodyHeight);
             _splitDrawer.SetBounds(ClientSize.Width - inspWidth - 3, top, 6, bodyHeight);
@@ -3504,6 +3737,9 @@ namespace NextScan.App
             }
             _canvas.ReservedTop = 12 + (batchHeight > 0 ? batchHeight + 10 : 0);
             _canvas.ReservedBottom = 12;
+
+            // After the batch strip has raised itself, or it floats over a document.
+            ApplyStageMode();
 
             // Last, and after the splitter and the batch strip have raised
             // themselves: the settings page covers the whole workspace or it
@@ -6844,6 +7080,33 @@ namespace NextScan.App
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Documents with changes are asked about first, one by one. Saying
+            // Cancel to any of them keeps the window open.
+            if (_workspace != null && !e.Cancel)
+            {
+                foreach (DocTab tab in new List<DocTab>(_workspace.Tabs))
+                {
+                    if (!tab.Dirty) continue;
+                    _workspace.Select(tab);
+                    DialogResult answer = MessageBox.Show(this,
+                        "Save the changes to " + tab.Title + " before closing NextScan?",
+                        "NextScan", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                    if (answer == DialogResult.Cancel || answer == DialogResult.Yes)
+                    {
+                        // A save runs through the editor and cannot be finished
+                        // inside this call, so Yes saves and leaves the window
+                        // open; closing again afterwards finds nothing unsaved.
+                        if (answer == DialogResult.Yes)
+                        {
+                            Docs.DocView view = tab.Surface as Docs.DocView;
+                            if (view != null) view.Save();
+                        }
+                        e.Cancel = true;
+                        return;
+                    }
+                }
+            }
+
             // A background thread holding files open would keep the process
             // alive after the window has gone.
             StopHotFolder();

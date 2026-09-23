@@ -53,6 +53,10 @@ namespace NextScan.App
         public const string Effort = "effort";
         public const string Copy = "copy";
 
+        // The document workspace.
+        public const string Home = "home";
+        public const string Folder = "folder";
+
         /// <summary>
         /// Draws one icon centred in <paramref name="box"/>.
         ///
@@ -259,6 +263,25 @@ namespace NextScan.App
                 case Stop:
                     using (GraphicsPath path = Theme.Round(new Rectangle(7, 7, 10, 10), 2))
                         g.FillPath(b, path);
+                    break;
+
+                case Home:
+                    // A house: roof, walls, a door. Nothing else reads as "start".
+                    g.DrawLines(p, new PointF[] { new PointF(3.5f, 11.5f), new PointF(12f, 4f), new PointF(20.5f, 11.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(6f, 9.8f), new PointF(6f, 20f), new PointF(18f, 20f), new PointF(18f, 9.8f) });
+                    g.DrawLines(p, new PointF[] { new PointF(10f, 20f), new PointF(10f, 14.5f), new PointF(14f, 14.5f), new PointF(14f, 20f) });
+                    break;
+
+                case Folder:
+                    using (GraphicsPath path = new GraphicsPath())
+                    {
+                        path.AddLines(new PointF[] { new PointF(3f, 7f), new PointF(3f, 5.5f), new PointF(9f, 5.5f),
+                                                     new PointF(11f, 7.5f), new PointF(21f, 7.5f), new PointF(21f, 19f),
+                                                     new PointF(3f, 19f) });
+                        path.CloseFigure();
+                        g.DrawPath(p, path);
+                    }
+                    g.DrawLine(p, 3f, 10.5f, 21f, 10.5f);
                     break;
 
                 case History:
