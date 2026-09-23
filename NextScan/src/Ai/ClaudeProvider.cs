@@ -21,6 +21,7 @@ namespace NextScan.Ai
             Name = "Claude",
             KeyHint = "sk-ant-...",
             Prefer = new[] { "opus", "sonnet", "haiku" },
+            Avoid = new[] { "latest" },
             Ceiling = ThinkingLevel.Max,
         };
 

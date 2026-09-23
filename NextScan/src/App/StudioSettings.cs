@@ -50,6 +50,13 @@ namespace NextScan.App
         public string AiModel = "";
         public string AiThinking = "Medium";
 
+        /// <summary>
+        /// Which models the panel may offer, as "provider/model" ids separated
+        /// by commas. Empty means nothing has been chosen, which is not the same
+        /// as nothing being allowed.
+        /// </summary>
+        public string AiAllowedModels = "";
+
         public int Dpi = 300;
         public ColorMode Mode = ColorMode.Color24;
 
@@ -250,6 +257,7 @@ namespace NextScan.App
                         case "aiprovider": if (val.Length > 0) s.AiProvider = val.ToLowerInvariant(); break;
                         case "aimodel": s.AiModel = val; break;
                         case "aithinking": if (val.Length > 0) s.AiThinking = val; break;
+                        case "aimodels": s.AiAllowedModels = val; break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
                                 && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -364,6 +372,7 @@ namespace NextScan.App
                 lines.Add("aiprovider=" + AiProvider);
                 lines.Add("aimodel=" + AiModel);
                 lines.Add("aithinking=" + AiThinking);
+                lines.Add("aimodels=" + AiAllowedModels);
                 lines.Add("autotone=" + AutoTone);
                 lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));
                 lines.Add("vibrance=" + Vibrance.ToString(CultureInfo.InvariantCulture));

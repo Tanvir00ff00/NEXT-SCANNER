@@ -69,13 +69,15 @@ namespace NextScan.App
         readonly List<NsBubble> _bubbles = new List<NsBubble>();
         readonly List<NsPill> _chips = new List<NsPill>();
 
-        Panel _bar;                 // the thin strip at the top: new conversation
+        Panel _bar;                 // the thin strip at the top: history, new conversation
         NsIconButton _fresh;
+        NsIconButton _past;
         Panel _scroll;
         Panel _column;
         Panel _welcome;             // the empty state, shown until the first turn
         NsComposer _composer;
         NsPill _modelButton;
+        NsPill _effortButton;
         NsIconButton _send;
         Label _meter;
 
@@ -92,10 +94,26 @@ namespace NextScan.App
         ThinkingLevel _thinking = ThinkingLevel.Medium;
 
         /// <summary>
-        /// Which page this conversation is about, as the operator would name it.
-        /// Kept so the panel can say so when the page underneath changes.
+        /// Which page this conversation is about, as the operator would name it,
+        /// or empty while none has been sent. Kept so the panel can say so when
+        /// the page underneath changes.
         /// </summary>
         string _pageFor = "";
+
+        /// <summary>
+        /// Whether the scan has already gone. A page is attached to the first
+        /// turn where one exists -- which is usually the first turn, but need
+        /// not be: asking a question, then scanning, then asking about the scan
+        /// is an ordinary way to use a scanner, and refusing the first question
+        /// because nothing was on the glass yet was not.
+        /// </summary>
+        bool _pageSent;
+
+        /// <summary>
+        /// The file this conversation is written to, made at the first turn.
+        /// Empty until then, because an empty conversation is not one.
+        /// </summary>
+        string _chatId = "";
 
         // =====================================================================
         // The suggestions
@@ -109,6 +127,13 @@ namespace NextScan.App
             public string Id = "";
             public string Title = "";
             public string Ask = "";
+
+            /// <summary>
+            /// All of these are about a page. They stay pressable without one
+            /// anyway: a greyed button is a button that looks broken, and the
+            /// press is answered with the reason instead of with nothing.
+            /// </summary>
+            public bool NeedsPage = true;
         }
 
         static readonly Suggestion[] Suggestions =
@@ -160,16 +185,16 @@ namespace NextScan.App
         /// anywhere says so -- the only sign is a token count that stays high.
         /// </summary>
         const string Instruction =
-            "You are the assistant inside NextScan Studio, a scanner application. The operator " +
-            "has scanned a page and you are looking at that scan.\n\n" +
-            "Answer about the page in front of you. If something is not on the page, say that " +
-            "rather than filling it in from what documents of that kind usually say -- this is " +
-            "used on identity papers, bills and forms where an invented field is worse than a " +
-            "missing one.\n\n" +
-            "Reply in the language the operator writes in. Many of these documents are Bengali, " +
-            "English, or both on one page; keep names, numbers and dates exactly as written.\n\n" +
-            "Write plainly. No headings unless the page has them, no preamble about what you are " +
-            "about to do.";
+            "You are the assistant inside NextScan Studio, a scanner application used in a print " +
+            "and copy shop. The operator scans identity papers, bills, forms and certificates, in " +
+            "Bengali, English, or both on one page.\n\n" +
+            "When a scan is attached, answer about that page. If something is not on it, say so " +
+            "rather than filling it in from what documents of that kind usually say -- an " +
+            "invented field on an identity paper is worse than a missing one.\n\n" +
+            "When no scan is attached, simply answer the question.\n\n" +
+            "Reply in the language the operator writes in, and keep names, numbers and dates " +
+            "exactly as they are written. Write plainly: no headings unless the page has them, " +
+            "and no preamble about what you are about to do.";
 
         // =====================================================================
         // Build
@@ -197,8 +222,13 @@ namespace NextScan.App
 
             _fresh = new NsIconButton { Icon = NsIcon.NewChat };
             _fresh.Click += delegate { Reset(); };
-            _tips.SetToolTip(_fresh, "Start again");
+            _tips.SetToolTip(_fresh, "New conversation");
             _bar.Controls.Add(_fresh);
+
+            _past = new NsIconButton { Icon = NsIcon.History };
+            _past.Click += delegate { OpenHistory(); };
+            _tips.SetToolTip(_past, "Earlier conversations");
+            _bar.Controls.Add(_past);
         }
 
         void BuildTranscript()
@@ -207,12 +237,17 @@ namespace NextScan.App
             Controls.Add(_scroll);
 
             // The bubbles go in a column inside the scrolling panel rather than
-            // in the panel itself. Setting a child's bounds directly on an
-            // AutoScroll panel places it relative to the scrolled origin, so
-            // every re-layout while scrolled -- which is every token that
-            // arrives -- would walk the transcript up the window.
+            // in the panel itself, so a re-layout -- which is every token that
+            // arrives -- moves one control instead of all of them. The column
+            // is placed at the scrolled origin, never at (0, 0); see
+            // LayoutTranscript.
             _column = new Panel { BackColor = Theme.Surface, Location = new Point(0, 0) };
             _scroll.Controls.Add(_column);
+
+            // A wheel over the gaps needs nothing: the column does not handle
+            // it, so it climbs to the scrolling panel, which does. Only the text
+            // of a turn eats it, and the bubble hands that on (OnTranscriptWheel).
+            // Handling it here as well scrolled twice for every notch.
         }
 
         /// <summary>
@@ -232,9 +267,20 @@ namespace NextScan.App
                 NsIcon.Draw(g, NsIcon.Assist, new RectangleF(_welcome.Width / 2f - 16, top, 32, 32),
                             Theme.Mix(Theme.TextFaint, Theme.Accent, 0.7));
 
+                bool page = HasPage();
                 using (Font f = Theme.UiSemi(12f))
-                    TextRenderer.DrawText(g, "About this page", f,
+                    TextRenderer.DrawText(g, page ? "About this page" : "Ask anything", f,
                         new Rectangle(12, top + 40, Math.Max(1, _welcome.Width - 24), 26), Theme.Text,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
+
+                if (page) return;
+
+                // The five below are all about a page, and there is not one. The
+                // box still works, so the panel says which half is available
+                // rather than greying the whole thing out.
+                using (Font f = Theme.Ui(8.25f))
+                    TextRenderer.DrawText(g, "Scan a page to ask about it", f,
+                        new Rectangle(12, top + 62, Math.Max(1, _welcome.Width - 24), 20), Theme.TextFaint,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
             };
             Controls.Add(_welcome);
@@ -244,7 +290,8 @@ namespace NextScan.App
                 Suggestion which = suggestion;
                 NsPill chip = new NsPill { Text = suggestion.Title, Kind = PillKind.Normal, Radius = 17 };
                 chip.Font = Theme.Ui(8.75f);
-                chip.Click += delegate { Send(which.Title, which.Ask); };
+                chip.Click += delegate { Send(which.Title, which.Ask, which.NeedsPage); };
+                _tips.SetToolTip(chip, "Needs a scanned page");
                 _welcome.Controls.Add(chip);
                 _chips.Add(chip);
             }
@@ -256,27 +303,49 @@ namespace NextScan.App
             return Math.Max(14, (_welcome.Height - block) / 2 - 10);
         }
 
+        /// <summary>
+        /// Is there a page to talk about.
+        ///
+        /// One place, because there were two and they disagreed: the empty state
+        /// asked whether the source returned anything and said "About this
+        /// page", while the box asked whether the note was non-empty and said
+        /// "Ask anything", in the same panel at the same moment.
+        /// </summary>
+        bool HasPage()
+        {
+            RawImage page = PageSource == null ? null : PageSource();
+            return page != null && page.IsValid;
+        }
+
         void BuildComposer()
         {
-            _composer = new NsComposer { Placeholder = "Ask about this page" };
-            _composer.Submit += delegate { Send(_composer.Text, null); };
+            _composer = new NsComposer { Placeholder = "Ask anything" };
+            _composer.Submit += delegate { Send(_composer.Text, null, false); };
             _composer.Typed += delegate { UpdateSend(); };
             _composer.HeightWanted += delegate { LayoutAll(); };
             _composer.FootChanged += delegate { LayoutComposer(); };
             Controls.Add(_composer);
 
-            // Model and effort, beside the send button. This is the one control
-            // every real chat interface agrees on the position of.
-            _modelButton = new NsPill { Kind = PillKind.Quiet, Radius = 11 };
+            // Model and effort, beside the send button. This is the one place
+            // every real chat interface agrees on. They are two buttons with a
+            // mark each rather than one: they are two different questions, and
+            // a single menu carrying both made the answer to either of them
+            // three clicks deep.
+            _modelButton = new NsPill { Kind = PillKind.Quiet, Radius = 11, Icon = NsIcon.Model };
             _modelButton.Font = Theme.Ui(8f);
             _modelButton.Click += delegate { OpenModelMenu(); };
             _composer.Controls.Add(_modelButton);
+
+            _effortButton = new NsPill { Kind = PillKind.Quiet, Radius = 11, Icon = NsIcon.Effort };
+            _effortButton.Font = Theme.Ui(8f);
+            _effortButton.Click += delegate { OpenEffortMenu(); };
+            _composer.Controls.Add(_effortButton);
 
             _send = new NsIconButton { Icon = NsIcon.Send, Circle = true, Raised = true };
             _send.Click += delegate
             {
                 if (_busy) Stop();
-                else Send(_composer.Text, null);
+                else Send(_composer.Text, null, false);
             };
             _tips.SetToolTip(_send, "Send  (Enter)");
             _composer.Controls.Add(_send);
@@ -342,14 +411,20 @@ namespace NextScan.App
         // =====================================================================
 
         /// <summary>
-        /// Providers, their models, and the effort, in one menu.
+        /// Which models the panel may offer, as chosen in Settings. Empty until
+        /// the operator has said, and then it is exactly what they said.
+        /// </summary>
+        public AiAllowed Allowed = AiAllowed.Read("");
+
+        /// <summary>
+        /// The models, by provider.
         ///
-        /// The model list is the provider's own, fetched with the operator's key
-        /// and never written down here: what an account can reach depends on the
+        /// The list is the provider's own, fetched with the operator's key and
+        /// never written down here: what an account can reach depends on the
         /// account, and a list in our source would be wrong by the next release
         /// with nothing to say so. The first time this opens for a key it has
-        /// nothing to show, so it says it is asking and has them by the time the
-        /// menu is opened again.
+        /// nothing to show, so it says it is asking and has them by the time it
+        /// is opened again.
         /// </summary>
         void OpenModelMenu()
         {
@@ -368,15 +443,16 @@ namespace NextScan.App
                 anyKey = true;
                 menu.Header(provider.Info.Name, "");
 
-                IList<AiModel> models = AiModels.Cached(provider);
-                if (models == null)
+                if (AiModels.Cached(provider) == null)
                 {
                     menu.Note("asking " + provider.Info.Name + "...");
                     anyMissing = true;
                     BeginFetch(provider);
                     continue;
                 }
-                if (models.Count == 0) { menu.Note("no models on this key"); continue; }
+
+                IList<AiModel> models = AiModels.Offered(provider, Allowed);
+                if (models.Count == 0) { menu.Note("none chosen in Settings"); continue; }
 
                 foreach (AiModel model in models)
                 {
@@ -393,27 +469,36 @@ namespace NextScan.App
                 menu.Note("No key has been set.");
                 menu.Note("Settings, under Assistant.");
             }
-            else
-            {
-                menu.Rule();
-                menu.Header("Effort", "");
-
-                IAiProvider now = Provider();
-                foreach (ThinkingLevel level in new[] { ThinkingLevel.Low, ThinkingLevel.Medium,
-                                                        ThinkingLevel.High, ThinkingLevel.Max })
-                {
-                    ThinkingLevel which = level;
-                    string note = level > now.Info.Ceiling
-                        ? "uses " + now.Info.Ceiling.ToString().ToLowerInvariant()
-                        : "";
-                    menu.Item(which.ToString(), note, which == _thinking, new Chosen { Effort = which });
-                }
-            }
 
             menu.Picked += delegate (object tag) { Took(tag); };
             menu.Show(_modelButton, Math.Max(210, Width - 28));
 
             if (anyMissing) Say("Asking the provider which models this key can reach");
+        }
+
+        /// <summary>
+        /// How hard it thinks. Its own button and its own menu, because it is
+        /// its own question: the model is chosen once for a way of working, the
+        /// effort changes with what is being asked.
+        /// </summary>
+        void OpenEffortMenu()
+        {
+            NsChoiceMenu menu = new NsChoiceMenu();
+            IAiProvider now = Provider();
+
+            menu.Header("Effort", now.Info.Name);
+            foreach (ThinkingLevel level in new[] { ThinkingLevel.Low, ThinkingLevel.Medium,
+                                                    ThinkingLevel.High, ThinkingLevel.Max })
+            {
+                ThinkingLevel which = level;
+                string note = level > now.Info.Ceiling
+                    ? "uses " + now.Info.Ceiling.ToString().ToLowerInvariant()
+                    : "";
+                menu.Item(which.ToString(), note, which == _thinking, new Chosen { Effort = which });
+            }
+
+            menu.Picked += delegate (object tag) { Took(tag); };
+            menu.Show(_effortButton, 190);
         }
 
         class Chosen
@@ -501,26 +586,54 @@ namespace NextScan.App
 
             if (!provider.Ready)
             {
-                _modelButton.Text = "Add a key  ⌄";
+                _modelButton.Text = "Add a key";
                 _tips.SetToolTip(_modelButton, "Settings, under Assistant, takes the key");
             }
             else if (string.IsNullOrEmpty(_model))
             {
-                _modelButton.Text = provider.Info.Name + "  ⌄";
+                _modelButton.Text = provider.Info.Name;
                 _tips.SetToolTip(_modelButton, "Choose a model");
             }
             else
             {
-                _modelButton.Text = AiModels.NameOf(provider, _model) + "   " +
-                                    _thinking.ToString().ToLowerInvariant() + "  ⌄";
-                string note = provider.Info.Describe(_thinking);
-                _tips.SetToolTip(_modelButton, note.Length > 0
-                    ? provider.Info.Name + " — " + note
-                    : provider.Info.Name + " — model and effort");
+                _modelButton.Text = Short(AiModels.NameOf(provider, _model));
+                _tips.SetToolTip(_modelButton, provider.Info.Name + " — " +
+                                               AiModels.NameOf(provider, _model));
             }
+
+            _effortButton.Text = _thinking.ToString().ToLowerInvariant();
+            string note = provider.Info.Describe(_thinking);
+            _tips.SetToolTip(_effortButton, note.Length > 0 ? note : "How hard it thinks");
+            _effortButton.ForeColor = note.Length > 0 ? Theme.Warn : Theme.Text;
 
             LayoutComposer();
             UpdateChip();
+        }
+
+        /// <summary>
+        /// A model name that fits on a button in a panel this narrow.
+        ///
+        /// The provider's display names run to "Gemini 3.1 Pro Preview", and the
+        /// first two words are the ones that tell them apart.
+        /// </summary>
+        static string Short(string name)
+        {
+            if (name.Length <= 16) return name;
+
+            string[] words = name.Split(' ');
+            if (words.Length <= 2) return name;
+
+            // Drop the maker's name from the front when there is one: the
+            // provider is already said by the menu this came from.
+            int from = (words[0].Length > 3 && char.IsLetter(words[0][0])) ? 1 : 0;
+
+            // Three words, not two: two made "3.1 Flash" of both Flash and
+            // Flash Lite, and the button could not say which one was chosen.
+            // "Preview" goes first, since the menu says it in full.
+            var kept = new List<string>();
+            for (int i = from; i < words.Length && kept.Count < 3; i++)
+                if (!words[i].Equals("Preview", StringComparison.OrdinalIgnoreCase)) kept.Add(words[i]);
+            return kept.Count == 0 ? name : string.Join(" ", kept.ToArray());
         }
 
         // =====================================================================
@@ -532,12 +645,23 @@ namespace NextScan.App
         /// from a suggestion, and null when the operator typed it, in which case
         /// <paramref name="shown"/> is both.
         /// </summary>
-        void Send(string shown, string ask)
+        void Send(string shown, string ask) { Send(shown, ask, false); }
+
+        void Send(string shown, string ask, bool needsPage)
         {
             if (_busy) return;
 
             string text = (ask ?? shown ?? "").Trim();
             if (text.Length == 0) return;
+
+            // Asked about a page, with no page. Say so rather than paying for an
+            // answer that can only be "there is nothing here".
+            if (needsPage && !_pageSent && !HasPage())
+            {
+                AddNote("That one is about a scanned page, and there is none yet. " +
+                        "Preview or scan something first.", true);
+                return;
+            }
 
             IAiProvider provider = Provider();
             if (!provider.Ready)
@@ -550,22 +674,18 @@ namespace NextScan.App
             RawImage page = PageSource == null ? null : PageSource();
             byte[] image = null;
 
-            // The page rides on the first turn only. Sending it again every turn
-            // would be the single largest cost in this panel, and the model
-            // already has it in the conversation.
-            if (_history.Count == 0)
+            // The page rides on one turn and is never sent again: it is the
+            // largest cost in this panel, and the model already has it in the
+            // conversation afterwards.
+            if (!_pageSent && page != null)
             {
-                if (page == null)
-                {
-                    AddNote("There is no page to look at yet. Preview or scan something first.", true);
-                    return;
-                }
                 image = Encode(page);
                 if (image == null)
                 {
                     AddNote("That page could not be prepared for sending.", true);
                     return;
                 }
+                _pageSent = true;
                 _pageFor = PageNote == null ? "" : PageNote();
             }
 
@@ -574,8 +694,11 @@ namespace NextScan.App
             AddBubble(shown ?? text, true, false);
 
             AiMessage turn = AiMessage.FromUser(text);
-            turn.Image = image;
-            turn.ImageMediaType = "image/jpeg";
+            if (image != null)
+            {
+                turn.Image = image;
+                turn.ImageMediaType = "image/jpeg";
+            }
             _history.Add(turn);
 
             Ask(provider);
@@ -665,7 +788,9 @@ namespace NextScan.App
                 if (_history.Count > 0) _history.RemoveAt(_history.Count - 1);
                 _live = null;
                 LayoutTranscript(true);
-                Say("");
+                // Not cleared: the status bar says what went wrong, in one line.
+                int cut = trouble.IndexOf('\n');
+                Say(cut > 0 ? trouble.Substring(0, cut) : trouble);
                 return;
             }
 
@@ -678,6 +803,101 @@ namespace NextScan.App
             _live = null;
 
             Count(reply);
+            Keep();
+            LayoutTranscript(true);
+            Say("");
+        }
+
+        /// <summary>
+        /// Writes the conversation out, after every completed turn.
+        ///
+        /// Not when it ends: a conversation does not end, the window closes, and
+        /// a history written at the end is a history that is never written.
+        /// </summary>
+        void Keep()
+        {
+            if (_chatId.Length == 0) _chatId = AiHistory.NewId();
+            AiHistory.Save(_chatId, _history, Provider().Info.Name,
+                           AiModels.NameOf(Provider(), _model), _pageFor);
+        }
+
+        /// <summary>
+        /// Earlier conversations, newest first.
+        ///
+        /// What is reopened is what was said, not what was looked at: the page
+        /// is not kept, because a folder of scanned identity papers left on a
+        /// shop machine is a different thing from a folder of text about them.
+        /// The panel says so when one is opened.
+        /// </summary>
+        void OpenHistory()
+        {
+            IList<AiChat> recent = AiHistory.Recent(30);
+            NsChoiceMenu menu = new NsChoiceMenu();
+
+            if (recent.Count == 0) menu.Note("Nothing yet.");
+            else
+            {
+                menu.Header("Earlier", recent.Count + "");
+                foreach (AiChat chat in recent)
+                {
+                    AiChat which = chat;
+                    menu.Item(chat.Title, When(chat.When), chat.Id == _chatId, which.Id);
+                }
+                menu.Rule();
+                menu.Item("Forget all of them", "", false, ForgetAll);
+            }
+
+            menu.Picked += delegate (object tag) { Reopen(tag); };
+            menu.Show(_past, Math.Max(240, Width - 28));
+        }
+
+        static readonly object ForgetAll = new object();
+
+        static string When(DateTime when)
+        {
+            if (when == default(DateTime)) return "";
+            TimeSpan ago = DateTime.Now - when;
+            if (ago.TotalHours < 1) return Math.Max(1, (int)ago.TotalMinutes) + " min";
+            if (ago.TotalHours < 24) return (int)ago.TotalHours + " h";
+            if (ago.TotalDays < 7) return (int)ago.TotalDays + " d";
+            return when.ToString("d MMM");
+        }
+
+        void Reopen(object tag)
+        {
+            if (tag == ForgetAll)
+            {
+                int gone = AiHistory.ForgetAll();
+                _chatId = "";
+                Say(gone + (gone == 1 ? " conversation forgotten" : " conversations forgotten"));
+                return;
+            }
+
+            string id = tag as string;
+            if (id == null) return;
+
+            AiChat chat = AiHistory.Load(id);
+            if (chat == null) { Say("That conversation could not be read."); return; }
+
+            Reset();
+            _chatId = chat.Id;
+            _pageFor = chat.Page;
+
+            // Marked as sent so the page now on the canvas is not quietly
+            // attached to a conversation that was about a different one.
+            _pageSent = chat.Page.Length > 0;
+
+            foreach (AiMessage message in chat.Messages)
+            {
+                _history.Add(message);
+                AddBubble(message.Text, message.Role == AiRole.User, false);
+            }
+
+            AddNote("Reopened" + (chat.Page.Length > 0 ? " — this was about " + chat.Page + ". " : ". ") +
+                    "The page itself is not kept, so anything asked now is answered from what is " +
+                    "written above.", false);
+
+            UpdateChip();
             LayoutTranscript(true);
             Say("");
         }
@@ -693,8 +913,9 @@ namespace NextScan.App
             _busy = on;
             _send.Icon = on ? NsIcon.Stop : NsIcon.Send;
             _tips.SetToolTip(_send, on ? "Stop" : "Send  (Enter)");
-            foreach (NsPill chip in _chips) chip.Enabled = !on;
             _modelButton.Enabled = !on;
+            _effortButton.Enabled = !on;
+            UpdateChip();
             UpdateSend();
         }
 
@@ -722,7 +943,31 @@ namespace NextScan.App
             if (inner is OperationCanceledException) return "Stopped.";
 
             AiTrouble known = inner as AiTrouble;
-            return known != null ? known.Message : inner.GetType().Name + ": " + inner.Message;
+            if (known != null) return known.Message;
+
+            string said = inner.Message ?? "";
+            string hint = Hint(said);
+            if (said.Length > 400) said = said.Substring(0, 400).TrimEnd() + "…";
+            return hint.Length > 0 ? hint + "\n\n" + said : inner.GetType().Name + ": " + said;
+        }
+
+        /// <summary>
+        /// What to do about the two failures that are about the model rather
+        /// than the question. The newest model is not always one a key may use:
+        /// Gemini 3.1 Pro answered a free key with a quota of zero, in a page of
+        /// JSON that did not say the other models would have worked.
+        /// </summary>
+        static string Hint(string said)
+        {
+            string s = said.ToLowerInvariant();
+            if (s.Contains("quota") || s.Contains("resource_exhausted") || s.Contains("rate limit") ||
+                s.Contains("rate_limit") || s.Contains("429") || s.Contains("too many requests"))
+                return "This model has no quota left on this key, or was asked too often. " +
+                       "Choose another from the model button, or try again in a minute.";
+            if (s.Contains("not_found") || s.Contains("404") || s.Contains("is not found") ||
+                s.Contains("not supported") || s.Contains("does not exist") || s.Contains("no longer available"))
+                return "This model is not available to this key. Choose another from the model button.";
+            return "";
         }
 
         // =====================================================================
@@ -782,6 +1027,7 @@ namespace NextScan.App
                 NsBubble which = bubble;
                 bubble.CopyWanted += delegate { CopyOut(which.Text); };
             }
+            bubble.Wheeled += OnTranscriptWheel;
             _bubbles.Add(bubble);
             _column.Controls.Add(bubble);
 
@@ -805,6 +1051,27 @@ namespace NextScan.App
             catch (Exception ex) { Say("Could not copy: " + ex.Message); }
         }
 
+        void OnTranscriptWheel(object sender, MouseEventArgs e)
+        {
+            // As far as the panel itself moves for a notch over a gap, so the
+            // transcript does not change speed as the pointer crosses a turn.
+            Scroll_(-e.Delta);
+        }
+
+        void Scroll_(int by)
+        {
+            if (_scroll == null || _column == null) return;
+
+            int most = Math.Max(0, _column.Height - _scroll.ClientSize.Height);
+            if (most <= 0) return;
+
+            // AutoScrollPosition reads back negative and is set positive. It is
+            // the one WinForms property that does not round-trip, and reading it
+            // as given is how a transcript scrolls the wrong way.
+            int at = Math.Max(0, Math.Min(most, -_scroll.AutoScrollPosition.Y + by));
+            _scroll.AutoScrollPosition = new Point(0, at);
+        }
+
         void ShowTranscript(bool on)
         {
             _scroll.Visible = on;
@@ -818,6 +1085,8 @@ namespace NextScan.App
 
             _history.Clear();
             _pageFor = "";
+            _pageSent = false;
+            _chatId = "";
             _live = null;
             _streamed.Length = 0;
             _inTotal = _outTotal = _cachedTotal = 0;
@@ -908,6 +1177,24 @@ namespace NextScan.App
             LayoutAll();
         }
 
+        /// <summary>
+        /// Opening the panel is the operator asking for it, so this is the
+        /// moment to find out what their key can reach.
+        ///
+        /// It is a list, not a question: no provider bills for it, and nothing
+        /// is generated. The rule that nothing is sent unasked is about spending
+        /// the shop's money, and this spends none -- while not doing it leaves
+        /// the button saying "Gemini" when it could say which Gemini.
+        /// </summary>
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (!Visible) return;
+
+            IAiProvider provider = Provider();
+            if (provider.Ready && AiModels.Cached(provider) == null) BeginFetch(provider);
+        }
+
         const int Pad = 14;
         const int BarHeight = 32;
         const int MeterHeight = 16;
@@ -918,6 +1205,7 @@ namespace NextScan.App
 
             _bar.SetBounds(0, 0, Width, BarHeight);
             _fresh.SetBounds(Width - Pad - 26, 4, 26, 24);
+            _past.SetBounds(Width - Pad - 58, 4, 26, 24);
 
             int bottom = Height - 8;
 
@@ -950,9 +1238,13 @@ namespace NextScan.App
 
             const int round = 30;
             _send.SetBounds(right - round, foot - round, round, round);
-            right -= round + 6;
+            right -= round + 4;
 
-            int modelWidth = Math.Min(Math.Max(90, TextWidth(_modelButton) + 18), Math.Max(60, right - 14));
+            int effortWidth = Math.Min(TextWidth(_effortButton) + 34, Math.Max(44, right - 60));
+            _effortButton.SetBounds(right - effortWidth, foot - 28, effortWidth, 26);
+            right -= effortWidth + 2;
+
+            int modelWidth = Math.Min(TextWidth(_modelButton) + 34, Math.Max(52, right - 12));
             _modelButton.SetBounds(right - modelWidth, foot - 28, modelWidth, 26);
         }
 
@@ -968,13 +1260,23 @@ namespace NextScan.App
 
             string page = PageNote == null ? "" : (PageNote() ?? "");
 
-            // The conversation is about the page it started on. Saying so is the
+            // Once the scan has gone, the conversation is about that page even
+            // if a different one is now on the canvas. Saying so is the
             // difference between a stale answer and a wrong one.
-            bool moved = _history.Count > 0 && _pageFor.Length > 0 && _pageFor != page;
+            if (_pageSent)
+                _composer.FootNote = _pageFor.Length > 0 && _pageFor != page
+                    ? "about " + _pageFor
+                    : _pageFor;
+            else
+                _composer.FootNote = page.Length > 0 ? page : "";
 
-            _composer.FootNote = moved ? "about " + _pageFor
-                               : page.Length > 0 ? page
-                               : "nothing scanned yet";
+            bool has = _pageSent || HasPage();
+            foreach (NsPill chip in _chips) chip.Enabled = !_busy;
+
+            // The box says what it will do with what you type, and that changes
+            // when there is a page to attach to it.
+            _composer.Placeholder = has ? "Ask about this page" : "Ask anything";
+            if (_welcome != null) _welcome.Invalidate();
         }
 
         void LayoutWelcome()
@@ -1000,7 +1302,13 @@ namespace NextScan.App
         {
             if (_scroll == null) return;
 
-            int inner = Math.Max(80, _scroll.ClientSize.Width - Pad * 2);
+            // The scroll bar's width is kept back whether or not it is showing.
+            // Sized to the client area instead, the column was as wide as the
+            // panel until the bar appeared, then wider than what was left, which
+            // brought a horizontal bar, which took height, which moved the
+            // vertical one again.
+            int width = Math.Max(100, _scroll.Width - SystemInformation.VerticalScrollBarWidth);
+            int inner = Math.Max(80, width - Pad * 2);
 
             int y = 10;
             _column.SuspendLayout();
@@ -1011,11 +1319,17 @@ namespace NextScan.App
                 bubble.SetBounds(Pad, y, inner, h);
                 y += h + 8;
             }
-            _column.SetBounds(0, 0, _scroll.ClientSize.Width, y + 4);
+
+            // A child of a scrolled panel is placed in what is on screen, not in
+            // the whole of it. Put back at (0, 0) after the operator had scrolled,
+            // the column moved down by however far that was, and a reopened
+            // conversation was drawn below an empty screen of its own height.
+            Point shown = _scroll.AutoScrollPosition;
+            _column.SetBounds(shown.X, shown.Y, width, y + 4);
             _column.ResumeLayout();
 
             if (toEnd && _bubbles.Count > 0)
-                _scroll.ScrollControlIntoView(_bubbles[_bubbles.Count - 1]);
+                _scroll.AutoScrollPosition = new Point(0, Math.Max(0, _column.Height - _scroll.ClientSize.Height));
         }
 
         /// <summary>Re-reads the palette after a light/dark switch.</summary>

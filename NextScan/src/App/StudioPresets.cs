@@ -42,7 +42,7 @@ namespace NextScan.App
             // account, not about how identity cards are scanned. A preset that
             // carried it would point somebody else's machine at a provider they
             // have no key for, and reset it every time they loaded a job.
-            "AiProvider", "AiModel", "AiThinking"
+            "AiProvider", "AiModel", "AiThinking", "AiAllowedModels"
         };
 
         public static string Folder

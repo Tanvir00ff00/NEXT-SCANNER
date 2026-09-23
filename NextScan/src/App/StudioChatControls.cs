@@ -278,7 +278,7 @@ namespace NextScan.App
             }
 
             int room = until - 22;
-            if (room < 40) return;
+            if (room < 74) return;
 
             using (Font f = Theme.Ui(7.75f))
                 TextRenderer.DrawText(g, _footNote, f,
@@ -354,11 +354,19 @@ namespace NextScan.App
             Screen screen = Screen.FromControl(anchor);
             int height = Math.Min(wanted, Math.Max(120, screen.WorkingArea.Height - 120));
 
-            // Above the button by default. This hangs off a composer at the
-            // bottom of a panel, so below is almost always off the screen.
-            Point at = anchor.PointToScreen(new Point(0, -height - 6));
-            if (at.Y < screen.WorkingArea.Top)
-                at = anchor.PointToScreen(new Point(0, anchor.Height + 6));
+            // On whichever side of the button has the room. The composer's
+            // buttons sit at the bottom of the panel and open upwards; the
+            // history button sits at the top and opens downwards. Always above,
+            // the history menu was pushed against the top of the screen and
+            // covered the panel's own title.
+            Point top = anchor.PointToScreen(Point.Empty);
+            int below = screen.WorkingArea.Bottom - (top.Y + anchor.Height);
+            int above = top.Y - screen.WorkingArea.Top;
+            Point at = below >= height + 6 || below > above
+                ? anchor.PointToScreen(new Point(0, anchor.Height + 6))
+                : anchor.PointToScreen(new Point(0, -height - 6));
+            if (at.Y < screen.WorkingArea.Top) at.Y = screen.WorkingArea.Top;
+            if (at.Y + height > screen.WorkingArea.Bottom) at.Y = screen.WorkingArea.Bottom - height;
 
             int right = at.X + width;
             if (right > screen.WorkingArea.Right - 8) at.X -= right - (screen.WorkingArea.Right - 8);
@@ -525,17 +533,208 @@ namespace NextScan.App
                                                       new PointF(18.5f, y + h / 2f + 3.5f),
                                                       new PointF(24, y + h / 2f - 4f) });
 
-                using (Font f = row.Ticked ? Theme.UiSemi(8.75f) : Theme.Ui(8.75f))
-                    TextRenderer.DrawText(g, row.Text, f, new Rectangle(31, y, Width - 44, h),
-                        row.Ticked ? Theme.Accent : colour,
-                        TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-
+                // The note is measured first and the text given what is left,
+                // or a long title runs underneath it and both are unreadable.
+                int noteWidth = 0;
                 if (row.Note.Length > 0)
                     using (Font f = Theme.Ui(7.5f))
+                    {
+                        noteWidth = TextRenderer.MeasureText(g, row.Note, f, Size.Empty,
+                                                             TextFormatFlags.NoPrefix).Width + 10;
                         TextRenderer.DrawText(g, row.Note, f, new Rectangle(31, y, Width - 44, h),
                             Theme.TextFaint, TextFormatFlags.VerticalCenter | TextFormatFlags.Right |
                             TextFormatFlags.NoPrefix);
+                    }
+
+                using (Font f = row.Ticked ? Theme.UiSemi(8.75f) : Theme.Ui(8.75f))
+                    TextRenderer.DrawText(g, row.Text, f, new Rectangle(31, y, Math.Max(20, Width - 44 - noteWidth), h),
+                        row.Ticked ? Theme.Accent : colour,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             }
+        }
+    }
+
+    // =========================================================================
+    // Check list
+    // =========================================================================
+    /// <summary>
+    /// A fixed-height scrolling list of rows that can be ticked, with headings.
+    ///
+    /// For choosing which of a provider's models the panel may offer. A real
+    /// account lists dozens, so a toggle per row would be a settings page
+    /// several screens tall; this is one box the height of a paragraph that
+    /// scrolls, which is how every "pick several of these" control works.
+    /// </summary>
+    public class NsCheckList : NsBase
+    {
+        public class Row
+        {
+            public string Text = "";
+            public string Note = "";
+            public bool Header;
+            public bool Ticked;
+            public bool Faint;
+            public object Tag;
+            public int Height { get { return Header ? 24 : 26; } }
+        }
+
+        readonly List<Row> _rows = new List<Row>();
+        int _hot = -1;
+        int _scroll;
+
+        /// <summary>A row was ticked or unticked. The row carries its own state.</summary>
+        public event EventHandler<EventArgs> Changed;
+
+        public NsCheckList()
+        {
+            Size = new Size(260, 180);
+            Font = Theme.Ui(8.5f);
+            Cursor = Cursors.Hand;
+            SetStyle(ControlStyles.Selectable, false);
+            TabStop = false;
+        }
+
+        public IList<Row> Rows { get { return _rows; } }
+
+        public void Clear() { _rows.Clear(); _scroll = 0; Invalidate(); }
+
+        public void AddHeader(string text, string note)
+        {
+            _rows.Add(new Row { Text = text, Note = note ?? "", Header = true });
+            Invalidate();
+        }
+
+        public void Add(string text, string note, bool ticked, bool faint, object tag)
+        {
+            _rows.Add(new Row { Text = text, Note = note ?? "", Ticked = ticked, Faint = faint, Tag = tag });
+            Invalidate();
+        }
+
+        int Total()
+        {
+            int n = 8;
+            foreach (Row row in _rows) n += row.Height;
+            return n;
+        }
+
+        int RowAt(int y)
+        {
+            int at = 4 - _scroll;
+            for (int i = 0; i < _rows.Count; i++)
+            {
+                if (y >= at && y < at + _rows[i].Height) return _rows[i].Header ? -1 : i;
+                at += _rows[i].Height;
+            }
+            return -1;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int i = RowAt(e.Y);
+            if (i != _hot) { _hot = i; Invalidate(); }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e) { _hot = -1; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            int i = RowAt(e.Y);
+            if (i >= 0)
+            {
+                _rows[i].Ticked = !_rows[i].Ticked;
+                Invalidate();
+                if (Changed != null) Changed(this, EventArgs.Empty);
+            }
+            base.OnMouseDown(e);
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            int most = Math.Max(0, Total() - Height);
+            if (most <= 0) return;
+            _scroll = Math.Max(0, Math.Min(most, _scroll + (e.Delta > 0 ? -40 : 40)));
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            ClearBack(g);
+            Theme.Smooth(g);
+
+            Rectangle r = new Rectangle(0, 0, Width - 1, Height - 1);
+            if (r.Width <= 2 || r.Height <= 2) return;
+
+            using (GraphicsPath path = Theme.Round(r, 8))
+            {
+                using (SolidBrush b = new SolidBrush(Theme.Field)) g.FillPath(b, path);
+                using (Pen p = new Pen(Theme.Line, 1f)) g.DrawPath(p, path);
+            }
+
+            Region clip = g.Clip;
+            g.SetClip(new Rectangle(1, 1, Width - 2, Height - 2), CombineMode.Intersect);
+
+            int y = 4 - _scroll;
+            for (int i = 0; i < _rows.Count; i++)
+            {
+                Row row = _rows[i];
+                if (y + row.Height > 0 && y < Height) PaintRow(g, row, i, y);
+                y += row.Height;
+            }
+
+            g.Clip = clip;
+
+            // The same hairline the inspector uses, for the same reason: it is
+            // never dragged, it only has to say how much is below.
+            int total = Total();
+            if (total <= Height) return;
+            int thumb = Math.Max(24, Height * Height / total);
+            int travel = Math.Max(1, total - Height);
+            int top = (Height - thumb) * _scroll / travel;
+            using (SolidBrush b = new SolidBrush(Theme.Line))
+                g.FillRectangle(b, Width - 6, top + 2, 3, thumb - 4);
+        }
+
+        void PaintRow(Graphics g, Row row, int index, int y)
+        {
+            if (row.Header)
+            {
+                using (Font f = Theme.UiSemi(7.25f))
+                    TextRenderer.DrawText(g, row.Text.ToUpperInvariant(), f,
+                        new Rectangle(10, y, Width - 20, row.Height), Theme.TextFaint,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                if (row.Note.Length > 0)
+                    using (Font f = Theme.Ui(7.25f))
+                        TextRenderer.DrawText(g, row.Note, f, new Rectangle(10, y, Width - 22, row.Height),
+                            Theme.TextFaint, TextFormatFlags.VerticalCenter | TextFormatFlags.Right |
+                            TextFormatFlags.NoPrefix);
+                return;
+            }
+
+            if (index == _hot)
+                using (GraphicsPath path = Theme.Round(new Rectangle(4, y + 1, Width - 12, row.Height - 2), 5))
+                using (SolidBrush b = new SolidBrush(Theme.Hover))
+                    g.FillPath(b, path);
+
+            Rectangle box = new Rectangle(10, y + (row.Height - 14) / 2, 14, 14);
+            using (GraphicsPath path = Theme.Round(box, 4))
+            {
+                if (row.Ticked)
+                {
+                    using (SolidBrush b = new SolidBrush(Theme.Accent)) g.FillPath(b, path);
+                    using (Pen p = new Pen(Theme.OnAccent, 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                        g.DrawLines(p, new PointF[] { new PointF(box.X + 3.2f, box.Y + 7f),
+                                                      new PointF(box.X + 6f, box.Y + 9.8f),
+                                                      new PointF(box.X + 10.8f, box.Y + 4.2f) });
+                }
+                else using (Pen p = new Pen(Theme.Line, 1.2f)) g.DrawPath(p, path);
+            }
+
+            using (Font f = Font)
+                TextRenderer.DrawText(g, row.Text, f, new Rectangle(31, y, Width - 44, row.Height),
+                    row.Faint ? Theme.TextFaint : Theme.Text,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
     }
 }

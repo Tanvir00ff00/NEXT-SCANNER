@@ -750,13 +750,22 @@ namespace NextScan.App
                 Graphics g = e.Graphics;
                 Theme.Smooth(g);
                 g.Clear(Theme.Surface);
+                int titleWidth;
                 using (Font f = Theme.UiSemi(10.5f))
+                {
                     TextRenderer.DrawText(g, SectionNames[_activeSection], f,
                         new Rectangle(Dx, 0, Math.Max(1, _inspHead.Width - Dx - 60), _inspHead.Height),
                         Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                    titleWidth = TextRenderer.MeasureText(g, SectionNames[_activeSection], f).Width;
+                }
+
+                // The note gets what the title leaves. Capture's runs to paper,
+                // resolution, colour and detection, and given the whole width it
+                // was drawn straight over the word "Capture".
+                int noteLeft = Dx + titleWidth + 12;
                 using (Font f = Theme.Ui(8f))
                     TextRenderer.DrawText(g, SectionHint(_activeSection), f,
-                        new Rectangle(Dx, 0, Math.Max(1, _inspHead.Width - Dx * 2), _inspHead.Height),
+                        new Rectangle(noteLeft, 0, Math.Max(1, _inspHead.Width - Dx - noteLeft), _inspHead.Height),
                         Theme.TextFaint, TextFormatFlags.VerticalCenter | TextFormatFlags.Right |
                         TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
                 using (Pen pen = new Pen(Theme.LineSoft, 1f))
@@ -840,7 +849,9 @@ namespace NextScan.App
                 _aiPanel = new StudioAiPanel { Visible = false };
                 _aiPanel.PageSource = delegate { return PageForAssistant(); };
                 _aiPanel.PageNote = delegate { return AssistantPageNote(); };
-                _aiPanel.Status = delegate (string text) { if (text.Length > 0) SetStatus(text); };
+                // An empty message means the panel's last one is over. Ignored,
+                // "Asking Gemini…" stayed in the status bar after the reply.
+                _aiPanel.Status = delegate (string text) { SetStatus(text.Length > 0 ? text : "Ready."); };
                 _aiPanel.ChoiceChanged += delegate
                 {
                     _settings.AiProvider = _aiPanel.ProviderId;
@@ -848,6 +859,7 @@ namespace NextScan.App
                     _settings.AiThinking = _aiPanel.Thinking.ToString();
                 };
 
+                _aiPanel.Allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
                 _aiPanel.ProviderId = _settings.AiProvider;
                 _aiPanel.Model = _settings.AiModel;
                 _aiPanel.Thinking = ThinkingFromSettings();
@@ -2748,13 +2760,184 @@ namespace NextScan.App
                 "or to a preset.", ref y);
             where.ForeColor = Theme.TextFaint;
             where.Size = new Size(Dw, 30);
+            y += 26;
+
+            BuildAssistantModels(ref y);
+        }
+
+        NsCheckList _aiModelList;
+        NsDropdown _aiDefaultModel;
+
+        /// <summary>
+        /// Which models the panel offers, and which of them it starts on.
+        ///
+        /// The lists are the providers' own and can run to dozens -- this
+        /// machine's Gemini key reaches forty-two, most of them for music,
+        /// images or speech. Choosing once here is what keeps the menu on the
+        /// composer down to the handful actually used in the shop.
+        ///
+        /// Nothing fetched is hidden from this list, including the rows our own
+        /// guess thinks are not chat models: those come unticked rather than
+        /// absent, because a guess that removes a row is one the operator cannot
+        /// argue with.
+        /// </summary>
+        void BuildAssistantModels(ref int y)
+        {
+            AddSectionLabel("Models", ref y);
+
+            _aiModelList = new NsCheckList { Location = new Point(Dx, y), Size = new Size(Dw, 190) };
+            _drawerHost.Controls.Add(_aiModelList);
+            y += 196;
+
+            NsPill refresh = new NsPill
+            {
+                Text = "Ask the providers again",
+                Kind = PillKind.Normal,
+                Radius = 7,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 30)
+            };
+            refresh.Click += delegate { RefreshAiModels(true); };
+            _drawerHost.Controls.Add(refresh);
+            y += 38;
+
+            AddFieldLabel("Starts on", ref y);
+            _aiDefaultModel = AddDropdown(new string[0], 0, ref y);
+            _aiDefaultModel.SelectedIndexChanged += delegate { TakeAiDefault(); };
+
+            Label note = AddFieldLabel(
+                "The panel opens on this one. The effort is chosen per question, " +
+                "on the box in the Assist panel.", ref y);
+            note.ForeColor = Theme.TextFaint;
+            note.Size = new Size(Dw, 30);
             y += 24;
 
-            Label pick = AddFieldLabel(
-                "The model and the effort are on the box in the Assist panel.", ref y);
-            pick.ForeColor = Theme.TextFaint;
-            pick.Size = new Size(Dw, 30);
-            y += 22;
+            _aiModelList.Changed += delegate { TakeAiAllowed(); };
+
+            FillAiModelList();
+            RefreshAiModels(false);
+        }
+
+        /// <summary>The ids behind the rows, in the order they were added.</summary>
+        readonly List<string[]> _aiModelRows = new List<string[]>();
+
+        void FillAiModelList()
+        {
+            if (_aiModelList == null) return;
+
+            Ai.AiAllowed allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
+            _aiModelList.Clear();
+            _aiModelRows.Clear();
+
+            var forDefault = new List<string>();
+            var defaultIds = new List<string[]>();
+            int chosen = 0;
+
+            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+            {
+                IList<Ai.AiModel> models = provider.Ready ? Ai.AiModels.Cached(provider) : null;
+
+                if (!provider.Ready) { _aiModelList.AddHeader(provider.Info.Name, "no key"); continue; }
+                if (models == null) { _aiModelList.AddHeader(provider.Info.Name, "asking..."); continue; }
+                if (models.Count == 0) { _aiModelList.AddHeader(provider.Info.Name, "none"); continue; }
+
+                _aiModelList.AddHeader(provider.Info.Name, models.Count + "");
+                bool said = allowed.Any(provider.Info.Id);
+
+                foreach (Ai.AiModel model in models)
+                {
+                    bool on = said ? allowed.Has(provider.Info.Id, model.Id) : model.Likely;
+                    _aiModelList.Add(model.ToString(), "", on, !model.Likely,
+                                     new string[] { provider.Info.Id, model.Id });
+                    _aiModelRows.Add(new string[] { provider.Info.Id, model.Id });
+
+                    if (!on) continue;
+                    if (provider.Info.Id == _settings.AiProvider && model.Id == _settings.AiModel)
+                        chosen = forDefault.Count;
+                    forDefault.Add(provider.Info.Name + " · " + model.ToString());
+                    defaultIds.Add(new string[] { provider.Info.Id, model.Id });
+                }
+            }
+
+            _aiDefaults = defaultIds;
+            if (_aiDefaultModel != null)
+            {
+                if (forDefault.Count == 0) forDefault.Add("nothing chosen yet");
+                _aiDefaultModel.SetItems(forDefault, chosen);
+            }
+        }
+
+        List<string[]> _aiDefaults = new List<string[]>();
+
+        void TakeAiAllowed()
+        {
+            if (_aiModelList == null) return;
+
+            Ai.AiAllowed allowed = Ai.AiAllowed.Read("");
+            foreach (NsCheckList.Row row in _aiModelList.Rows)
+            {
+                if (row.Header || !row.Ticked) continue;
+                string[] id = row.Tag as string[];
+                if (id != null) allowed.Set(id[0], id[1], true);
+            }
+
+            _settings.AiAllowedModels = allowed.ToString();
+            if (_aiPanel != null) { _aiPanel.Allowed = allowed; _aiPanel.Rebind(); }
+
+            // The default can only be one of the ones on offer.
+            FillAiModelList();
+        }
+
+        void TakeAiDefault()
+        {
+            if (_aiDefaultModel == null || _aiPanel == null) return;
+
+            int i = _aiDefaultModel.SelectedIndex;
+            if (i < 0 || i >= _aiDefaults.Count) return;
+
+            _aiPanel.ProviderId = _aiDefaults[i][0];
+            _aiPanel.Model = _aiDefaults[i][1];
+            if (_inspHead != null) _inspHead.Invalidate();
+        }
+
+        /// <summary>
+        /// Asks every provider with a key for its list.
+        ///
+        /// On opening the page it uses what is already in hand; the button asks
+        /// again, for when a model has been released since the application
+        /// started.
+        /// </summary>
+        void RefreshAiModels(bool again)
+        {
+            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+            {
+                if (!provider.Ready) continue;
+                if (!again && Ai.AiModels.Cached(provider) != null) continue;
+
+                Ai.IAiProvider which = provider;
+                System.Threading.CancellationToken token =
+                    new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
+
+                System.Threading.Tasks.Task.Run(delegate { return Ai.AiModels.Fetch(which, again, token); })
+                    .ContinueWith(delegate (System.Threading.Tasks.Task<IList<Ai.AiModel>> done)
+                    {
+                        if (IsDisposed || !IsHandleCreated) return;
+                        try
+                        {
+                            BeginInvoke((MethodInvoker)delegate
+                            {
+                                if (done.IsFaulted || done.IsCanceled)
+                                {
+                                    SetStatus("Could not reach " + which.Info.Name + ".");
+                                    return;
+                                }
+                                SetStatus(which.Info.Name + ": " + done.Result.Count + " models");
+                                if (_settingsOpen && _aiModelList != null) FillAiModelList();
+                            });
+                        }
+                        catch (InvalidOperationException) { }
+                    });
+            }
         }
 
         void BuildAppearanceSettings(ref int y)
@@ -3141,6 +3324,8 @@ namespace NextScan.App
                 previous.Dispose();
             }
             _previewCost = null;
+            _aiModelList = null;
+            _aiDefaultModel = null;
 
             Panel host = _drawerHost;
             int columnWidth = SettingsColumnWidth;
@@ -4281,6 +4466,9 @@ namespace NextScan.App
 
             // On Assist the footer is not there at all unless a scan is
             // running, so the panel has to be re-measured when that changes.
+            // This is also the moment a page appears, which is what the panel's
+            // suggestions and its page note are waiting for.
+            if (_aiPanel != null) _aiPanel.Rebind();
             if (_activeSection == AiSection) LayoutInspectorBody();
             _scanPill.Invalidate();
         }

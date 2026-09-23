@@ -1,11 +1,61 @@
 ﻿# NextScan Studio — Build Status
 
-Last updated: 2026-09-19
+Last updated: 2026-09-23
 Plan of record: [`NEXTSCAN_STUDIO_MASTER_PLAN.md`](../../NEXTSCAN_STUDIO_MASTER_PLAN.md)
 
 This file records what is **actually built and verified on hardware**, versus what
 is still only planned. It is deliberately conservative: if something is not listed
 as verified below, assume it does not work yet.
+
+---
+
+## Assistant panel: models, scroll, copy, history, suggestions — 2026-09-23
+
+**Models.** Settings lists every model the three providers returned for the
+stored keys, with a tick for each one to offer in the panel and a "Starts on"
+choice that stays the default. Only ticked models appear in the panel's model
+menu. The model and the thinking level are two separate buttons in the
+composer, each with its own menu.
+
+The owner then reported four things in the Assist panel: the transcript would
+not scroll, a message could not be selected or copied, there was no history,
+and the suggestion buttons did nothing.
+
+- **Suggestions** now send their question. With no page on the canvas, the
+  page-only ones ("What is this document?", "Read the text"…) answer with a note
+  saying there is no page yet, instead of doing nothing.
+- **Copy.** A turn's text is a read-only `TextBox` on the painted bubble, so
+  drag-select, Ctrl+C and right-click Copy work. The copy mark in a reply's
+  corner still takes the whole turn.
+- **History.** Every completed turn is written to
+  `%LocalAppData%\NextScan\chats\<id>.chat` (length-prefixed text; the page image
+  is never written). The clock button above the transcript lists them, reopens
+  one, or forgets all of them. `nsaitest` round-trips a conversation character
+  for character.
+- **Scroll.** A reopened conversation came up blank: the transcript column was
+  put back at (0, 0) after the panel had scrolled, so it sat a screen below
+  where it was drawn. It is now placed at the scrolled origin, and its width
+  leaves room for the scroll bar so no horizontal bar appears. The wheel moves
+  120 px a notch whether the pointer is over a turn or a gap (it moved twice
+  over gaps).
+- Bubble heights are asked of the text box itself; `TextRenderer` wrapped
+  differently and left an empty band under long replies.
+
+Also: the history menu opens below its button (it was pinned to the top of the
+screen) and a long title no longer runs under its time; the status bar no
+longer keeps "Asking Gemini…" after a reply; quota and unknown-model errors say
+to choose another model; "Gemini 3.1 Flash Lite" and "Gemini 3.1 Flash" no
+longer shorten to the same label; the Capture header's summary no longer draws
+over the word "Capture".
+
+**Verified:** build clean; `nsaitest` all pass; an off-screen harness that hosts
+the real panel, reopens a made-up conversation and sends real `WM_MOUSEWHEEL`
+messages (end of the transcript shown after reopening, 120 px per notch over
+text and over gaps, position kept across a re-layout); earlier in the session,
+screenshots of the suggestion note and the history menu. **Not yet verified by
+hand:** drag-select and right-click Copy inside a bubble, and the history
+menu's new position — both need the window in front, and the machine was in
+use.
 
 ---
 

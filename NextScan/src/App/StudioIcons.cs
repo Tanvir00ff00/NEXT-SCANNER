@@ -48,6 +48,9 @@ namespace NextScan.App
         public const string Send = "send";
         public const string Stop = "stop";
         public const string NewChat = "newchat";
+        public const string History = "history";
+        public const string Model = "model";
+        public const string Effort = "effort";
         public const string Copy = "copy";
 
         /// <summary>
@@ -256,6 +259,40 @@ namespace NextScan.App
                 case Stop:
                     using (GraphicsPath path = Theme.Round(new Rectangle(7, 7, 10, 10), 2))
                         g.FillPath(b, path);
+                    break;
+
+                case History:
+                    // A clock with its hand turned back.
+                    g.DrawArc(p, 3.5f, 3.5f, 17f, 17f, 300, 330);
+                    g.DrawLines(p, new PointF[] { new PointF(3.6f, 5.5f), new PointF(3.6f, 10f),
+                                                  new PointF(8.1f, 10f) });
+                    g.DrawLines(p, new PointF[] { new PointF(12f, 7.5f), new PointF(12f, 12.5f),
+                                                  new PointF(16f, 14.5f) });
+                    break;
+
+                case Model:
+                    // A chip. It is what everything else in this category uses
+                    // for "which one is running", and it is already learned.
+                    g.DrawRectangle(p, 6.5f, 6.5f, 11f, 11f);
+                    g.DrawRectangle(p, 10f, 10f, 4f, 4f);
+                    g.DrawLine(p, 9.5f, 3.5f, 9.5f, 6.5f);
+                    g.DrawLine(p, 14.5f, 3.5f, 14.5f, 6.5f);
+                    g.DrawLine(p, 9.5f, 17.5f, 9.5f, 20.5f);
+                    g.DrawLine(p, 14.5f, 17.5f, 14.5f, 20.5f);
+                    g.DrawLine(p, 3.5f, 9.5f, 6.5f, 9.5f);
+                    g.DrawLine(p, 3.5f, 14.5f, 6.5f, 14.5f);
+                    g.DrawLine(p, 17.5f, 9.5f, 20.5f, 9.5f);
+                    g.DrawLine(p, 17.5f, 14.5f, 20.5f, 14.5f);
+                    break;
+
+                case Effort:
+                    // A dial with the needle up. Effort is an amount, and an
+                    // amount reads as a gauge -- not as a brain, which would be
+                    // a claim about what is inside rather than about the
+                    // setting being moved.
+                    g.DrawArc(p, 3.5f, 5.5f, 17f, 17f, 180, 180);
+                    g.DrawLine(p, 12f, 14f, 16f, 8.5f);
+                    g.FillEllipse(b, 10.4f, 12.4f, 3.2f, 3.2f);
                     break;
 
                 case Copy:

@@ -18,6 +18,7 @@ namespace NextScan.Ai
             Name = "OpenAI",
             KeyHint = "sk-...",
             Prefer = new[] { "gpt-5", "gpt-4.1", "o4", "gpt-4o" },
+            Avoid = new[] { "mini", "nano", "preview", "chat-latest" },
 
             // Three levels, not four. The panel says so rather than offering a
             // Max that quietly behaves like High.
@@ -62,12 +63,14 @@ namespace NextScan.Ai
                                  (id.Length > 1 && id[0] == 'o' && char.IsDigit(id[1]));
                 if (!couldChat) continue;
 
-                bool ruled = false;
+                // Marked rather than dropped: the operator chooses in Settings
+                // which models the panel offers, and a guess of ours that
+                // removes the row entirely is a guess they cannot argue with.
+                bool likely = true;
                 foreach (string no in NotForChat)
-                    if (id.IndexOf(no, StringComparison.OrdinalIgnoreCase) >= 0) { ruled = true; break; }
-                if (ruled) continue;
+                    if (id.IndexOf(no, StringComparison.OrdinalIgnoreCase) >= 0) { likely = false; break; }
 
-                found.Add(new AiModel { Id = id, Name = id });
+                found.Add(new AiModel { Id = id, Name = id, Likely = likely });
             }
 
             found.Sort(delegate (AiModel a, AiModel b) { return string.CompareOrdinal(a.Id, b.Id); });

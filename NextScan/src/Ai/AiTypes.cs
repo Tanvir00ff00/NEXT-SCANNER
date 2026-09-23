@@ -80,6 +80,18 @@ namespace NextScan.Ai
         /// <summary>The provider's own display name, or the id where it gives none.</summary>
         public string Name = "";
 
+        /// <summary>
+        /// Whether this looks like a model for answering questions about a page.
+        ///
+        /// A provider's model endpoint carries far more than its chat models,
+        /// and none of them says which is which in a way that can be trusted --
+        /// Gemini declares generateContent on its music and image models too.
+        /// So this is a guess, and it does not hide anything: it decides which
+        /// rows are ticked when the operator first opens the list, and which one
+        /// is chosen before they have opened it at all.
+        /// </summary>
+        public bool Likely = true;
+
         public override string ToString() { return Name.Length > 0 ? Name : Id; }
     }
 
@@ -99,6 +111,18 @@ namespace NextScan.Ai
         /// however high it sits here.
         /// </summary>
         public string[] Prefer = new string[0];
+
+        /// <summary>
+        /// Fragments that make a model a poor default -- the small and cheap
+        /// variants, and the previews.
+        ///
+        /// Needed because a preference is matched as a substring, and the
+        /// substring that names a family also names its cut-down members:
+        /// "gemini-3" matched Gemini 3.1 Flash Lite and made it the default on
+        /// a key that could reach Pro. These are still offered in the menu; they
+        /// are only passed over when nothing has been chosen yet.
+        /// </summary>
+        public string[] Avoid = new string[0];
 
         /// <summary>
         /// The highest level this provider really has. Asking for Max where

@@ -20,19 +20,39 @@ namespace NextScan.Ai
             Id = "gemini",
             Name = "Gemini",
             KeyHint = "AIza...",
-            Prefer = new[] { "gemini-3-pro", "gemini-3", "gemini-2.5-pro", "gemini" },
+            Prefer = new[] { "pro", "flash" },
+            // Not "preview": on Gemini that is how the newest models ship, and
+            // avoiding it chose 2.5 Pro on an account that had 3.1 Pro -- which
+            // then refused the request as no longer available to new users.
+            Avoid = new[] { "lite", "nano", "exp", "thinking", "tts", "image", "live" },
             Ceiling = ThinkingLevel.Max,
         };
 
         public bool Ready { get { return AiKeys.Has(Info.Id); } }
 
         /// <summary>
-        /// The models that can actually answer a question about a page.
+        /// Everything on this endpoint that is not a model for answering a
+        /// question about a page.
         ///
-        /// Gemini says so itself -- every model carries the list of actions it
-        /// supports -- so unlike OpenAI this is not a guess about names. The
-        /// list also carries embedding and tuning models, which support other
-        /// actions and not this one.
+        /// This started out as a guess-free filter on the provider's own
+        /// SupportedActions, and that turned out to be wrong: on a real key,
+        /// forty-two models came back and every one of them declared
+        /// generateContent -- the music generator, the image models, the
+        /// text-to-speech ones, the robotics one and the agent previews
+        /// included. SupportedActions separates generateContent from embedding
+        /// and tuning, and nothing else.
+        ///
+        /// So this is a guess about names, like the OpenAI one, and is written
+        /// down as such. It only decides what the menu offers; nothing is hidden
+        /// that the operator has typed in themselves.
+        /// </summary>
+        static readonly string[] NotForChat =
+        {
+            "image", "tts", "transcribe", "robotics", "computer-use", "banana",
+        };
+
+        /// <summary>
+        /// The models that can actually answer a question about a page.
         /// </summary>
         public async Task<IList<AiModel>> Models(CancellationToken cancel)
         {
@@ -57,7 +77,20 @@ namespace NextScan.Ai
                 if (id.StartsWith("models/", StringComparison.Ordinal)) id = id.Substring(7);
                 if (id.Length == 0) continue;
 
-                found.Add(new AiModel { Id = id, Name = model.DisplayName ?? id });
+                // Gemma, Lyria, the agent previews and the research models all
+                // live on this endpoint under their own names. Those are other
+                // products, not other Gemini models, so they are dropped.
+                if (!id.StartsWith("gemini-", StringComparison.OrdinalIgnoreCase)) continue;
+
+                // The rest are kept and marked. Marked rather than dropped
+                // because the operator chooses in Settings which models the
+                // panel offers, and a filter that removes a row they might have
+                // wanted is a filter they cannot argue with.
+                bool likely = true;
+                foreach (string no in NotForChat)
+                    if (id.IndexOf(no, StringComparison.OrdinalIgnoreCase) >= 0) { likely = false; break; }
+
+                found.Add(new AiModel { Id = id, Name = model.DisplayName ?? id, Likely = likely });
             }
 
             return found;

@@ -114,6 +114,9 @@ namespace NextScan.App
         public string Glyph = "";
         public int Radius = 8;
 
+        /// <summary>An NsIcon name drawn before the text, or empty for none.</summary>
+        public string Icon = "";
+
         public NsPill()
         {
             AccessibleRole = AccessibleRole.PushButton;
@@ -174,6 +177,24 @@ namespace NextScan.App
             }
 
             string label = (Glyph.Length > 0) ? Glyph + "   " + Text : Text;
+
+            if (Icon.Length > 0)
+            {
+                // Mark then word, both centred as one block, so a row of these
+                // does not drift as the words change length.
+                int wide = TextRenderer.MeasureText(label, Font).Width;
+                float mark = Math.Min(15f, Height - 10);
+                int block = (int)mark + 5 + wide;
+                int left = Math.Max(4, r.X + (r.Width - block) / 2);
+
+                NsIcon.Draw(g, Icon, new RectangleF(left, r.Y + (r.Height - mark) / 2f, mark, mark), text);
+                TextRenderer.DrawText(g, label, Font,
+                    new Rectangle(left + (int)mark + 5, r.Y, Math.Max(1, r.Right - left - (int)mark - 5), r.Height),
+                    text, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+                PaintKeyboardFocus(g);
+                return;
+            }
+
             TextRenderer.DrawText(g, label, Font, r, text,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             PaintKeyboardFocus(g);
@@ -1136,22 +1157,27 @@ namespace NextScan.App
     // Chat bubble
     // =========================================================================
     /// <summary>
-    /// One turn in the assistant transcript.
+    /// One turn in the assistant transcript: a painted plate with real,
+    /// selectable text on it.
     ///
-    /// Owner-drawn like everything else here, and for a reason beyond
-    /// consistency: a Label with AutoSize and a MaximumSize wraps correctly but
-    /// cannot be given a rounded plate, and a RichTextBox per turn is a window
-    /// handle per turn in a conversation that may run all day.
+    /// The text was drawn with TextRenderer at first, and that was wrong. It
+    /// looked right and it could not be selected, dragged over, right-clicked or
+    /// copied with the keyboard -- and the thing an operator most wants out of
+    /// this panel is a transcription, which is to say the text. A copy button
+    /// was offered instead and is not the same: it takes all of it or none.
     ///
-    /// The cost of drawing it is that the text cannot be selected with the
-    /// mouse, so every reply carries a copy button instead. For this panel that
-    /// is the better trade anyway: what an operator wants from a transcription
-    /// is all of it, not a dragged-out part of it.
+    /// So the text is a read-only TextBox on top of the plate. That costs a
+    /// window handle per turn and brings the system context menu with it, and
+    /// both are worth it: Ctrl+C, drag-select and right-click Copy are what
+    /// everyone already knows, and none of them can be had from a painted
+    /// string.
     /// </summary>
     public class NsBubble : NsBase
     {
         const int PadX = 13;
-        const int PadY = 10;
+        const int PadY = 9;
+
+        readonly TextBox _box;
 
         /// <summary>The operator's own turn. Tinted and inset; the reply is not.</summary>
         public bool Mine;
@@ -1165,6 +1191,9 @@ namespace NextScan.App
         /// <summary>Fired when the copy mark in the corner is clicked.</summary>
         public event EventHandler CopyWanted;
 
+        /// <summary>A wheel was turned over this turn. The transcript scrolls.</summary>
+        public event MouseEventHandler Wheeled;
+
         bool _overCopy;
 
         public NsBubble()
@@ -1172,11 +1201,55 @@ namespace NextScan.App
             Font = Theme.Ui(9f);
             Cursor = Cursors.Default;
 
-            // A bubble is read, not operated. Without this the base class takes
-            // focus on every click, which would pull the caret out of the box
-            // the operator is typing their next question into.
+            // The plate is read, not operated; the box on top of it takes the
+            // focus when the operator actually selects something.
             SetStyle(ControlStyles.Selectable, false);
             TabStop = false;
+
+            _box = new TextBox
+            {
+                BorderStyle = BorderStyle.None,
+                Multiline = true,
+                WordWrap = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.None,
+                TabStop = false,
+                Font = Font,
+                Cursor = Cursors.IBeam
+            };
+            _box.MouseWheel += delegate (object sender, MouseEventArgs e)
+            {
+                // Marked handled, or the edit control passes it on to its
+                // parents as well and the transcript moves twice.
+                HandledMouseEventArgs handled = e as HandledMouseEventArgs;
+                if (handled != null) handled.Handled = true;
+                if (Wheeled != null) Wheeled(this, e);
+            };
+            _box.MouseMove += delegate (object sender, MouseEventArgs e)
+            {
+                // The mark sits over the plate, not over the box, so the box has
+                // to hand the pointer back when it crosses it.
+                Point at = new Point(e.X + _box.Left, e.Y + _box.Top);
+                Hover(CopyMark().Contains(at));
+            };
+            Controls.Add(_box);
+            Paint_();
+        }
+
+        public override string Text
+        {
+            get { return _box == null ? "" : _box.Text; }
+            set
+            {
+                if (_box == null) return;
+                // Windows line endings, or every newline from a model shows as a
+                // box character in a multi-line TextBox.
+                // Trailing newlines are dropped: a model's reply usually ends
+                // with one, and the box would give it a blank line of its own.
+                string text = (value ?? "").Replace("\r\n", "\n").TrimEnd('\n').Replace("\n", "\r\n");
+                if (_box.Text == text) return;
+                _box.Text = text;
+            }
         }
 
         /// <summary>
@@ -1187,10 +1260,25 @@ namespace NextScan.App
         public int MeasureHeight(int width)
         {
             if (Pending) return 38;
+
             int inner = Math.Max(20, width - Indent() - PadX * 2);
-            Size size = TextRenderer.MeasureText(Text ?? "", Font,
-                new Size(inner, int.MaxValue), Flags);
-            return Math.Max(34, size.Height + PadY * 2);
+
+            // The box is asked how many lines it wrapped to, at the width it
+            // will have. TextRenderer was asked at first, and it breaks lines
+            // by different rules: a long reply came out a dozen lines taller
+            // than its text, an empty band at the foot of every turn.
+            if (_box.IsHandleCreated && _box.TextLength > 0)
+            {
+                if (_box.Width != inner) _box.Width = inner;
+                int lines = _box.GetLineFromCharIndex(_box.TextLength) + 1;
+                int line = TextRenderer.MeasureText("Ag", Font, Size.Empty, Flags).Height;
+                return Math.Max(32, lines * line + PadY * 2 + 4);
+            }
+
+            // Before the box has a window there is nothing to ask. A line of
+            // slack, because one line short clips the last one.
+            Size size = TextRenderer.MeasureText(Text ?? "", Font, new Size(inner, int.MaxValue), Flags);
+            return Math.Max(32, size.Height + PadY * 2 + Font.Height);
         }
 
         /// <summary>
@@ -1207,23 +1295,49 @@ namespace NextScan.App
             get { return TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding; }
         }
 
-        Rectangle CopyMark()
+        Rectangle CopyMark() { return new Rectangle(Width - 25, 5, 18, 18); }
+
+        protected override void OnSizeChanged(EventArgs e) { base.OnSizeChanged(e); Paint_(); }
+
+        void Paint_()
         {
-            return new Rectangle(Width - 26, 6, 18, 18);
+            if (_box == null) return;
+
+            _box.Visible = !Pending;
+            if (Pending) return;
+
+            int indent = Indent();
+            _box.SetBounds(indent + PadX, PadY,
+                           Math.Max(20, Width - indent - PadX * 2), Math.Max(12, Height - PadY * 2));
+
+            _box.BackColor = Fill();
+            _box.ForeColor = Trouble ? Theme.Danger : Theme.Text;
+        }
+
+        Color Fill()
+        {
+            return Mine ? Theme.Mix(Theme.Surface, Theme.Accent, Theme.IsLight ? 0.14 : 0.24)
+                        : Theme.Mix(Theme.Surface, Theme.Ground, 0.5);
+        }
+
+        /// <summary>Re-reads the palette and the flags after either has changed.</summary>
+        public void Refresh_() { Paint_(); Invalidate(); }
+
+        void Hover(bool on)
+        {
+            if (on == _overCopy) return;
+            _overCopy = on;
+            Cursor = on ? Cursors.Hand : Cursors.Default;
+            Invalidate();
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
-            bool over = !Mine && !Pending && CopyWanted != null && CopyMark().Contains(e.Location);
-            if (over != _overCopy) { _overCopy = over; Cursor = over ? Cursors.Hand : Cursors.Default; Invalidate(); }
+            Hover(!Mine && !Pending && CopyWanted != null && CopyMark().Contains(e.Location));
             base.OnMouseMove(e);
         }
 
-        protected override void OnMouseLeave(EventArgs e)
-        {
-            if (_overCopy) { _overCopy = false; Cursor = Cursors.Default; Invalidate(); }
-            base.OnMouseLeave(e);
-        }
+        protected override void OnMouseLeave(EventArgs e) { Hover(false); base.OnMouseLeave(e); }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -1241,27 +1355,21 @@ namespace NextScan.App
             Rectangle r = new Rectangle(indent, 0, Math.Max(1, Width - indent - 1), Math.Max(1, Height - 1));
             if (r.Width <= 2 || r.Height <= 2) return;
 
-            Color fill = Mine ? Theme.Mix(Theme.Surface, Theme.Accent, Theme.IsLight ? 0.14 : 0.24)
-                             : Theme.Mix(Theme.Surface, Theme.Ground, 0.5);
             Color edge = Trouble ? Theme.Danger
                        : Mine ? Theme.Mix(Theme.Line, Theme.Accent, 0.45) : Theme.LineSoft;
 
             using (GraphicsPath path = Theme.Round(r, 10))
             {
-                using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
+                using (SolidBrush b = new SolidBrush(Fill())) g.FillPath(b, path);
                 using (Pen pen = new Pen(edge, 1f)) g.DrawPath(pen, path);
             }
 
             if (Pending) { PaintDots(g, r); return; }
 
-            Rectangle text = new Rectangle(r.X + PadX, r.Y + PadY,
-                                           Math.Max(10, r.Width - PadX * 2), Math.Max(10, r.Height - PadY * 2));
-            TextRenderer.DrawText(g, Text ?? "", Font, text,
-                Trouble ? Theme.Danger : Theme.Text, Flags);
-
-            // The copy mark sits over the reply's own top-right corner rather
+            // The copy mark sits over this turn's own top-right corner rather
             // than in a toolbar: it belongs to this turn, and a transcript that
-            // has scrolled has no toolbar next to the turn being read.
+            // has scrolled has no toolbar next to the turn being read. It takes
+            // all of it; a part of it is what dragging over the text is for.
             if (_overCopy)
                 NsIcon.Draw(g, NsIcon.Copy, CopyMark(), Theme.Mix(Theme.TextFaint, Theme.Accent, 0.8));
         }
@@ -1283,11 +1391,12 @@ namespace NextScan.App
             {
                 double at = phase - i * 0.16;
                 if (at < 0) at += 1.0;
-                double lift = Math.Max(0, Math.Sin(at * Math.PI * 2)) ;
+                double lift = Math.Max(0, Math.Sin(at * Math.PI * 2));
                 int alpha = 90 + (int)(120 * lift);
                 using (SolidBrush b = new SolidBrush(Color.FromArgb(alpha, Theme.TextDim)))
                     g.FillEllipse(b, cx + i * 11, cy - 3 - (float)(lift * 2.5), 6, 6);
             }
         }
     }
+
 }
