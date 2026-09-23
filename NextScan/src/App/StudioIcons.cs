@@ -56,6 +56,7 @@ namespace NextScan.App
         // The document workspace.
         public const string Home = "home";
         public const string Folder = "folder";
+        public const string Panel = "panel";
 
         /// <summary>
         /// Draws one icon centred in <paramref name="box"/>.
@@ -270,6 +271,16 @@ namespace NextScan.App
                     g.DrawLines(p, new PointF[] { new PointF(3.5f, 11.5f), new PointF(12f, 4f), new PointF(20.5f, 11.5f) });
                     g.DrawLines(p, new PointF[] { new PointF(6f, 9.8f), new PointF(6f, 20f), new PointF(18f, 20f), new PointF(18f, 9.8f) });
                     g.DrawLines(p, new PointF[] { new PointF(10f, 20f), new PointF(10f, 14.5f), new PointF(14f, 14.5f), new PointF(14f, 20f) });
+                    break;
+
+                case Panel:
+                    // A window with its right-hand pane marked: the pane this
+                    // button puts away and brings back.
+                    using (GraphicsPath path = Theme.Round(new Rectangle(3, 5, 18, 14), 3))
+                        g.DrawPath(p, path);
+                    g.DrawLine(p, 14.5f, 5f, 14.5f, 19f);
+                    using (SolidBrush pane = new SolidBrush(Color.FromArgb(90, b.Color)))
+                        g.FillRectangle(pane, 15.2f, 5.8f, 5f, 12.4f);
                     break;
 
                 case Folder:

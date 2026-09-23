@@ -236,12 +236,18 @@ namespace NextScan.App
             BackColor = Theme.Ground;
             AllowDrop = true;
 
-            _strip = new NsDocTabs(this) { Dock = DockStyle.Top };
+            // The strip is made here but not placed here: it lives in the
+            // window's title bar, where the scanner bar is in Capture -- the
+            // owner's layout, and the one browsers and Office use. The shell
+            // takes it through Strip and puts it there.
+            _strip = new NsDocTabs(this);
             _home = new NsDocHome(this) { Dock = DockStyle.Fill };
 
             Controls.Add(_home);
-            Controls.Add(_strip);
         }
+
+        /// <summary>Home, the document tabs and the plus, for the shell to place in its title bar.</summary>
+        public NsDocTabs Strip { get { return _strip; } }
 
         public DocTab Current { get { return _current; } }
         public IList<DocTab> Tabs { get { return _tabs.AsReadOnly(); } }
@@ -319,9 +325,6 @@ namespace NextScan.App
             surface.Dock = DockStyle.Fill;
             Controls.Add(surface);
 
-            // In front of the strip in z-order, which is what makes the strip
-            // dock first and the document fill what is left. Raising the strip
-            // instead put the document underneath it, all the way to the top.
             surface.BringToFront();
 
             _tabs.Add(tab);
@@ -469,10 +472,15 @@ namespace NextScan.App
     /// Home, then one tab per open document, then a plus. Drawn as one control
     /// rather than a row of buttons, because tabs shrink together as more open
     /// and a row of separate controls cannot share out a width.
+    ///
+    /// It sits in the window's title bar, as browser tabs do: standing on the
+    /// bar's bottom edge, with the one in front opening into the page below.
+    /// The space between and after the tabs is still title bar, so pressing
+    /// there moves the window (EmptyPressed) and a double click maximises it.
     /// </summary>
     public class NsDocTabs : NsBase
     {
-        public const int StripHeight = 40;
+        const int TabHeight = 36;
         const int HomeWidth = 92;
         const int PlusWidth = 36;
         const int MaxTab = 220;
@@ -484,11 +492,25 @@ namespace NextScan.App
         readonly ToolTip _tips = new ToolTip();
         string _tipFor = "";
 
+        /// <summary>Pressed where there is no tab: the shell hands this to the window, as a title bar would.</summary>
+        public event MouseEventHandler EmptyPressed;
+
+        /// <summary>Double-clicked where there is no tab.</summary>
+        public event EventHandler EmptyDoubleClicked;
+
         public NsDocTabs(StudioWorkspace space)
         {
             _space = space;
-            Height = StripHeight;
+            Height = TabHeight + 8;
             SetStyle(ControlStyles.Selectable, false);
+        }
+
+        int Top_() { return Math.Max(2, Height - TabHeight); }
+
+        /// <summary>How much of the width the tabs actually use, so the shell can size the strip.</summary>
+        public int WantedWidth
+        {
+            get { return 8 + HomeWidth + _space.Tabs.Count * MaxTab + PlusWidth + 8; }
         }
 
         int TabWidth()
@@ -498,18 +520,19 @@ namespace NextScan.App
             return Math.Max(MinTab, Math.Min(MaxTab, room / count));
         }
 
-        Rectangle HomeRect() { return new Rectangle(8, 6, HomeWidth - 4, StripHeight - 6); }
+        Rectangle HomeRect() { return new Rectangle(8, Top_(), HomeWidth - 4, Height - Top_()); }
 
         Rectangle TabRect(int i)
         {
             int w = TabWidth();
-            return new Rectangle(8 + HomeWidth + i * w, 6, w - 2, StripHeight - 6);
+            return new Rectangle(8 + HomeWidth + i * w, Top_(), w - 2, Height - Top_());
         }
 
         Rectangle PlusRect()
         {
             int x = 8 + HomeWidth + _space.Tabs.Count * TabWidth() + 4;
-            return new Rectangle(Math.Min(x, Width - PlusWidth - 4), 9, PlusWidth - 8, StripHeight - 14);
+            int size = 28;
+            return new Rectangle(Math.Min(x, Width - PlusWidth - 4), Top_() + (Height - Top_() - size) / 2, size, size);
         }
 
         static Rectangle CloseRect(Rectangle tab)
@@ -551,6 +574,18 @@ namespace NextScan.App
             base.OnMouseLeave(e);
         }
 
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            bool onClose;
+            if (HitTest(e.Location, out onClose) == -2 && e.Button == MouseButtons.Left)
+            {
+                if (e.Clicks >= 2) { if (EmptyDoubleClicked != null) EmptyDoubleClicked(this, EventArgs.Empty); }
+                else if (EmptyPressed != null) EmptyPressed(this, e);
+                return;
+            }
+            base.OnMouseDown(e);
+        }
+
         protected override void OnMouseUp(MouseEventArgs e)
         {
             bool onClose;
@@ -569,9 +604,11 @@ namespace NextScan.App
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.Clear(Theme.Surface);
+            ClearBack(g);
             Theme.Smooth(g);
 
+            // The title bar's own bottom rule, continued under the strip; the
+            // tab in front covers its stretch of it.
             using (Pen line = new Pen(Theme.LineSoft))
                 g.DrawLine(line, 0, Height - 1, Width, Height - 1);
 
@@ -644,7 +681,8 @@ namespace NextScan.App
         void PaintTab(Graphics g, Rectangle r, bool on, bool hot)
         {
             if (!on && !hot) return;
-            Rectangle plate = new Rectangle(r.X, r.Y, r.Width, r.Height + 8);
+            if (!on) r = new Rectangle(r.X, r.Y + 3, r.Width, r.Height - 6);
+            Rectangle plate = new Rectangle(r.X, r.Y, r.Width, on ? r.Height + 8 : r.Height);
             using (GraphicsPath path = Theme.Round(plate, 8))
             {
                 Color fill = on ? Theme.Raised : Theme.Hover;

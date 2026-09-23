@@ -660,9 +660,38 @@ namespace NextScan.App
             _settingsButton.Click += delegate { OpenSettings(!_settingsOpen); };
             _titleBar.Controls.Add(_settingsButton);
 
+            // The right-hand panel, away and back in one click. A document
+            // wants the whole width; the scanner's settings and the assistant
+            // are wanted again a moment later, so it is a toggle, not a close.
+            _panelButton = new NsIconButton
+            {
+                Icon = NsIcon.Panel,
+                Size = new Size(34, 28),
+                Toggle = false
+            };
+            _panelButton.AccessibleName = "Hide the side panel";
+            _tips.SetToolTip(_panelButton, "Hide the side panel  (Ctrl+Alt+B)");
+            _panelButton.Click += delegate { TogglePanel(); };
+            _titleBar.Controls.Add(_panelButton);
+
             AddWindowButton("✕", delegate { Close(); }, Theme.Danger);
             AddWindowButton("▢", delegate { ToggleMaximise(); }, Theme.TextDim);
             AddWindowButton("─", delegate { WindowState = FormWindowState.Minimized; }, Theme.TextDim);
+        }
+
+        NsIconButton _panelButton;
+
+        /// <summary>The right-hand panel is put away. For this session; every start shows it.</summary>
+        bool _panelHidden;
+
+        void TogglePanel()
+        {
+            _panelHidden = !_panelHidden;
+            string tip = (_panelHidden ? "Show" : "Hide") + " the side panel  (Ctrl+Alt+B)";
+            _panelButton.AccessibleName = tip;
+            _tips.SetToolTip(_panelButton, tip);
+            _panelButton.Invalidate();
+            LayoutAll();
         }
 
         void AddWindowButton(string glyph, EventHandler onClick, Color hot)
@@ -3187,6 +3216,16 @@ namespace NextScan.App
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == (Keys.Control | Keys.Alt | Keys.B))
+            {
+                TogglePanel();
+                return true;
+            }
+
+            // The documents have their own Ctrl+S, Ctrl+P and the rest; the
+            // scanner's must not answer for them while a document is in front.
+            if (_activeSection == AiSection) return base.ProcessCmdKey(ref msg, keyData);
+
             if (keyData == (Keys.Control | Keys.R))
             {
                 RotateActiveImage(RotateFlipType.Rotate90FlipNone);
@@ -3280,6 +3319,15 @@ namespace NextScan.App
             _workspace.MakeSurface = MakeDocSurface;
             _workspace.ConfirmClose = ConfirmDocClose;
             Controls.Add(_workspace);
+
+            // Pressing between the tabs is pressing the title bar.
+            _workspace.Strip.Visible = false;
+            _workspace.Strip.EmptyPressed += delegate
+            {
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+            };
+            _workspace.Strip.EmptyDoubleClicked += delegate { ToggleMaximise(); };
 
             // The font catalog is built from this machine's fonts the first
             // time and whenever they change. Twelve seconds on a fresh machine,
@@ -3446,6 +3494,14 @@ namespace NextScan.App
             _workspace.Visible = docs;
             _canvas.Visible = !docs;
             if (_deviceBar != null) _deviceBar.Visible = !docs;
+
+            // Only added here, never laid out: this runs while the window is
+            // still being built, before the controls LayoutAll reaches for
+            // exist, and calling it from here crashed the start. The layout
+            // that follows construction places the strip.
+            if (_titleBar != null && _workspace.Strip.Parent != _titleBar)
+                _titleBar.Controls.Add(_workspace.Strip);
+            _workspace.Strip.Visible = docs;
 
             foreach (NsIconButton button in _viewButtons)
             {
@@ -3684,6 +3740,19 @@ namespace NextScan.App
                 _settingsButton.Location = new Point(buttonX,
                                                      (Theme.TitleBarHeight - _settingsButton.Height) / 2);
             }
+            if (_panelButton != null)
+            {
+                buttonX -= _panelButton.Width + 2;
+                _panelButton.Location = new Point(buttonX, (Theme.TitleBarHeight - _panelButton.Height) / 2);
+            }
+
+            // The documents' tabs stand where the scanner bar is in Capture,
+            // from the same left edge to the window's own buttons.
+            if (_workspace != null && _workspace.Strip.Parent == _titleBar)
+            {
+                int room = Math.Max(160, buttonX - DeviceBarLeft - 12);
+                _workspace.Strip.SetBounds(DeviceBarLeft, 0, room, Theme.TitleBarHeight);
+            }
             if (_deviceBar != null)
             {
                 int available = Math.Max(160, buttonX - DeviceBarLeft - 16);
@@ -3711,7 +3780,9 @@ namespace NextScan.App
 
             // ---- columns -----------------------------------------------------
             int railWidth = RailWidth;
-            int inspWidth = InspectorWidth;
+            int inspWidth = _panelHidden ? 0 : InspectorWidth;
+            _inspector.Visible = !_panelHidden;
+            _splitDrawer.Visible = !_panelHidden;
             int stageWidth = Math.Max(1, ClientSize.Width - railWidth - inspWidth);
 
             _rail.SetBounds(0, top, railWidth, bodyHeight);
@@ -3723,7 +3794,7 @@ namespace NextScan.App
 
             _inspector.SetBounds(ClientSize.Width - inspWidth, top, inspWidth, bodyHeight);
             _splitDrawer.SetBounds(ClientSize.Width - inspWidth - 3, top, 6, bodyHeight);
-            _splitDrawer.BringToFront();
+            if (!_panelHidden) _splitDrawer.BringToFront();
 
             LayoutInspectorBody();
 
@@ -6851,6 +6922,7 @@ namespace NextScan.App
 
                 new Shortcut { Group = "Panels", Does = "Capture, Look, Batch, Pages, Assist", Keys_ = "Alt+1 to 5" },
                 new Shortcut { Group = "Panels", Does = "Settings", Keys_ = "Ctrl+comma" },
+                new Shortcut { Group = "Panels", Does = "Hide or show the side panel", Keys_ = "Ctrl+Alt+B" },
             };
         }
 
@@ -6891,6 +6963,9 @@ namespace NextScan.App
             foreach (Shortcut shortcut in Shortcuts())
             {
                 if (shortcut.Do == null) continue;
+                // Scanning, sending and zooming the bed mean nothing on the
+                // document workspace, and Ctrl+S there means the document.
+                if (_activeSection == AiSection && shortcut.Group != "Panels") continue;
                 if (e.Control != shortcut.Ctrl) continue;
                 if (e.KeyCode != shortcut.Key && (shortcut.Same == Keys.None || e.KeyCode != shortcut.Same))
                     continue;
