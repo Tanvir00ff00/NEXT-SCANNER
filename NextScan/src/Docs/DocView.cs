@@ -30,7 +30,7 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace NextScan.Docs
 {
-    public class DocView : UserControl
+    public partial class DocView : UserControl
     {
         const string Origin = "https://nextscan.docs";
 
@@ -65,6 +65,12 @@ namespace NextScan.Docs
         public event EventHandler DirtyChanged;
         public event EventHandler ReadyChanged;
         public event EventHandler PathChanged;
+
+        /// <summary>File > Create new, in the editor. The message is the kind: word, cell, slide or pdf.</summary>
+        public event EventHandler<DocsMessageEventArgs> NewWanted;
+
+        /// <summary>File > Close file, in the editor.</summary>
+        public event EventHandler CloseWanted;
 
         /// <summary>Something went wrong that the operator should be told about.</summary>
         public event EventHandler<DocsMessageEventArgs> Trouble;
@@ -226,6 +232,7 @@ namespace NextScan.Docs
                 }
                 catch { }
             };
+            core.DownloadStarting += OnDownloadStarting;
             core.ProcessFailed += delegate (object sender, CoreWebView2ProcessFailedEventArgs e)
             {
                 Fail("The editor stopped (" + e.ProcessFailedKind + "). Unsaved changes in this tab may be lost.");
@@ -242,9 +249,31 @@ namespace NextScan.Docs
 
             try
             {
+                if (Trace != null && e.Request.Method == "POST")
+                {
+                    long length = -1;
+                    try { if (e.Request.Content != null) length = e.Request.Content.Length; } catch { }
+                    var headers = new StringBuilder();
+                    foreach (var h in e.Request.Headers) headers.Append(h.Key).Append('=').Append(h.Value).Append("; ");
+                    Trace("POST " + uri.PathAndQuery + " body " + length + " | " + headers);
+                    string dump = System.Environment.GetEnvironmentVariable("NEXTSCAN_DOCS_DUMP");
+                    if (!string.IsNullOrEmpty(dump) && e.Request.Content != null)
+                        using (var f = File.Create(Path.Combine(dump, "post-" + DateTime.Now.Ticks + ".bin")))
+                        { e.Request.Content.CopyTo(f); e.Request.Content.Position = 0; }
+                }
                 if (e.Request.Method == "POST" && path.StartsWith("/save/", StringComparison.Ordinal))
                 {
                     Save(e, uri);
+                    return;
+                }
+                if (e.Request.Method == "POST" && path.StartsWith("/editors/downloadas/", StringComparison.Ordinal))
+                {
+                    DownloadAs(e, uri);
+                    return;
+                }
+                if (path.StartsWith("/out/" + _id + "/", StringComparison.Ordinal))
+                {
+                    e.Response = FileUnder(Path.Combine(_work, "out"), path.Substring(("/out/" + _id + "/").Length));
                     return;
                 }
                 e.Response = Answer(path);
@@ -475,7 +504,9 @@ namespace NextScan.Docs
                 // beside the media it refers to, and x2t reads it from there.
                 string bin = Path.Combine(work, "Editor.bin");
                 File.WriteAllBytes(bin, body);
-                DocsEngine.Convert(bin, made);
+                int format = DocsEngine.FormatOf(ext);
+                if (format > 0) DocsEngine.ConvertWith(bin, made, format);
+                else DocsEngine.Convert(bin, made);
             }
 
             // Written beside the destination, then swapped in: a save that
@@ -527,7 +558,18 @@ namespace NextScan.Docs
             try { raw = e.TryGetWebMessageAsString(); } catch { return; }
             if (string.IsNullOrEmpty(raw)) return;
 
-            string type = Field(raw, "type");
+            Dictionary<string, object> message;
+            try { message = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(raw); }
+            catch { return; }
+            if (message == null) return;
+            Func<string, string> Field = delegate (string name)
+            {
+                object v;
+                return message.TryGetValue(name, out v) && v != null ? Convert.ToString(v, CultureInfo.InvariantCulture) : "";
+            };
+
+            string type = Field("type");
+            if (Trace != null) Trace("message " + (raw.Length > 200 ? raw.Substring(0, 200) : raw));
             switch (type)
             {
                 case "ready":
@@ -536,33 +578,31 @@ namespace NextScan.Docs
                     Say("");
                     if (ReadyChanged != null) ReadyChanged(this, EventArgs.Empty);
                     break;
+                case "download":
+                    SaveCopy(Field("url"));
+                    break;
+                case "print":
+                    PrintFile(Field("url"));
+                    break;
+                case "new":
+                    if (NewWanted != null) NewWanted(this, new DocsMessageEventArgs(Field("kind")));
+                    break;
+                case "close":
+                    if (CloseWanted != null) CloseWanted(this, EventArgs.Empty);
+                    break;
                 case "dirty":
-                    SetDirty(raw.Contains("\"value\":true"));
+                    object dirty;
+                    SetDirty(message.TryGetValue("value", out dirty) && dirty is bool && (bool)dirty);
+                    break;
+                case "ran":
+                    Ran(Field("id"), message);
                     break;
                 case "failed":
                 case "error":
-                    Fail(Field(raw, "message"));
-                    if (!_ready) _cover.Text = "This document could not be opened.\n\n" + Field(raw, "message");
+                    Fail(Field("message"));
+                    if (!_ready) _cover.Text = "This document could not be opened.\n\n" + Field("message");
                     break;
             }
-        }
-
-        /// <summary>A string field out of the small flat JSON objects host.js sends.</summary>
-        static string Field(string json, string name)
-        {
-            string key = "\"" + name + "\":\"";
-            int at = json.IndexOf(key, StringComparison.Ordinal);
-            if (at < 0) return "";
-            at += key.Length;
-            var b = new StringBuilder();
-            for (int i = at; i < json.Length; i++)
-            {
-                char c = json[i];
-                if (c == '\\' && i + 1 < json.Length) { b.Append(json[++i]); continue; }
-                if (c == '"') break;
-                b.Append(c);
-            }
-            return b.ToString();
         }
 
         void SetDirty(bool dirty)

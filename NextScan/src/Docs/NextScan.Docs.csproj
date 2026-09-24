@@ -22,6 +22,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- JavaScriptSerializer, for the editor's download requests. Part of
+         .NET Framework itself, not a package. -->
+    <Reference Include="System.Web.Extensions" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The page each document lives in, and the shim injected into the
          editor's frame. Plain files, served from bin\docs\host. -->
     <None Include="host\**\*" CopyToOutputDirectory="PreserveNewest" LinkBase="host" />

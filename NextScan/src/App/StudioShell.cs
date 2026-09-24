@@ -501,6 +501,7 @@ namespace NextScan.App
             BuildInspector();
             BuildSettingsPage();
             BuildStatus();
+            WireDocTools();
 
             Load += delegate { LayoutAll(); BeginProbe(); };
             Resize += delegate { LayoutAll(); };
@@ -3343,6 +3344,23 @@ namespace NextScan.App
         }
 
         /// <summary>
+        /// The assistant works the same documents the operator does, through
+        /// the same workspace: what it opens is a tab, what it changes is on
+        /// screen and undoable.
+        /// </summary>
+        void WireDocTools()
+        {
+            if (_aiPanel == null || _workspace == null || !Docs.DocsEngine.IsInstalled) return;
+            var tools = new StudioDocTools(_workspace)
+            {
+                PdfFromPages = PdfOfSessionPages,
+                OutputFolder = delegate { return _settings.OutputDirectory; },
+            };
+            _aiPanel.ToolsSource = tools.Tools;
+            _aiPanel.ToolRunner = tools.Run;
+        }
+
+        /// <summary>
         /// The editor for one tab: ONLYOFFICE in a WebView2 (NextScan.Docs).
         /// Opening is asynchronous; the tab appears at once and the document
         /// draws into it when the converter and the editor are done.
@@ -3372,6 +3390,17 @@ namespace NextScan.App
                 tab.Path = view.FilePath;
                 _workspace.Changed(tab);
             };
+            view.CopySaved += delegate (object sender, Docs.DocsMessageEventArgs e) { SetStatus("Saved a copy: " + e.Message); };
+
+            // File > Create new and File > Close file, inside the editor.
+            view.NewWanted += delegate (object sender, Docs.DocsMessageEventArgs e)
+            {
+                DocKind kind = e.Message == "cell" ? DocKind.Sheet
+                             : e.Message == "slide" ? DocKind.Slides
+                             : DocKind.Word;
+                BeginInvoke((MethodInvoker)delegate { _workspace.New(kind); });
+            };
+            view.CloseWanted += delegate { BeginInvoke((MethodInvoker)delegate { _workspace.Close(tab); }); };
 
             string ext = tab.Path.Length > 0 ? "" : NewExtension(tab.Kind);
             System.Threading.Tasks.Task opening = tab.Path.Length > 0

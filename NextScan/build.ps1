@@ -52,7 +52,8 @@ $refs = @(
     "-r:$fw\System.Drawing.dll",
     "-r:$fw\System.Windows.Forms.dll",
     "-r:$fw\System.Xml.dll",
-    "-r:$fw\System.Management.dll"
+    "-r:$fw\System.Management.dll",
+    "-r:$fw\System.Web.Extensions.dll"
 )
 
 Write-Host "NextScan Studio build" -ForegroundColor Cyan
@@ -298,12 +299,17 @@ Build-Target -Name "NextScan.Engine" -Out "$bin\NextScan.Engine.dll" -Platform "
 # Dedicated standalone studio application (Master Plan section 13)
 $app_ = $engine + @("App\*.cs")
 $appIcon = Join-Path $src "App\NextScanner.ico"
+# The assistant's reading scripts (StudioDocTools), compiled in rather than
+# shipped beside the exe: what the model is shown of a document is part of the
+# program, not a file anyone can change.
+$appScripts = @(Get-ChildItem (Join-Path $src "App\scripts\*.js") | ForEach-Object {
+    "-resource:$($_.FullName),NextScan.App.scripts.$($_.Name)" })
 # One reference, not thirty-one: the shell only ever sees our own facade, and
 # the provider SDKs behind it are loaded at run time from bin\ai.
 $appRefs = @($aiDll, $docsDll)
 
 Build-Target -Name "NextScanner"     -Out "$bin\NextScanner.exe"     -Platform "anycpu" -Kind "winexe" `
-             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon -Extra @($stamp) `
+             -Sources $app_ -EntryPoint "NextScan.App.StudioApp" -Icon $appIcon -Extra (@($stamp) + $appScripts) `
              -ExtraRefs $appRefs
 
 # The AI layer loads, and stays behind its boundary (docs/AI_LAYER.md). Built

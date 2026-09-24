@@ -118,7 +118,31 @@ namespace NextScan.Ai
             var contents = new List<Google.GenAI.Types.Content>();
             foreach (AiMessage m in request.Messages)
             {
+                // A turn this provider produced goes back as it came, thought
+                // signatures and all: Gemini refuses a function call returned
+                // without the signature it was issued with.
+                var raw = m.Raw as List<Google.GenAI.Types.Part>;
+                if (raw != null && m.RawProvider == Info.Id)
+                {
+                    contents.Add(new Google.GenAI.Types.Content { Role = "model", Parts = raw });
+                    continue;
+                }
+
                 var parts = new List<Google.GenAI.Types.Part>();
+                foreach (AiToolResult r in m.ToolResults)
+                    parts.Add(new Google.GenAI.Types.Part
+                    {
+                        FunctionResponse = new Google.GenAI.Types.FunctionResponse
+                        {
+                            Id = Real(r.CallId),
+                            Name = r.Name,
+                            Response = new Dictionary<string, object>
+                            {
+                                { r.IsError ? "error" : "result", string.IsNullOrEmpty(r.Content) ? "(nothing)" : r.Content },
+                            },
+                        },
+                    });
+
                 if (m.Image != null)
                     parts.Add(new Google.GenAI.Types.Part
                     {
@@ -128,7 +152,19 @@ namespace NextScan.Ai
                             MimeType = m.ImageMediaType ?? "image/jpeg",
                         },
                     });
-                parts.Add(new Google.GenAI.Types.Part { Text = m.Text ?? "" });
+                if (!string.IsNullOrEmpty(m.Text) || parts.Count == 0)
+                    parts.Add(new Google.GenAI.Types.Part { Text = m.Text ?? "" });
+
+                foreach (AiToolCall c in m.ToolCalls)
+                    parts.Add(new Google.GenAI.Types.Part
+                    {
+                        FunctionCall = new Google.GenAI.Types.FunctionCall
+                        {
+                            Id = Real(c.Id),
+                            Name = c.Name,
+                            Args = AiJson.ToDictionary(c.ArgumentsJson),
+                        },
+                    });
 
                 contents.Add(new Google.GenAI.Types.Content
                 {
@@ -149,19 +185,56 @@ namespace NextScan.Ai
                     Parts = new List<Google.GenAI.Types.Part> { new Google.GenAI.Types.Part { Text = request.Instruction } },
                 };
 
-            var reply = new AiReply();
+            if (request.Tools.Count > 0)
+            {
+                var declarations = new List<Google.GenAI.Types.FunctionDeclaration>();
+                foreach (AiTool t in request.Tools)
+                    declarations.Add(new Google.GenAI.Types.FunctionDeclaration
+                    {
+                        Name = t.Name,
+                        Description = t.Description,
+                        Parameters = GeminiSchema.From(t.ParametersJson),
+                    });
+                config.Tools = new List<Google.GenAI.Types.Tool>
+                {
+                    new Google.GenAI.Types.Tool { FunctionDeclarations = declarations },
+                };
+            }
+
+            var reply = new AiReply { RawProvider = Info.Id };
             reply.Usage.Model = request.Model;
             var text = new System.Text.StringBuilder();
+            var turn = new List<Google.GenAI.Types.Part>();
+            int unnamed = 0;
 
             await foreach (var chunk in client.Models.GenerateContentStreamAsync(request.Model, contents, config))
             {
                 cancel.ThrowIfCancellationRequested();
 
-                string piece = chunk.Text;
-                if (!string.IsNullOrEmpty(piece))
+                var candidate = chunk.Candidates != null && chunk.Candidates.Count > 0 ? chunk.Candidates[0] : null;
+                var chunkParts = candidate != null && candidate.Content != null ? candidate.Content.Parts : null;
+                if (chunkParts != null)
                 {
-                    text.Append(piece);
-                    if (onText != null) onText(piece);
+                    foreach (var part in chunkParts)
+                    {
+                        turn.Add(part);
+                        if (part.FunctionCall != null)
+                        {
+                            reply.ToolCalls.Add(new AiToolCall
+                            {
+                                // Gemini gives calls an id only sometimes; the
+                                // name then pairs the result with its call.
+                                Id = string.IsNullOrEmpty(part.FunctionCall.Id) ? NoId + (++unnamed) : part.FunctionCall.Id,
+                                Name = part.FunctionCall.Name ?? "",
+                                ArgumentsJson = part.FunctionCall.Args == null ? "{}" : AiJson.Serialize(part.FunctionCall.Args),
+                            });
+                        }
+                        else if (!string.IsNullOrEmpty(part.Text) && part.Thought != true)
+                        {
+                            text.Append(part.Text);
+                            if (onText != null) onText(part.Text);
+                        }
+                    }
                 }
 
                 if (chunk.UsageMetadata != null)
@@ -172,8 +245,21 @@ namespace NextScan.Ai
                 }
             }
 
+            reply.Raw = turn;
             reply.Text = text.ToString();
             return reply;
+        }
+
+        /// <summary>
+        /// Marks an id made up here for a call Gemini sent without one. It
+        /// pairs the result with its call inside the application and is never
+        /// sent back: an id Gemini did not issue is one it may refuse.
+        /// </summary>
+        const string NoId = "nextscan-noid-";
+
+        static string Real(string id)
+        {
+            return string.IsNullOrEmpty(id) || id.StartsWith(NoId, StringComparison.Ordinal) ? null : id;
         }
     }
 }

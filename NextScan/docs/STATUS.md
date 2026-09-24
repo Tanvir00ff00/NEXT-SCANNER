@@ -1,11 +1,41 @@
 ﻿# NextScan Studio — Build Status
 
-Last updated: 2026-09-23
+Last updated: 2026-09-24
 Plan of record: [`NEXTSCAN_STUDIO_MASTER_PLAN.md`](../../NEXTSCAN_STUDIO_MASTER_PLAN.md)
 
 This file records what is **actually built and verified on hardware**, versus what
 is still only planned. It is deliberately conservative: if something is not listed
 as verified below, assume it does not work yet.
+
+---
+
+## The assistant works the documents; Print and the File menu fixed — 2026-09-24
+
+**Assistant.** In Assist, the model can see which documents are open and what
+was opened recently, open a file, start a new document, workbook or
+presentation, read one, change it, save, export a copy (pdf, docx, xlsx, odt…),
+bring a tab to the front, close one, and make a PDF of the scanned pages. See
+DOCUMENT_WORKSPACE.md, "The assistant in the workspace". Closing a tab with
+unsaved changes, or overwriting a file, needs the operator's say-so, and the
+tools refuse otherwise.
+
+Verified off-screen against the real editors (no model): every tool in
+sequence (a document with a heading, a table and Bengali text, exported to PDF
+and DOCX and reopened; a workbook with a formula read back as `=A2*B2` = 120; a
+presentation; the unsaved-close refusal). Verified with a real model (Gemini
+Flash, 4 calls): a Bengali request made a Word document with a Bengali
+heading and a bordered table and exported it to PDF. **Not yet checked in the
+running app by hand**, and not yet with Claude or OpenAI models (their tool
+formats are implemented and compile).
+
+**Editor menus.** Print said "Unknown error" and File > Download As did
+nothing: both ask a Document Server to convert and hand back a URL. Answered
+in-process now: Download As asks where to put the copy; Print opens Windows'
+Print dialog (printer, copies, pages) and prints the editor's PDF. File >
+Create New and Close File work (new tab, close tab). Review > Compare and
+Combine and Insert > Text from File convert the other file with x2t (Compare
+checked: 7 tracked revisions against a real .docx). Mail Merge and
+co-editing need a server and stay off.
 
 ---
 

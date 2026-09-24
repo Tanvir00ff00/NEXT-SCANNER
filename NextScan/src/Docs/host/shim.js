@@ -190,6 +190,114 @@
         } catch (e) { return null; }
     };
 
+    // ---- the assistant's hands ------------------------------------------
+    // Runs code against ONLYOFFICE's document API (Api.GetDocument(), and
+    // Api.GetActiveSheet() in a workbook -- the API its plugins and Document
+    // Builder use), the way its own plugin runner does (sdkjs common/plugins.js
+    // callCommandInternal): before, the code, after, then the end-of-script
+    // work that loads new fonts and redraws. Returns a Promise of whatever the
+    // code returns, made plain by JSON.
+    // The builders are layered -- AscBuilder.Word.Api, then Slide on top of
+    // it, then Cell on top of that -- and AscBuilder.Api is the Word one in
+    // every editor. The one that belongs to this editor is the one with its
+    // entry point: GetSheets, GetPresentation or GetDocument.
+    function builder() {
+        var b = window.AscBuilder;
+        if (!b) return null;
+        var candidates = [b.Cell && b.Cell.Api, b.Slide && b.Slide.Api, b.Word && b.Word.Api, b.Api];
+        var wanted = app[1] === 'spreadsheeteditor' ? 'GetSheets'
+                   : app[1] === 'presentationeditor' ? 'GetPresentation' : 'GetDocument';
+        for (var i = 0; i < candidates.length; i++)
+            if (candidates[i] && typeof candidates[i][wanted] === 'function') return candidates[i];
+        return b.Api || null;
+    }
+
+    window.__nsRun = function (code, recalculate) {
+        return new Promise(function (resolve, reject) {
+            var api = editorApi();
+            var Api = builder();
+            if (!api || !Api) { reject(new Error('The document is not ready.')); return; }
+            if (api.isLongAction && api.isLongAction()) { reject(new Error('The editor is busy; try again in a moment.')); return; }
+            if (api.canRunBuilderScript && !api.canRunBuilderScript()) { reject(new Error('The document cannot be changed now (read-only or locked).')); return; }
+
+            var result, failure = null;
+            api._beforeEvalCommand();
+            try { result = (new Function('Api', code))(Api); }
+            catch (e) { failure = e; }
+
+            function finish() {
+                api.evalCommand = false;
+                var done = function () {
+                    if (failure) { reject(failure); return; }
+                    try { resolve(result === undefined ? null : JSON.parse(JSON.stringify(result))); }
+                    catch (e) { resolve(String(result)); }
+                };
+                if (api.onEndBuilderScript) api.onEndBuilderScript(done); else done();
+            }
+
+            var history = window.AscCommon && window.AscCommon.History;
+            if (recalculate !== false && !failure && history && history.Is_LastPointEmpty && !history.Is_LastPointEmpty())
+                api._afterEvalCommand(finish);
+            else
+                finish();
+        });
+    };
+
+    // ---- Print and Download As: the answer --------------------------------
+    // saveWithParts sends the document and, on the last part's "ok", does
+    // nothing unless it was given a callback: a Document Server delivers the
+    // finished file's URL later, over its websocket. With no server that
+    // message never comes, the editor waits forever, and nothing after it
+    // can start. So the last "ok" (which carries the URL, see DocView.Server)
+    // goes straight to the editor's own completion handler.
+    every(100, 600, function () {
+        var common = window.AscCommon;
+        if (!common || !common.saveWithParts || common.saveWithParts.__ns) return false;
+        var original = common.saveWithParts;
+        var ours = function (fSendCommand, fCallback, fCallbackRequest, data, container) {
+            var request = fCallbackRequest || function (income, status) { if (fCallback) fCallback(income, status); };
+            return original.call(this, fSendCommand, fCallback, request, data, container);
+        };
+        ours.__ns = true;
+        common.saveWithParts = ours;
+        return true;
+    });
+
+    // ---- Print ---------------------------------------------------------
+    // Online, the finished PDF is printed from a hidden frame. Here the
+    // application prints it, with Windows' own print dialog.
+    every(100, 600, function () {
+        var common = window.AscCommon;
+        var proto = common && common.baseEditorsApi && common.baseEditorsApi.prototype;
+        if (!proto || !proto.processSavedFile || proto.processSavedFile.__ns) return false;
+        var original = proto.processSavedFile;
+        var ours = function (url, downloadType, fileType) {
+            if (downloadType === 'asc_onPrintUrl') {
+                try { window.parent.postMessage({ type: 'oo-print', url: String(url) }, '*'); } catch (e) { }
+                return;
+            }
+            return original.apply(this, arguments);
+        };
+        ours.__ns = true;
+        proto.processSavedFile = ours;
+        return true;
+    });
+
+    // ---- Download As ----------------------------------------------------
+    // The converted file comes back as a URL the editor downloads through a
+    // hidden helper of its own, which a WebView2 never reports as a download.
+    // It is handed to the application instead, which asks where to put it.
+    every(100, 600, function () {
+        var common = window.AscCommon;
+        if (!common || !common.getFile || common.getFile.__ns) return false;
+        var ours = function (url) {
+            try { window.parent.postMessage({ type: 'oo-download', url: String(url) }, '*'); } catch (e) { }
+        };
+        ours.__ns = true;
+        common.getFile = ours;
+        return true;
+    });
+
     // ---- images -------------------------------------------------------
     function toDataUrl(blob) {
         return new Promise(function (resolve, reject) {

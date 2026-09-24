@@ -1188,6 +1188,13 @@ namespace NextScan.App
         /// <summary>Something went wrong in this turn, so it is not a reply to be read.</summary>
         public bool Trouble;
 
+        /// <summary>
+        /// A step the assistant took ("Read bill.docx"), not something it said:
+        /// small, dim and without a plate, so the transcript reads as the
+        /// conversation with the work noted along the side of it.
+        /// </summary>
+        public bool Quiet;
+
         /// <summary>Fired when the copy mark in the corner is clicked.</summary>
         public event EventHandler CopyWanted;
 
@@ -1311,11 +1318,13 @@ namespace NextScan.App
                            Math.Max(20, Width - indent - PadX * 2), Math.Max(12, Height - PadY * 2));
 
             _box.BackColor = Fill();
-            _box.ForeColor = Trouble ? Theme.Danger : Theme.Text;
+            _box.ForeColor = Trouble ? Theme.Danger : Quiet ? Theme.TextDim : Theme.Text;
+            if (Quiet && _box.Font.Size > 8.5f) _box.Font = Theme.Ui(8.25f);
         }
 
         Color Fill()
         {
+            if (Quiet) return Theme.Surface;
             return Mine ? Theme.Mix(Theme.Surface, Theme.Accent, Theme.IsLight ? 0.14 : 0.24)
                         : Theme.Mix(Theme.Surface, Theme.Ground, 0.5);
         }
@@ -1361,7 +1370,7 @@ namespace NextScan.App
             using (GraphicsPath path = Theme.Round(r, 10))
             {
                 using (SolidBrush b = new SolidBrush(Fill())) g.FillPath(b, path);
-                using (Pen pen = new Pen(edge, 1f)) g.DrawPath(pen, path);
+                if (!Quiet) using (Pen pen = new Pen(edge, 1f)) g.DrawPath(pen, path);
             }
 
             if (Pending) { PaintDots(g, r); return; }

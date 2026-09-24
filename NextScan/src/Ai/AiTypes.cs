@@ -33,8 +33,57 @@ namespace NextScan.Ai
         public byte[] Image;
         public string ImageMediaType = "image/png";
 
+        /// <summary>What the model asked the application to do, on an assistant turn.</summary>
+        public List<AiToolCall> ToolCalls = new List<AiToolCall>();
+
+        /// <summary>What those requests came to, on the user turn that follows.</summary>
+        public List<AiToolResult> ToolResults = new List<AiToolResult>();
+
+        /// <summary>
+        /// The assistant turn exactly as the provider sent it, for sending
+        /// back. Claude requires its thinking blocks returned unchanged before a
+        /// tool result and Gemini its thought signatures; rebuilt from the text
+        /// and the calls, both are refused. Only the provider named in
+        /// <see cref="RawProvider"/> reads it; any other rebuilds the turn.
+        /// </summary>
+        public object Raw;
+        public string RawProvider = "";
+
         public static AiMessage FromUser(string text) { return new AiMessage { Role = AiRole.User, Text = text }; }
         public static AiMessage FromAssistant(string text) { return new AiMessage { Role = AiRole.Assistant, Text = text }; }
+    }
+
+    /// <summary>
+    /// Something the application can do when a model asks: a name, what it is
+    /// for, and its arguments as a JSON Schema object. The same description
+    /// goes to every provider; each translates it.
+    /// </summary>
+    public class AiTool
+    {
+        public string Name = "";
+        public string Description = "";
+        public string ParametersJson = "{\"type\":\"object\",\"properties\":{}}";
+    }
+
+    public class AiToolCall
+    {
+        /// <summary>The provider's id for the call, which its result must carry back.</summary>
+        public string Id = "";
+        public string Name = "";
+        public string ArgumentsJson = "{}";
+    }
+
+    public class AiToolResult
+    {
+        public string CallId = "";
+        public string Name = "";
+
+        /// <summary>What the model is told. Plain text or JSON.</summary>
+        public string Content = "";
+        public bool IsError;
+
+        /// <summary>What the operator is shown in the transcript. Never sent to the model.</summary>
+        public string Display = "";
     }
 
     /// <summary>
@@ -61,6 +110,13 @@ namespace NextScan.Ai
     {
         public string Text = "";
         public AiUsage Usage = new AiUsage();
+
+        /// <summary>Tools the model wants run before it can finish. Empty when it has answered.</summary>
+        public List<AiToolCall> ToolCalls = new List<AiToolCall>();
+
+        /// <summary>The turn as the provider sent it; see <see cref="AiMessage.Raw"/>.</summary>
+        public object Raw;
+        public string RawProvider = "";
 
         /// <summary>Set when the turn ended badly. Null on success.</summary>
         public string Trouble;
@@ -154,6 +210,9 @@ namespace NextScan.Ai
         public string Instruction = "";
 
         public List<AiMessage> Messages = new List<AiMessage>();
+
+        /// <summary>What the model may ask the application to do. Empty for a plain conversation.</summary>
+        public List<AiTool> Tools = new List<AiTool>();
     }
 
     /// <summary>

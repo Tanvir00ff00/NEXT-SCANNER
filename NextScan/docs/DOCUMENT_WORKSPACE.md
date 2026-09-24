@@ -167,6 +167,37 @@ require the logo. The engine is taken from ONLYOFFICE's own 9.4.0 releases.
 3. **Done for the fonts on this machine.** SutonnyMJ ANSI and Unicode Bengali
    with conjuncts render as Word renders them (compared against Word's own PDF
    of the same file). Still to check on a real shop bill.
-4. **Not started.** Office where present: exact PDF export, PDF to Word,
-   .doc/.xls. Until then the editor's own Download As and Print are not wired.
-5. Only then, the assistant working on the open document.
+4. **Done without Office.** The editor's own Print, File > Download As and
+   Save Copy, Review > Compare and Combine, and Insert > Text from File all
+   call a Document Server; each is answered in-process (DocView.Server.cs) with
+   x2t doing the conversion. Print goes through Windows' Print dialog. Office
+   where present (exact PDF export, .doc/.xls) is still a later option.
+5. **Done.** The assistant works on the open documents (below).
+
+## The assistant in the workspace (2026-09-24)
+
+The Assist panel's model is given eleven tools (src/App/StudioDocTools.cs):
+list, open, create, read, edit, get the selection, save, export, show, close,
+and make a PDF of the scanned pages. They work on the same tabs the operator
+sees, through the same workspace, so everything the assistant does is on
+screen, undoable with Ctrl+Z, and marks the tab unsaved.
+
+- **Reading** is done by fixed scripts compiled into the application
+  (src/App/scripts/read-*.js): Word as blocks (paragraphs with style and fonts,
+  tables as rows), Excel as used cells with values and formulas, PowerPoint as
+  text per slide, PDF as x2t's text. The fonts are there so a SutonnyMJ
+  paragraph can be recognised as Bijoy text rather than taken for English.
+- **Changing** is a script for ONLYOFFICE's document API, run the way its
+  plugins are run (one undo point, recalculated). A failing script comes back to
+  the model as its error line and a note that what ran before the error stays.
+- **9.4 changed `Api.CreateTable` to (rows, cols).** Models know the old
+  order; the instruction says so, and a new table has no borders unless given
+  them, which the instruction also says.
+- Tool calls go over all three providers' own tool formats. Each round is
+  shown in the transcript as a small step line ("✓ Opened bill.docx"). A turn
+  stops at 24 rounds, and a failed or stopped turn is taken out of the history
+  whole, so the next request is never left with a call and no result.
+- Checked off-screen against real editors: every tool, and a real Gemini Flash
+  loop given a Bengali request ("make a Word document with a heading and a
+  table … then a PDF") did it in four calls; the PDF has the Bengali heading
+  and a bordered table.

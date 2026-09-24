@@ -97,10 +97,33 @@ namespace NextScan.Ai
             var messages = new List<ChatMessage>();
             if (!string.IsNullOrEmpty(request.Instruction))
                 messages.Add(ChatMessage.CreateSystemMessage(request.Instruction));
+
             foreach (AiMessage m in request.Messages)
             {
-                if (m.Role != AiRole.User) { messages.Add(ChatMessage.CreateAssistantMessage(m.Text)); continue; }
-                if (m.Image == null) { messages.Add(ChatMessage.CreateUserMessage(m.Text)); continue; }
+                // Each result is its own message, answering one call by its id.
+                if (m.ToolResults.Count > 0)
+                {
+                    foreach (AiToolResult r in m.ToolResults)
+                        messages.Add(new ToolChatMessage(r.CallId,
+                            (r.IsError ? "ERROR: " : "") + (string.IsNullOrEmpty(r.Content) ? "(nothing)" : r.Content)));
+                    if (string.IsNullOrEmpty(m.Text)) continue;
+                }
+
+                if (m.Role != AiRole.User)
+                {
+                    if (m.ToolCalls.Count == 0) { messages.Add(ChatMessage.CreateAssistantMessage(m.Text ?? "")); continue; }
+
+                    var calls = new List<ChatToolCall>();
+                    foreach (AiToolCall c in m.ToolCalls)
+                        calls.Add(ChatToolCall.CreateFunctionToolCall(c.Id, c.Name,
+                            BinaryData.FromString(string.IsNullOrEmpty(c.ArgumentsJson) ? "{}" : c.ArgumentsJson)));
+                    var assistant = new AssistantChatMessage(calls);
+                    if (!string.IsNullOrEmpty(m.Text)) assistant.Content.Add(ChatMessageContentPart.CreateTextPart(m.Text));
+                    messages.Add(assistant);
+                    continue;
+                }
+
+                if (m.Image == null) { messages.Add(ChatMessage.CreateUserMessage(m.Text ?? "")); continue; }
 
                 messages.Add(ChatMessage.CreateUserMessage(
                     ChatMessageContentPart.CreateImagePart(
@@ -109,10 +132,18 @@ namespace NextScan.Ai
             }
 
             var options = new ChatCompletionOptions { ReasoningEffortLevel = EffortFor(request.Thinking) };
+            foreach (AiTool t in request.Tools)
+                options.Tools.Add(ChatTool.CreateFunctionTool(t.Name, t.Description, BinaryData.FromString(t.ParametersJson), null));
 
-            var reply = new AiReply();
+            var reply = new AiReply { RawProvider = Info.Id };
             reply.Usage.Model = request.Model;
             var text = new System.Text.StringBuilder();
+
+            // Calls stream in pieces, keyed by their index in the turn: the id
+            // and name come once, the arguments a fragment at a time.
+            var ids = new SortedDictionary<int, string>();
+            var names = new Dictionary<int, string>();
+            var args = new Dictionary<int, System.Text.StringBuilder>();
 
             await foreach (StreamingChatCompletionUpdate update in
                            client.CompleteChatStreamingAsync(messages, options, cancel))
@@ -124,6 +155,14 @@ namespace NextScan.Ai
                     if (onText != null) onText(part.Text);
                 }
 
+                foreach (StreamingChatToolCallUpdate call in update.ToolCallUpdates)
+                {
+                    if (!ids.ContainsKey(call.Index)) { ids[call.Index] = ""; names[call.Index] = ""; args[call.Index] = new System.Text.StringBuilder(); }
+                    if (!string.IsNullOrEmpty(call.ToolCallId)) ids[call.Index] = call.ToolCallId;
+                    if (!string.IsNullOrEmpty(call.FunctionName)) names[call.Index] = call.FunctionName;
+                    if (call.FunctionArgumentsUpdate != null) args[call.Index].Append(call.FunctionArgumentsUpdate.ToString());
+                }
+
                 // Usage arrives on the last update and is null on the others.
                 if (update.Usage != null)
                 {
@@ -131,6 +170,14 @@ namespace NextScan.Ai
                     reply.Usage.OutputTokens = update.Usage.OutputTokenCount;
                 }
             }
+
+            foreach (var kv in ids)
+                reply.ToolCalls.Add(new AiToolCall
+                {
+                    Id = kv.Value,
+                    Name = names[kv.Key],
+                    ArgumentsJson = args[kv.Key].Length > 0 ? args[kv.Key].ToString() : "{}",
+                });
 
             reply.Text = text.ToString();
             return reply;

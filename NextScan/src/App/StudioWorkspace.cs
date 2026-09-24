@@ -180,6 +180,9 @@ namespace NextScan.App
     /// <summary>One open document.</summary>
     public class DocTab
     {
+        /// <summary>A short name the assistant uses for this document: doc1, doc2. Never reused in a session.</summary>
+        public string Id = "";
+
         /// <summary>The file on disk. Empty for a new document that has not been saved yet.</summary>
         public string Path = "";
 
@@ -206,6 +209,7 @@ namespace NextScan.App
         readonly List<DocTab> _tabs = new List<DocTab>();
         DocTab _current;               // null while Home is showing
         int _untitled;
+        int _ids;
 
         /// <summary>
         /// Makes the editor for a tab. The workspace owns the tab and the place
@@ -250,6 +254,14 @@ namespace NextScan.App
         public NsDocTabs Strip { get { return _strip; } }
 
         public DocTab Current { get { return _current; } }
+
+        /// <summary>The open document with this id, or null.</summary>
+        public DocTab ById(string id)
+        {
+            foreach (DocTab tab in _tabs)
+                if (string.Equals(tab.Id, id, StringComparison.OrdinalIgnoreCase)) return tab;
+            return null;
+        }
         public IList<DocTab> Tabs { get { return _tabs.AsReadOnly(); } }
 
         // ---- opening -------------------------------------------------------
@@ -320,6 +332,7 @@ namespace NextScan.App
                 return false;
             }
 
+            tab.Id = "doc" + (++_ids).ToString(CultureInfo.InvariantCulture);
             tab.Surface = surface;
             surface.Visible = false;
             surface.Dock = DockStyle.Fill;

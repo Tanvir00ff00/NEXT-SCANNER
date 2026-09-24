@@ -66,6 +66,28 @@ namespace NextScan.App
         // ---- state ---------------------------------------------------------
 
         readonly List<AiMessage> _history = new List<AiMessage>();
+
+        /// <summary>
+        /// What the assistant may do in the document workspace (StudioDocTools).
+        /// Null or empty for a plain conversation.
+        /// </summary>
+        public Func<List<AiTool>> ToolsSource;
+
+        /// <summary>Runs one tool the model asked for, on the UI thread.</summary>
+        public Func<AiToolCall, Task<AiToolResult>> ToolRunner;
+
+        /// <summary>Where the operator's latest turn starts in the history: a failed turn is taken back to here.</summary>
+        int _turnStart;
+
+        /// <summary>How many times the model has asked for tools in this turn.</summary>
+        int _rounds;
+
+        /// <summary>
+        /// A turn that asks for more than this has lost its way. Enough for
+        /// "open these three files, total the column in each, and write a
+        /// summary document", which is the longest honest request in a shop.
+        /// </summary>
+        const int MaxRounds = 24;
         readonly List<NsBubble> _bubbles = new List<NsBubble>();
         readonly List<NsPill> _chips = new List<NsPill>();
 
@@ -184,7 +206,7 @@ namespace NextScan.App
         /// session id in this string means the cache never hits, and nothing
         /// anywhere says so -- the only sign is a token count that stays high.
         /// </summary>
-        const string Instruction =
+        public const string Instruction =
             "You are the assistant inside NextScan Studio, a scanner application used in a print " +
             "and copy shop. The operator scans identity papers, bills, forms and certificates, in " +
             "Bengali, English, or both on one page.\n\n" +
@@ -195,6 +217,44 @@ namespace NextScan.App
             "Reply in the language the operator writes in, and keep names, numbers and dates " +
             "exactly as they are written. Write plainly: no headings unless the page has them, " +
             "and no preamble about what you are about to do.";
+
+        /// <summary>
+        /// Added to the instruction when the document tools are there. Stable
+        /// text: it is part of the cached prefix, so nothing in it may change
+        /// from one turn to the next.
+        /// </summary>
+        public const string DocumentInstruction =
+            "\n\nYou also work in NextScan's document workspace, where Word documents, Excel " +
+            "workbooks, PowerPoint presentations and PDFs are open as tabs, through the tools you " +
+            "are given. Use them whenever the operator talks about a document, a file, a bill, a " +
+            "letter, a sheet or a table, or asks you to make, fill, change, check, save or export " +
+            "one.\n\n" +
+            "How to work:\n" +
+            "- Call list_documents first when you are not sure what is open.\n" +
+            "- Read a document before changing it, and read it again afterwards to check the " +
+            "change is what was asked. Never describe content you have not read.\n" +
+            "- Change documents with edit_document: a script for ONLYOFFICE's document API (the " +
+            "Office JavaScript API of ONLYOFFICE Document Builder), the body of a function given " +
+            "Api. Word: var d = Api.GetDocument(); d.GetElement(i); Api.CreateParagraph(); " +
+            "p.AddText(text); p.SetBold(true); p.SetJc('center'); d.Push(p); " +
+            "d.InsertContent([p1, p2]); Api.CreateTable(rows, cols) (rows first: this version changed the order); table.GetCell(r, c)" +
+            ".GetContent().GetElement(0).AddText(text); d.Push(table); a new table has no borders, so give it table.SetTableBorderAll('single', 4, 0, 0, 0, 0) and table.SetWidth('percent', 100); paragraph.Delete(). " +
+            "Excel: var s = Api.GetActiveSheet(); s.GetRange('A1').SetValue(v); " +
+            "s.GetRange('D2').SetValue('=B2*C2') for a formula; Api.GetSheets(); " +
+            "Api.AddSheet(name). PowerPoint: var p = Api.GetPresentation(); Api.CreateSlide(); " +
+            "p.AddSlide(slide); Api.CreateShape('rect', w, h, fill, stroke); " +
+            "shape.GetDocContent(); slide.AddObject(shape) (sizes in EMU, 1 cm = 360000). " +
+            "Keep each script small and return something that shows what it did. If a " +
+            "script fails you are told why: fix it and try again.\n" +
+            "- Save or export only when the operator asked. Never discard unsaved changes " +
+            "unless the operator said so.\n" +
+            "- Bengali: text in a paragraph whose fonts include SutonnyMJ or another Bijoy font " +
+            "(names ending in MJ) is old ANSI Bijoy text -- 'Avwg evsjvq' is Bengali shown in " +
+            "that font, not English. Leave such text as it is unless asked, and when you add " +
+            "Bengali write it in Unicode with a Unicode Bengali font such as Nirmala UI or " +
+            "Kalpurush, unless the operator asks for Bijoy.\n" +
+            "- When you are done, say in one or two sentences what you did, in the " +
+            "operator's language.";
 
         // =====================================================================
         // Build
@@ -699,6 +759,8 @@ namespace NextScan.App
                 turn.Image = image;
                 turn.ImageMediaType = "image/jpeg";
             }
+            _turnStart = _history.Count;
+            _rounds = 0;
             _history.Add(turn);
 
             Ask(provider);
@@ -721,14 +783,20 @@ namespace NextScan.App
                 return;
             }
 
+            List<AiTool> tools = ToolsSource != null && ToolRunner != null ? ToolsSource() : null;
+            bool working = tools != null && tools.Count > 0;
+
             var request = new AiRequest
             {
                 Model = model,
                 Thinking = _thinking,
-                MaxOutputTokens = 4096,
-                Instruction = Instruction,
+                // Room for a script and its explanation; a reply that is cut
+                // off mid-script is a script that does not run.
+                MaxOutputTokens = working ? 8192 : 4096,
+                Instruction = working ? Instruction + DocumentInstruction : Instruction,
             };
             request.Messages.AddRange(_history);
+            if (working) request.Tools.AddRange(tools);
 
             _streamed.Length = 0;
             _live = AddBubble("", false, false);
@@ -760,6 +828,91 @@ namespace NextScan.App
                 });
         }
 
+        /// <summary>
+        /// Runs what the model asked for, one call after another, each shown
+        /// in the transcript as it happens, then asks the model again with the
+        /// results. On the UI thread throughout: every tool works a document in
+        /// the window, and the window is one thread's.
+        /// </summary>
+        async void RunTools(IAiProvider provider, List<AiToolCall> calls)
+        {
+            Busy(true);
+            CancellationToken token = _cancel != null ? _cancel.Token : CancellationToken.None;
+            var answered = new AiMessage { Role = AiRole.User };
+
+            foreach (AiToolCall call in calls)
+            {
+                if (token.IsCancellationRequested)
+                {
+                    answered.ToolResults.Add(new AiToolResult { CallId = call.Id, Name = call.Name, IsError = true, Content = "Stopped by the operator." });
+                    continue;
+                }
+
+                NsBubble step = AddBubble("… " + Describe(call), false, false, false);
+                step.Quiet = true;
+                step.Refresh_();
+                Say(Describe(call));
+
+                AiToolResult result;
+                try { result = await ToolRunner(call); }
+                catch (Exception ex) { result = new AiToolResult { CallId = call.Id, Name = call.Name, IsError = true, Content = ex.Message, Display = ex.Message }; }
+                if (result == null) result = new AiToolResult { CallId = call.Id, Name = call.Name, IsError = true, Content = "Nothing came back." };
+                result.CallId = call.Id;
+                result.Name = call.Name;
+
+                if (IsDisposed) return;
+                step.Text = (result.IsError ? "✕ " : "✓ ") + (result.Display.Length > 0 ? result.Display : Describe(call));
+                step.Trouble = result.IsError;
+                step.Refresh_();
+                LayoutTranscript(true);
+                answered.ToolResults.Add(result);
+            }
+
+            if (IsDisposed) return;
+            _history.Add(answered);
+
+            if (token.IsCancellationRequested)
+            {
+                Busy(false);
+                AddNote("Stopped.", false);
+                if (_turnStart >= 0 && _turnStart < _history.Count)
+                    _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+                Say("Stopped");
+                return;
+            }
+
+            Ask(provider);
+        }
+
+        /// <summary>What a tool call is about to do, in words, before it has a result to report.</summary>
+        static string Describe(AiToolCall call)
+        {
+            switch (call.Name)
+            {
+                case "list_documents": return "Looking at the open documents";
+                case "open_document": return "Opening a file";
+                case "create_document": return "Starting a new document";
+                case "read_document": return "Reading the document";
+                case "edit_document": return "Changing the document";
+                case "get_selection": return "Reading the selection";
+                case "save_document": return "Saving";
+                case "export_document": return "Writing a copy";
+                case "show_document": return "Bringing a document to the front";
+                case "close_document": return "Closing a document";
+                case "pdf_from_scanned_pages": return "Making a PDF of the scanned pages";
+                default: return call.Name;
+            }
+        }
+
+        void RemoveBubble(NsBubble bubble)
+        {
+            if (bubble == null) return;
+            _bubbles.Remove(bubble);
+            _column.Controls.Remove(bubble);
+            bubble.Dispose();
+            LayoutTranscript(false);
+        }
+
         void Grew(string piece)
         {
             if (_live == null) return;
@@ -784,8 +937,12 @@ namespace NextScan.App
                 else AddNote(trouble, true);
 
                 // The turn did not happen, so it does not belong in the history
-                // the next one is built from.
-                if (_history.Count > 0) _history.RemoveAt(_history.Count - 1);
+                // the next one is built from -- all of it, tool calls included:
+                // a call left without its result is a history every provider
+                // refuses. What the tools already did to documents stays done,
+                // and on screen, where the operator can see and undo it.
+                if (_turnStart >= 0 && _turnStart < _history.Count)
+                    _history.RemoveRange(_turnStart, _history.Count - _turnStart);
                 _live = null;
                 LayoutTranscript(true);
                 // Not cleared: the status bar says what went wrong, in one line.
@@ -795,6 +952,43 @@ namespace NextScan.App
             }
 
             AiReply reply = done.Result;
+
+            // The model wants something done before it can answer.
+            if (reply != null && reply.ToolCalls.Count > 0 && ToolRunner != null)
+            {
+                Count(reply);
+                var asked = new AiMessage
+                {
+                    Role = AiRole.Assistant,
+                    Text = reply.Text ?? "",
+                    Raw = reply.Raw,
+                    RawProvider = reply.RawProvider ?? "",
+                };
+                asked.ToolCalls.AddRange(reply.ToolCalls);
+                _history.Add(asked);
+
+                // Whatever it said before asking stays as its own turn; a
+                // bubble with nothing in it goes.
+                if (_live != null)
+                {
+                    if ((reply.Text ?? "").Trim().Length == 0) RemoveBubble(_live);
+                    else { _live.Pending = false; _live.Text = reply.Text; }
+                    _live = null;
+                }
+
+                if (++_rounds > MaxRounds)
+                {
+                    AddNote("Stopped after " + MaxRounds + " steps: this is taking more steps than it should. " +
+                            "Ask again, perhaps in smaller parts.", true);
+                    if (_turnStart >= 0 && _turnStart < _history.Count)
+                        _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+                    return;
+                }
+
+                RunTools(Provider(), reply.ToolCalls);
+                return;
+            }
+
             string text = reply == null ? "" : (reply.Text ?? "");
             if (text.Trim().Length == 0) text = "(the model returned nothing)";
 
@@ -817,7 +1011,18 @@ namespace NextScan.App
         void Keep()
         {
             if (_chatId.Length == 0) _chatId = AiHistory.NewId();
-            AiHistory.Save(_chatId, _history, Provider().Info.Name,
+
+            // What was said, not the machinery: tool calls and their results
+            // are steps of a turn, and a conversation reopened later has no
+            // documents open for them to refer to.
+            var said = new List<AiMessage>();
+            foreach (AiMessage m in _history)
+            {
+                if (m.ToolResults.Count > 0 && string.IsNullOrEmpty(m.Text)) continue;
+                if (string.IsNullOrEmpty(m.Text)) continue;
+                said.Add(m.Role == AiRole.User ? AiMessage.FromUser(m.Text) : AiMessage.FromAssistant(m.Text));
+            }
+            AiHistory.Save(_chatId, said, Provider().Info.Name,
                            AiModels.NameOf(Provider(), _model), _pageFor);
         }
 

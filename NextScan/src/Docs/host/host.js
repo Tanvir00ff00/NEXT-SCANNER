@@ -85,6 +85,13 @@
                     autosave: false,
                     forcesave: false,
                     compactHeader: true,
+                    // "Close file" in the File menu, answered by closing the tab.
+                    close: { visible: true, text: 'Close file' },
+                    // ONLYOFFICE's plugins fetch from the internet or from a
+                    // server, and one of them is an AI assistant of its own;
+                    // NextScan's assistant is the panel beside the document.
+                    plugins: false,
+                    macros: false,
                     toolbarNoTabs: false,
                     hideRightMenu: false,
                     uiTheme: dark ? 'theme-dark' : 'theme-light',
@@ -115,6 +122,10 @@
                     send({ type: 'error', message: data ? (data.errorDescription || ('code ' + data.errorCode)) : 'unknown' });
                 },
                 onRequestSave: function () { save(ext); },
+                // Their presence is what makes the editor offer "Create new"
+                // and "Close file"; the application does both, as tabs.
+                onRequestCreateNew: function () { send({ type: 'new', kind: typeOf(ext) }); },
+                onRequestClose: function () { send({ type: 'close' }); },
                 onDownloadAs: function () { }
             }
         });
@@ -191,6 +202,8 @@
     window.addEventListener('message', function (e) {
         var d = e.data;
         if (d && d.type === 'oo-save-request') save(ext);
+        else if (d && d.type === 'oo-download') send({ type: 'download', url: d.url });
+        else if (d && d.type === 'oo-print') send({ type: 'print', url: d.url });
     });
 
     try {
@@ -200,8 +213,35 @@
             if (!m) return;
             if (m.type === 'save') save(ext);
             else if (m.type === 'saveAs') save(m.ext || ext);
+            else if (m.type === 'run') run(m);
         });
     } catch (e) { }
+
+    // ---- the assistant's requests -----------------------------------------
+    // Code for ONLYOFFICE's document API, run in the editor's frame by the
+    // shim's __nsRun, and its result sent back under the request's id.
+    function run(m) {
+        var f = frame();
+        var w = f && f.contentWindow;
+        if (!w || typeof w.__nsRun !== 'function') {
+            send({ type: 'ran', id: m.id, ok: false, error: 'The editor is not ready yet.' });
+            return;
+        }
+        var promise;
+        if (m.selection) {
+            promise = Promise.resolve().then(function () {
+                var api = w.Asc && w.Asc.editor;
+                return api && api.pluginMethod_GetSelectedText ? api.pluginMethod_GetSelectedText() : '';
+            });
+        } else {
+            promise = w.__nsRun(m.code, m.recalc !== false);
+        }
+        promise.then(function (result) {
+            send({ type: 'ran', id: m.id, ok: true, result: JSON.stringify(result === undefined ? null : result) });
+        }, function (e) {
+            send({ type: 'ran', id: m.id, ok: false, error: String(e && (e.stack || e.message) || e) });
+        });
+    }
 
     // ---- go -------------------------------------------------------------
 

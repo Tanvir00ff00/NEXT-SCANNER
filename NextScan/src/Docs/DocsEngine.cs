@@ -305,6 +305,56 @@ namespace NextScan.Docs
             Run(Quote(parameters), output, "merge the changes into " + Path.GetFileName(output));
         }
 
+        /// <summary>
+        /// A conversion described the way a Document Server describes one to x2t:
+        /// explicit formats, this machine's font catalog, and the editor's own
+        /// options passed through. The two-argument command line guesses from
+        /// extensions and finds no fonts, which is why a PDF made that way
+        /// failed; given the catalog, x2t's PDF matches Word's own.
+        /// </summary>
+        public static void ConvertWith(string from, string to, int formatTo, int formatFrom = 0,
+                                       string jsonParams = null, string thumbnailXml = null, int lcid = 0)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(to));
+            var xml = new StringBuilder();
+            xml.Append("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+            xml.Append("<TaskQueueDataConvert xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">");
+            xml.Append("<m_sFileFrom>").Append(Xml(from)).Append("</m_sFileFrom>");
+            xml.Append("<m_sFileTo>").Append(Xml(to)).Append("</m_sFileTo>");
+            if (formatFrom > 0) xml.Append("<m_nFormatFrom>").Append(formatFrom).Append("</m_nFormatFrom>");
+            xml.Append("<m_nFormatTo>").Append(formatTo).Append("</m_nFormatTo>");
+            xml.Append("<m_sFontDir>").Append(Xml(Fonts)).Append("</m_sFontDir>");
+            xml.Append("<m_sAllFontsPath>").Append(Xml(Path.Combine(Fonts, "AllFonts.js"))).Append("</m_sAllFontsPath>");
+            xml.Append("<m_sThemeDir>").Append(Xml(Path.Combine(Editors, "sdkjs", "slide", "themes"))).Append("</m_sThemeDir>");
+            xml.Append("<m_bIsNoBase64>true</m_bIsNoBase64>");
+            if (lcid > 0) xml.Append("<m_nLcid>").Append(lcid).Append("</m_nLcid>");
+            if (!string.IsNullOrEmpty(jsonParams)) xml.Append("<m_sJsonParams>").Append(Xml(jsonParams)).Append("</m_sJsonParams>");
+            if (!string.IsNullOrEmpty(thumbnailXml)) xml.Append(thumbnailXml);
+            xml.Append("</TaskQueueDataConvert>");
+
+            string parameters = Path.Combine(Path.GetDirectoryName(to), "params-" + DateTime.Now.Ticks.ToString(CultureInfo.InvariantCulture) + ".xml");
+            File.WriteAllText(parameters, xml.ToString(), new UTF8Encoding(false));
+            try { Run(Quote(parameters), to, "write " + Path.GetFileName(to)); }
+            finally { try { File.Delete(parameters); } catch { } }
+        }
+
+        /// <summary>The editor's number for a file format, from an extension. 0 if there is none.</summary>
+        public static int FormatOf(string ext)
+        {
+            switch ((ext ?? "").TrimStart('.').ToLowerInvariant())
+            {
+                case "docx": return 0x41; case "doc": return 0x42; case "odt": return 0x43; case "rtf": return 0x44;
+                case "txt": return 0x45; case "html": case "htm": return 0x46; case "epub": return 0x48; case "fb2": return 0x49;
+                case "docm": return 0x4b; case "dotx": return 0x4c; case "ott": return 0x4f; case "md": return 0x5c;
+                case "pptx": return 0x81; case "ppt": return 0x82; case "odp": return 0x83; case "ppsx": return 0x84;
+                case "potx": return 0x87; case "otp": return 0x8a;
+                case "xlsx": return 0x101; case "xls": return 0x102; case "ods": return 0x103; case "csv": return 0x104;
+                case "xlsm": return 0x105; case "xltx": return 0x106; case "ots": return 0x10a;
+                case "pdf": return 0x201; case "pdfa": return 0x209;
+                default: return 0;
+            }
+        }
+
         static string Xml(string s)
         {
             return (s ?? "").Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
