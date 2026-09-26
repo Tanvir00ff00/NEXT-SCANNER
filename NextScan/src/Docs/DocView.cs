@@ -559,8 +559,26 @@ namespace NextScan.Docs
             if (string.IsNullOrEmpty(raw)) return;
 
             Dictionary<string, object> message;
-            try { message = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(raw); }
-            catch { return; }
+            // MaxJsonLength raised deliberately. The default is 2,097,152
+            // characters, and a whole-document read arrives here as one "ran"
+            // message carrying the script's result as a single string, so
+            // anything past a couple of hundred pages of text threw
+            // ArgumentException -- swallowed by the catch below, which left
+            // the pending call unanswered and the operator staring at "the
+            // editor did not answer within a minute". The editor's own text is
+            // the cap here: 64 MB is far past any document and keeps a runaway
+            // frame from turning into an allocation storm.
+            try
+            {
+                message = new System.Web.Script.Serialization.JavaScriptSerializer
+                { MaxJsonLength = 64 * 1024 * 1024 }
+                    .Deserialize<Dictionary<string, object>>(raw);
+            }
+            catch (Exception ex)
+            {
+                if (Trace != null) Trace("could not read a message from the page: " + ex.Message);
+                return;
+            }
             if (message == null) return;
             Func<string, string> Field = delegate (string name)
             {

@@ -435,7 +435,18 @@ namespace NextScan.Core
             // what was drawn round it.
             int[] label = new int[stride * height];
             int best = 0, bestSize = 0;
-            int[] queue = new int[width * height];
+
+            // Stride * height, exactly like the labels above, and not
+            // width * height: the queue holds the flat, strided index
+            // y * stride + x, so its highest reachable value is
+            // (height - 1) * stride + (width - 1). Sizing it width * height
+            // left it short by (stride - width) * (height - 1) entries, which
+            // is zero for a square mask and positive for every page whose
+            // low-res mask is narrower than the stride -- so a portrait A4
+            // capture overflowed the moment a component reached the bottom
+            // quarter of the page, and Propose's catch turned the exception
+            // into a note saying the model was unusable.
+            int[] queue = new int[stride * height];
 
             for (int y = 0; y < height; y++)
                 for (int x = 0; x < width; x++)

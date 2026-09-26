@@ -672,8 +672,14 @@ namespace NextScan.Twain
             IntPtr capPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(TW_CAPABILITY)));
             try
             {
+                // No MemFree on any path out of here: the finally below owns
+                // the container. Freeing it before returning as well freed it
+                // twice over -- a double free inside the driver's own heap,
+                // from DSM_MemFree or GlobalFree depending on the DSM, once
+                // per CapSet (there are a dozen per scan) for a driver whose
+                // MemLock hands back NULL.
                 IntPtr locked = MemLock(container);
-                if (locked == IntPtr.Zero) { MemFree(container); return false; }
+                if (locked == IntPtr.Zero) return false;
                 try
                 {
                     Marshal.WriteInt16(locked, 0, unchecked((short)itemType));

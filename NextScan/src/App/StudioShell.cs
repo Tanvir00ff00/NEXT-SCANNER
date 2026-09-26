@@ -300,6 +300,46 @@ namespace NextScan.App
         readonly List<PointF[]> _cropPlanOutlines = new List<PointF[]>();
 
         /// <summary>
+        /// The plan as it stood when a scan started, copied so the scan thread
+        /// never touches the live lists.
+        ///
+        /// The plan belongs to the UI thread -- clicking bare glass clears it,
+        /// right-clicking a region removes it -- and the canvas stays live
+        /// during a scan, so those stay live too. A feeder batch of twenty
+        /// pages spends seconds inside the cut for each region, and
+        /// enumerating a List the UI is mutating throws "Collection was
+        /// modified": the exception unwound into the scan, which reported the
+        /// whole healthy batch as a failure. Removing a region meanwhile
+        /// shifted the corner and outline lists against the areas, so the same
+        /// race could cut the wrong rectangle with no error at all.
+        ///
+        /// The PointF[] arrays are shared, not copied, and that is safe: the
+        /// plan replaces those elements outright rather than writing into them.
+        /// </summary>
+        sealed class CropPlan
+        {
+            internal readonly List<RectangleF> Areas;
+            internal readonly List<PointF[]> Corners;
+            internal readonly List<PointF[]> Outlines;
+            internal readonly bool AutoDeskew;
+
+            internal CropPlan(List<RectangleF> areas, List<PointF[]> corners,
+                              List<PointF[]> outlines, bool autoDeskew)
+            {
+                Areas = areas; Corners = corners; Outlines = outlines; AutoDeskew = autoDeskew;
+            }
+        }
+
+        /// <summary>Takes the copy. Called on the UI thread, where the lists are.</summary>
+        CropPlan SnapshotCropPlan()
+        {
+            return new CropPlan(new List<RectangleF>(_cropPlan),
+                                new List<PointF[]>(_cropPlanCorners),
+                                new List<PointF[]>(_cropPlanOutlines),
+                                _settings.AutoDeskew);
+        }
+
+        /// <summary>
         /// Runs the finder again over the preview already on screen.
         ///
         /// Every switch on the Detect panel changes what finding would produce,
@@ -4932,6 +4972,14 @@ namespace NextScan.App
             DeviceDescriptor dev = _device;
             List<RawImage> got = new List<RawImage>();
 
+            // Taken here, on the UI thread, because the plan belongs to it: the
+            // scan thread must not enumerate lists the operator can still be
+            // editing behind the scan. See CropPlan.
+            CropPlan plan = SnapshotCropPlan();
+            RectangleF scanRegion = _lastRequestedRegion;
+            if (scanRegion.Width <= 0.01f || scanRegion.Height <= 0.01f)
+                scanRegion = new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
+
             Thread t = new Thread(delegate ()
             {
                 NsResult r;
@@ -4946,7 +4994,7 @@ namespace NextScan.App
                                          // downstream - filmstrip, journal, export,
                                          // the Photoshop handoff - then treats each
                                          // item as a page in its own right.
-                                         foreach (RawImage piece in ApplyAutoCrop(img))
+                                         foreach (RawImage piece in ApplyAutoCrop(img, scanRegion, plan))
                                          {
                                              got.Add(piece);
                                              lock (_lastScanPages) _lastScanPages.Add(piece);
@@ -5243,7 +5291,7 @@ namespace NextScan.App
             RawImage source = PageToCutFrom(out covers);
             if (source == null || !source.IsValid) return null;
 
-            List<RawImage> pieces = ApplyAutoCrop(source, covers);
+            List<RawImage> pieces = ApplyAutoCrop(source, covers, SnapshotCropPlan());
             if (pieces == null || index < 0 || index >= pieces.Count) return null;
             if (ReferenceEquals(pieces[index], source)) return null;   // nothing was cut
             return pieces[index];
@@ -5667,7 +5715,7 @@ namespace NextScan.App
             RectangleF region = _lastRequestedRegion;
             if (region.Width <= 0.01f || region.Height <= 0.01f)
                 region = new RectangleF(0f, 0f, (float)_activeBedW, (float)_activeBedH);
-            return ApplyAutoCrop(page, region);
+            return ApplyAutoCrop(page, region, SnapshotCropPlan());
         }
 
         /// <summary>
@@ -5677,14 +5725,18 @@ namespace NextScan.App
         /// The scan path passes the region it asked the scanner for. The
         /// Photoshop handoff passes the area the page on screen came from, which
         /// may be a preview of the whole bed rather than a scan of part of it.
+        ///
+        /// The plan arrives as a copy taken on the UI thread, because this runs
+        /// on the scan thread while the operator can still be editing the plan
+        /// behind it. See CropPlan.
         /// </summary>
-        List<RawImage> ApplyAutoCrop(RawImage page, RectangleF region)
+        List<RawImage> ApplyAutoCrop(RawImage page, RectangleF region, CropPlan plan)
         {
             List<RawImage> single = new List<RawImage> { page };
             if (page == null) return single;
 
             if (!_settings.AutoCrop) { _autoCropNote = "auto crop is off"; return single; }
-            if (_cropPlan.Count == 0)
+            if (plan == null || plan.Areas.Count == 0)
             {
                 _autoCropNote = "no preview, so the whole area was kept";
                 return single;
@@ -5695,7 +5747,7 @@ namespace NextScan.App
             List<RawImage> pieces = new List<RawImage>();
             int index = 0;
 
-            foreach (RectangleF inches in _cropPlan)
+            foreach (RectangleF inches in plan.Areas)
             {
                 index++;
                 RectangleF norm = new RectangleF(
@@ -5716,18 +5768,18 @@ namespace NextScan.App
                 }
 
                 RawImage cut = null;
-                if (index <= _cropPlanOutlines.Count && _cropPlanOutlines[index - 1] != null)
+                if (index <= plan.Outlines.Count && plan.Outlines[index - 1] != null)
                 {
-                    cut = PolygonCropExtraction.Extract(page, new PointF[][] { _cropPlanOutlines[index - 1] },
-                        _cropPlanCorners[index - 1], region, index, _settings.AutoDeskew);
+                    cut = PolygonCropExtraction.Extract(page, new PointF[][] { plan.Outlines[index - 1] },
+                        plan.Corners[index - 1], region, index, plan.AutoDeskew);
                     if (cut == null)
                     {
                         _autoCropNote = "the preview outline could not be applied; the whole scan was kept";
                         return single;
                     }
                 }
-                else if (_settings.AutoDeskew && index <= _cropPlanCorners.Count)
-                    cut = PlannedCropExtraction.Extract(page, _cropPlanCorners[index - 1], region, index);
+                else if (plan.AutoDeskew && index <= plan.Corners.Count)
+                    cut = PlannedCropExtraction.Extract(page, plan.Corners[index - 1], region, index);
                 if (cut == null) cut = CutPage(page, box);
                 if (cut != null && cut.IsValid) { cut.PageIndex = index; pieces.Add(cut); }
             }
@@ -6420,7 +6472,7 @@ namespace NextScan.App
             {
                 RectangleF covers;
                 RawImage shown = PageToCutFrom(out covers);
-                List<RawImage> pieces = ApplyAutoCrop(shown, covers);
+                List<RawImage> pieces = ApplyAutoCrop(shown, covers, SnapshotCropPlan());
 
                 // ApplyAutoCrop hands the page straight back when it could not
                 // use the plan; only a real cut is worth taking this path for.

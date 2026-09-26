@@ -467,13 +467,23 @@ namespace NextScan.App
                 base.OnMouseDown(e);
             }
 
-            protected override void OnMouseWheel(MouseEventArgs e)
+            protected override void WndProc(ref Message m)
             {
-                if (!_scrolls) return;
-                int most = Math.Max(0, Total() - Height);
-                _scroll = Math.Max(0, Math.Min(most, _scroll + (e.Delta > 0 ? -40 : 40)));
-                Invalidate();
-                base.OnMouseWheel(e);
+                // The wheel belongs to the open menu, and stops there: a menu
+                // that does not scroll passes the message on, and the page
+                // behind it moved instead. A Sheet is a Panel, not an NsBase,
+                // so there is no EatWheel to borrow -- the message is simply
+                // not handed on, which is the whole effect.
+                if (m.Msg == 0x020A)
+                {
+                    if (!_scrolls) return;
+                    int delta = unchecked((short)((long)m.WParam >> 16));
+                    int most = Math.Max(0, Total() - Height);
+                    _scroll = Math.Max(0, Math.Min(most, _scroll + (delta > 0 ? -40 : 40)));
+                    Invalidate();
+                    return;
+                }
+                base.WndProc(ref m);
             }
 
             protected override void OnPaint(PaintEventArgs e)
@@ -592,6 +602,10 @@ namespace NextScan.App
             Cursor = Cursors.Hand;
             SetStyle(ControlStyles.Selectable, false);
             TabStop = false;
+
+            // WndProc catches the wheel and hands it here; OnMouseWheel only
+            // sees synthetic ones.
+            WheelDelta += delegate (int delta) { ScrollBy(delta); };
         }
 
         public IList<Row> Rows { get { return _rows; } }
@@ -651,9 +665,37 @@ namespace NextScan.App
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
+            // Reached only from a synthetic wheel (automation, or another
+            // control raising it): the real one is taken in WndProc, so that
+            // the settings page cannot scroll away underneath.
+            ScrollBy(e.Delta);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            // WM_MOUSEWHEEL, before base: this is what actually keeps the wheel
+            // here. Left to WinForms, a wheel over this list was handed to the
+            // AutoScroll panel behind it and scrolled the whole settings page,
+            // and the list itself -- the one control the operator reaches for
+            // because the list is long -- did not move.
+            if (m.Msg == 0x020A)
+            {
+                int delta = unchecked((short)((long)m.WParam >> 16));
+                if (EatWheel(delta)) return;
+            }
+            base.WndProc(ref m);
+        }
+
+        void ScrollBy(int delta)
+        {
             int most = Math.Max(0, Total() - Height);
             if (most <= 0) return;
-            _scroll = Math.Max(0, Math.Min(most, _scroll + (e.Delta > 0 ? -40 : 40)));
+
+            // One notch is one line, not a fixed 40 pixels: a trackpad sends a
+            // stream of small deltas, and a fixed step per notch made a gentle
+            // two-finger flick jump a dozen rows at a time.
+            int step = Math.Max(18, _rows.Count > 0 ? _rows[0].Height : 24);
+            _scroll = Math.Max(0, Math.Min(most, _scroll + (delta > 0 ? -step : step)));
             Invalidate();
         }
 

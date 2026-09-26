@@ -40,7 +40,80 @@ namespace NextScan.Host
     {
         static readonly object OutLock = new object();
         static bool _verbose;
-        static readonly List<MemoryMappedFile> KeepAlive = new List<MemoryMappedFile>();
+
+        // A published mapping must outlive PublishFrame: it is destroyed when
+        // the last handle closes, and the parent opens it only after it has
+        // read the frame header off stdout. So it has to be held for a while
+        // -- but holding every page until the process exits pinned the whole
+        // batch at once, which for a 100-page 600 dpi run is gigabytes of page
+        // file against a machine that may not have that much.
+        //
+        // Freed on a grace period instead. The parent reads in the order the
+        // frames were emitted, and reads each one within milliseconds of the
+        // line arriving, so a window far longer than that is not a guess about
+        // the driver -- it only has to outlast a slow disk and a busy parent.
+        // A mapping still inside the window at the end of the scan is freed
+        // with everything else.
+        const int FrameGraceSeconds = 30;
+        const int FrameSweepMs = 5000;
+
+        class HeldFrame
+        {
+            internal MemoryMappedFile Map;
+            internal long ReleasedUtcTicks;
+        }
+
+        static readonly List<HeldFrame> KeepAlive = new List<HeldFrame>();
+        static readonly object KeepAliveLock = new object();
+
+        /// <summary>
+        /// Releases the mappings the parent has had long enough to read. Runs on
+        /// its own thread because the scan thread must not sit in a wait.
+        /// </summary>
+        static void StartFrameSweeper()
+        {
+            Thread t = new Thread(delegate ()
+            {
+                while (true)
+                {
+                    Thread.Sleep(FrameSweepMs);
+                    List<MemoryMappedFile> dead = new List<MemoryMappedFile>();
+                    lock (KeepAliveLock)
+                    {
+                        long cutoff = DateTime.UtcNow.Ticks - TimeSpan.FromSeconds(FrameGraceSeconds).Ticks;
+                        for (int i = KeepAlive.Count - 1; i >= 0; i--)
+                        {
+                            if (KeepAlive[i].ReleasedUtcTicks > cutoff) continue;
+                            dead.Add(KeepAlive[i].Map);
+                            KeepAlive.RemoveAt(i);
+                        }
+                    }
+                    // Disposed outside the lock: Dispose can block, and the
+                    // scan thread needs that lock to publish the next page.
+                    foreach (MemoryMappedFile mmf in dead)
+                    {
+                        try { mmf.Dispose(); } catch { }
+                    }
+                }
+            });
+            t.IsBackground = true;
+            t.Name = "NextScan frame sweeper";
+            t.Start();
+        }
+
+        static void ReleaseHeldFrames()
+        {
+            List<MemoryMappedFile> all = new List<MemoryMappedFile>();
+            lock (KeepAliveLock)
+            {
+                foreach (HeldFrame h in KeepAlive) all.Add(h.Map);
+                KeepAlive.Clear();
+            }
+            foreach (MemoryMappedFile mmf in all)
+            {
+                try { mmf.Dispose(); } catch { }
+            }
+        }
 
         [STAThread]
         public static int Main(string[] args)
@@ -190,6 +263,7 @@ namespace NextScan.Host
             }
 
             int pageCounter = 0;
+            StartFrameSweeper();
             Func<RawImage, bool> onImage = delegate (RawImage img)
             {
                 try
@@ -235,6 +309,12 @@ namespace NextScan.Host
             // before the process (and its pipe) disappears.
             try { Console.Out.Flush(); } catch { }
             Thread.Sleep(60);
+
+            // Explicit, though returning would do it anyway: the frames still
+            // inside the grace window are released here rather than being left
+            // to process teardown, so the same code path is exercised whether
+            // the host exits normally or is killed.
+            ReleaseHeldFrames();
             return r.Ok ? 0 : 1;
         }
 
@@ -254,8 +334,12 @@ namespace NextScan.Host
             MemoryMappedFile mmf = MemoryMappedFile.CreateNew(name, total);
 
             // The mapping must outlive this method: it is destroyed when the last
-            // handle closes, and the parent has not opened it yet.
-            KeepAlive.Add(mmf);
+            // handle closes, and the parent has not opened it yet. Kept on a
+            // grace period rather than until exit -- see KeepAlive.
+            lock (KeepAliveLock)
+            {
+                KeepAlive.Add(new HeldFrame { Map = mmf, ReleasedUtcTicks = DateTime.UtcNow.Ticks });
+            }
 
             using (MemoryMappedViewAccessor view = mmf.CreateViewAccessor(0, total))
             {

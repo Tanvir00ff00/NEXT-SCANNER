@@ -43,6 +43,39 @@ namespace NextScan.App
             Animator.Kick();
         }
 
+        /// <summary>
+        /// Keeps the mouse wheel on this control instead of letting it reach the
+        /// page underneath.
+        ///
+        /// The page is not the one that should move. Settings puts these
+        /// controls inside a panel with AutoScroll, and a wheel that arrives at
+        /// a child is handed up to that panel: the list, the dropdown and the
+        /// open menu all scrolled the entire settings page away under the
+        /// cursor, and the models in particular could not be scrolled at all.
+        ///
+        /// Neither dropping the base call nor setting a flag is enough. WinForms
+        /// routes WM_MOUSEWHEEL through Control.WndProc, which always calls up
+        /// to the parent's OnMouseWheel regardless of what an override does or
+        /// returns, and MouseEventArgs carries no Handled property to stop it
+        /// with. Handling the window message here is the only thing that
+        /// actually stops the message: returning without calling base here
+        /// means the managed OnMouseWheel is never raised, so there is nothing
+        /// left for the parent to receive.
+        ///
+        /// Hook <see cref="WheelDelta"/> up to do the scrolling, and call this
+        /// from a WndProc override before base.WndProc.
+        /// </summary>
+        /// <param name="delta">The wheel movement from wParam, in 1/120ths of a notch.</param>
+        /// <returns>True when the wheel was taken and base must not see it.</returns>
+        protected bool EatWheel(int delta)
+        {
+            WheelDelta?.Invoke(delta);
+            return true;
+        }
+
+        /// <summary>Raised with the wheel delta when a wheel was taken.</summary>
+        internal event Action<int> WheelDelta;
+
         protected override void OnMouseEnter(EventArgs e) { SetHot(true); base.OnMouseEnter(e); }
         protected override void OnMouseLeave(EventArgs e) { SetHot(false); Pressed = false; base.OnMouseLeave(e); }
         protected override void OnMouseDown(MouseEventArgs e) { if (CanFocus) Focus(); Pressed = true; Invalidate(); base.OnMouseDown(e); }
@@ -223,6 +256,32 @@ namespace NextScan.App
             Size = new Size(200, 30);
             Cursor = Cursors.Hand;
             Font = Theme.Ui(9f);
+
+            // WndProc catches the wheel; see NsBase.EatWheel for why the
+            // override alone is not enough.
+            WheelDelta += delegate (int delta) { Wheel(delta); };
+        }
+
+        /// <summary>
+        /// The wheel over a closed dropdown steps through the items, which is
+        /// what every native combo box does, and it does not move the settings
+        /// page. An open popup has its own panel and handles the wheel itself.
+        /// </summary>
+        void Wheel(int delta)
+        {
+            if (_popup != null) return;
+            if (_items.Count <= 1) return;
+            SelectedIndex = _index + (delta > 0 ? -1 : 1);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x020A)
+            {
+                int delta = unchecked((short)((long)m.WParam >> 16));
+                if (EatWheel(delta)) return;
+            }
+            base.WndProc(ref m);
         }
 
         public IList<string> Items { get { return _items; } }
@@ -375,6 +434,7 @@ namespace NextScan.App
             readonly NsDropdown _owner;
             readonly int _rowHeight;
             int _hotRow = -1;
+            int _offset;
 
             public ListPanel(NsDropdown owner, int rowHeight)
             {
@@ -386,10 +446,29 @@ namespace NextScan.App
                 Cursor = Cursors.Hand;
             }
 
+            /// <summary>How far the list can be scrolled, and no further.</summary>
+            int MaxOffset { get { return Math.Max(0, _owner._items.Count * _rowHeight + 8 - Height); } }
+
             int RowAt(int y)
             {
-                int i = (y - 4) / _rowHeight;
+                int i = (y - 4 + _offset) / _rowHeight;
                 return (i < 0 || i >= _owner._items.Count) ? -1 : i;
+            }
+
+            public void Scroll(int delta)
+            {
+                int before = _offset;
+                _offset = Math.Max(0, Math.Min(MaxOffset, _offset + (delta > 0 ? -_rowHeight : _rowHeight)));
+
+                // Keep the chosen row in view whichever way the list moves.
+                if (_owner._index >= 0)
+                {
+                    int top = _owner._index * _rowHeight;
+                    if (top < _offset) _offset = top;
+                    if (top + _rowHeight > _offset + Height - 8) _offset = top + _rowHeight - Height + 8;
+                    _offset = Math.Max(0, Math.Min(MaxOffset, _offset));
+                }
+                if (_offset != before) { _hotRow = -1; Invalidate(); }
             }
 
             protected override void OnMouseMove(MouseEventArgs e)
@@ -413,6 +492,22 @@ namespace NextScan.App
                 base.OnMouseDown(e);
             }
 
+            protected override void WndProc(ref Message m)
+            {
+                // A long list opens taller than the room below it and this
+                // popup has no scrollbar of its own, so the wheel has to reach
+                // it -- and it has to stop here. Handled at the window message
+                // because a wheel raised this way is handed to the form behind
+                // the popup, and that form's AutoScroll page moved out from
+                // under the open list.
+                if (m.Msg == 0x020A)
+                {
+                    Scroll(unchecked((short)((long)m.WParam >> 16)));
+                    return;
+                }
+                base.WndProc(ref m);
+            }
+
             protected override void OnPaint(PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -425,8 +520,8 @@ namespace NextScan.App
 
                 for (int i = 0; i < _owner._items.Count; i++)
                 {
-                    Rectangle row = new Rectangle(4, 4 + i * _rowHeight, Width - 8, _rowHeight);
-                    if (row.Bottom > Height) break;
+                    Rectangle row = new Rectangle(4, 4 + i * _rowHeight - _offset, Width - 8, _rowHeight);
+                    if (row.Bottom < 0 || row.Top > Height) continue;
 
                     bool selected = (i == _owner._index);
                     bool hot = (i == _hotRow);

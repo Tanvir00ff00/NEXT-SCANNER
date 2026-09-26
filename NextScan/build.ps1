@@ -68,8 +68,20 @@ if ($running) { throw "Close programs running from $bin before building: $($runn
 
 if ($Clean -and (Test-Path $bin)) {
     Write-Host "  cleaning bin\" -ForegroundColor DarkGray
-    $resolvedBin = [IO.Path]::GetFullPath($bin)
-    if ($resolvedBin -ne [IO.Path]::GetFullPath((Join-Path $root 'bin'))) { throw "Unexpected build output path" }
+    # This deletes recursively, so it is checked against a path built
+    # independently of $bin rather than compared with $bin: $bin *is*
+    # Join-Path $root "bin", so testing one against the other only ever
+    # proved the same expression equalled itself. The guard below re-derives
+    # the expected directory from the script's own location and refuses
+    # anything that is not that directory, with a trailing separator, inside
+    # the checkout.
+    $resolvedBin = [IO.Path]::GetFullPath($bin).TrimEnd('\')
+    $expectedBin = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'bin')).TrimEnd('\')
+    $checkoutRoot = [IO.Path]::GetFullPath($root).TrimEnd('\')
+    if ($resolvedBin -ne $expectedBin -or
+        -not $resolvedBin.StartsWith($checkoutRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean '$resolvedBin': it is not the checkout's own bin\ directory"
+    }
     Get-ChildItem -LiteralPath $resolvedBin -Force | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -Recurse }
 }
 if (-not (Test-Path $bin)) { New-Item -ItemType Directory -Path $bin | Out-Null }
