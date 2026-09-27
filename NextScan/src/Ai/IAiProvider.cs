@@ -52,12 +52,18 @@ namespace NextScan.Ai
     {
         public static IReadOnlyList<IAiProvider> All()
         {
-            return new IAiProvider[]
+            var all = new List<IAiProvider>
             {
                 new ClaudeProvider(),
                 new OpenAiProvider(),
                 new GeminiProvider(),
             };
+
+            // Then every OpenAI-compatible server the operator has added, each
+            // a provider of its own (AiServers).
+            foreach (AiServer server in AiServers.All())
+                all.Add(new OpenAiCompatProvider(server.Id, server.Name));
+            return all;
         }
 
         public static IAiProvider ById(string id)

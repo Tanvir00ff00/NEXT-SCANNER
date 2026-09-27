@@ -45,9 +45,57 @@ namespace NextScan.Ai
             ModelListPage page = await client.Models.List(new ModelListParams(), cancellationToken: cancel)
                                                     .ConfigureAwait(false);
             foreach (ModelInfo model in page.Items)
-                found.Add(new AiModel { Id = model.ID, Name = model.DisplayName ?? model.ID });
+            {
+                var m = new AiModel { Id = model.ID, Name = model.DisplayName ?? model.ID };
+                Describe(model, m);
+                found.Add(m);
+            }
 
+            // Newest first: the list is the provider's, and the page shows it
+            // in the order a person looks for a model.
+            found.Sort(delegate (AiModel a, AiModel b) { return b.Released.CompareTo(a.Released); });
             return found;
+        }
+
+        /// <summary>
+        /// What the Models API says about one model: its window, its longest
+        /// answer, and what it accepts. Each field is read on its own, because
+        /// an older model or an older API version leaves some of them out and
+        /// the SDK throws on a field that is not there.
+        /// </summary>
+        static void Describe(ModelInfo model, AiModel m)
+        {
+            try { m.Released = model.CreatedAt.UtcDateTime; } catch { }
+            try { long? n = model.MaxInputTokens; if (n.HasValue) m.ContextTokens = n.Value; } catch { }
+            try { long? n = model.MaxTokens; if (n.HasValue) m.OutputTokens = n.Value; } catch { }
+
+            ModelCapabilities caps = null;
+            try { caps = model.Capabilities; } catch { }
+            if (caps == null) return;
+
+            try { m.Vision = caps.ImageInput.Supported; } catch { }
+            try { m.Pdf = caps.PdfInput.Supported; } catch { }
+            try { m.Thinking = caps.Thinking.Supported; } catch { }
+            try
+            {
+                EffortCapability effort = caps.Effort;
+                if (effort != null && effort.Supported)
+                {
+                    var levels = new List<string>();
+                    if (Has(delegate { return effort.Low.Supported; })) levels.Add("low");
+                    if (Has(delegate { return effort.Medium.Supported; })) levels.Add("medium");
+                    if (Has(delegate { return effort.High.Supported; })) levels.Add("high");
+                    if (Has(delegate { return effort.Xhigh.Supported; })) levels.Add("xhigh");
+                    if (Has(delegate { return effort.Max.Supported; })) levels.Add("max");
+                    m.Efforts = string.Join(" ", levels.ToArray());
+                }
+            }
+            catch { }
+        }
+
+        static bool Has(Func<bool> read)
+        {
+            try { return read(); } catch { return false; }
         }
 
         /// <summary>

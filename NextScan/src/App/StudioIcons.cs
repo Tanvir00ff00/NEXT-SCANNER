@@ -58,6 +58,38 @@ namespace NextScan.App
         public const string Folder = "folder";
         public const string Panel = "panel";
 
+        // The settings page. Named for the thing they do rather than the
+        // stage of the job, because a section header is a noun and a rail
+        // button is a place.
+        public const string Source = "source";
+        public const string Image = "image";
+        public const string Items = "items";
+        public const string Files = "files";
+        public const string Document = "document";
+        public const string AssistantIcon = "assistant2";
+        public const string Key = "key";
+        public const string Server = "server";
+        public const string Preset = "preset";
+        public const string Diag = "diag";
+        public const string About = "about";
+        public const string Reset = "reset";
+        public const string Chevron = "chevron";
+        public const string Plus = "plus";
+
+        // The settings page and the AI screens.
+        public const string Keyboard = "keyboard";
+        public const string Search = "search";
+        public const string Star = "star";
+        public const string StarFill = "starfill";
+        public const string Eye = "eye";
+        public const string EyeOff = "eyeoff";
+        public const string External = "external";
+        public const string Bolt = "bolt";
+        public const string Check = "check";
+        public const string Palette = "palette";
+        public const string Layers = "layers";
+        public const string Trash = "trash";
+
         /// <summary>
         /// Draws one icon centred in <paramref name="box"/>.
         ///
@@ -105,6 +137,18 @@ namespace NextScan.App
                 path.CloseFigure();
                 g.FillPath(b, path);
             }
+        }
+
+        static GraphicsPath RoundPath(float x, float y, float w, float h, float r)
+        {
+            var path = new GraphicsPath();
+            float d = r * 2;
+            path.AddArc(x, y, d, d, 180, 90);
+            path.AddArc(x + w - d, y, d, d, 270, 90);
+            path.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            path.AddArc(x, y + h - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
         static void Paint(Graphics g, Pen p, SolidBrush b, string name)
@@ -344,6 +388,210 @@ namespace NextScan.App
                     g.DrawArc(p, 3.5f, 3.5f, 17f, 17f, 100, 250);
                     g.DrawLine(p, 12f, 8.5f, 12f, 14.5f);
                     g.DrawLine(p, 9f, 11.5f, 15f, 11.5f);
+                    break;
+
+                case Source:
+                    // A sheet going in from the top, the way paper enters a feeder.
+                    g.DrawRectangle(p, 4.5f, 8.5f, 15f, 11.5f);
+                    g.DrawLine(p, 8f, 5f, 16f, 5f);
+                    g.DrawLine(p, 12f, 3f, 12f, 7f);
+                    break;
+
+                case Image:
+                    // A frame with a horizon in it, rather than a picture with
+                    // a mountain: the section is about how the page is treated,
+                    // and this reads at 16 px.
+                    g.DrawRectangle(p, 3.5f, 5f, 17f, 14f);
+                    g.DrawLine(p, 3.5f, 14.5f, 8.5f, 10f);
+                    g.DrawLine(p, 8.5f, 10f, 13f, 14.5f);
+                    g.DrawLine(p, 13f, 14.5f, 20.5f, 9f);
+                    break;
+
+                case Items:
+                    // Three marks on a list, each one a thing found on the bed.
+                    g.DrawLine(p, 4f, 6.5f, 7f, 6.5f);
+                    g.DrawLine(p, 4f, 12f, 7f, 12f);
+                    g.DrawLine(p, 4f, 17.5f, 7f, 17.5f);
+                    g.DrawRectangle(p, 9.5f, 4.5f, 10f, 4f);
+                    g.DrawRectangle(p, 9.5f, 10f, 10f, 4f);
+                    g.DrawRectangle(p, 9.5f, 15.5f, 10f, 4f);
+                    break;
+
+                case Files:
+                    g.DrawLines(p, new PointF[] { new PointF(3.5f, 19.5f), new PointF(3.5f, 5f),
+                                                  new PointF(14.5f, 5f), new PointF(16.5f, 7f),
+                                                  new PointF(16.5f, 9f) });
+                    g.DrawLines(p, new PointF[] { new PointF(14.5f, 5f), new PointF(14.5f, 7.5f),
+                                                  new PointF(16.5f, 7.5f) });
+                    g.DrawLine(p, 7f, 12f, 13f, 12f);
+                    g.DrawLine(p, 7f, 16f, 13f, 16f);
+                    break;
+
+                case Document:
+                    // A page with a folded corner and a rule of text on it.
+                    g.DrawLines(p, new PointF[] { new PointF(5.5f, 3.5f), new PointF(14.5f, 3.5f),
+                                                  new PointF(18.5f, 7.5f), new PointF(18.5f, 20.5f),
+                                                  new PointF(5.5f, 20.5f), new PointF(5.5f, 3.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(14.5f, 3.5f), new PointF(14.5f, 7.5f),
+                                                  new PointF(18.5f, 7.5f) });
+                    g.DrawLine(p, 8.5f, 12f, 15.5f, 12f);
+                    g.DrawLine(p, 8.5f, 15.5f, 15.5f, 15.5f);
+                    break;
+
+                case AssistantIcon:
+                    // The same mark the Assist rail button uses, so a section
+                    // header and the thing it configures are recognisably one.
+                    g.DrawArc(p, 3.5f, 4.5f, 17f, 14f, 195, 250);
+                    g.DrawLines(p, new PointF[] { new PointF(4.2f, 15f), new PointF(8f, 15f),
+                                                  new PointF(4.2f, 19.5f) });
+                    g.DrawLine(p, 10.5f, 11f, 10.5f, 11.05f);
+                    g.DrawLine(p, 14f, 11f, 14f, 11.05f);
+                    break;
+
+                case Key:
+                    // A key, for the thing that unlocks a provider.
+                    g.DrawEllipse(p, 3.5f, 8f, 8f, 8f);
+                    g.DrawLine(p, 10.5f, 12.5f, 20f, 3f);
+                    g.DrawLine(p, 16.5f, 6.5f, 19f, 9f);
+                    g.DrawLine(p, 14f, 9f, 16.5f, 11.5f);
+                    break;
+
+                case Server:
+                    // A host on a desk, not a cloud: this is usually a machine
+                    // in the building, and a cloud is the wrong picture of it.
+                    g.DrawRectangle(p, 3.5f, 4f, 17f, 6f);
+                    g.DrawRectangle(p, 3.5f, 13.5f, 17f, 6.5f);
+                    g.DrawLine(p, 6.5f, 7f, 6.6f, 7f);
+                    g.DrawLine(p, 6.5f, 16.5f, 6.6f, 16.5f);
+                    break;
+
+                case Preset:
+                    // A bookmark on a page: a named thing you come back to.
+                    g.DrawRectangle(p, 5f, 3.5f, 14f, 17f);
+                    g.DrawLines(p, new PointF[] { new PointF(9.5f, 3.5f), new PointF(9.5f, 9f),
+                                                  new PointF(14.5f, 9f), new PointF(14.5f, 3.5f) });
+                    break;
+
+                case Diag:
+                    // A trace on a grid: the diagnostics file, which is exactly
+                    // what it is -- a record of what the application did.
+                    g.DrawLines(p, new PointF[] { new PointF(4f, 19.5f), new PointF(4f, 4.5f),
+                                                  new PointF(20f, 19.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(4f, 16f), new PointF(9f, 12f),
+                                                  new PointF(13f, 14.5f), new PointF(20f, 7f) });
+                    break;
+
+                case About:
+                    // A circled i. The one mark nobody has to guess at.
+                    g.DrawEllipse(p, 3.5f, 3.5f, 17f, 17f);
+                    g.DrawLine(p, 12f, 10.5f, 12f, 16.5f);
+                    g.DrawLine(p, 12f, 7f, 12f, 7.6f);
+                    break;
+
+                case Reset:
+                    // An arrow going back round, which is what "reset" is.
+                    g.DrawArc(p, 4.5f, 4.5f, 15f, 15f, 40, 280);
+                    g.DrawLines(p, new PointF[] { new PointF(4.5f, 11.5f), new PointF(4.5f, 5.5f),
+                                                  new PointF(10.5f, 5.5f) });
+                    break;
+
+                case Chevron:
+                    // Points right when the section is closed, and is rotated
+                    // by the caller when it is open, so one glyph does both and
+                    // the two states can never disagree.
+                    g.DrawLines(p, new PointF[] { new PointF(9.5f, 5.5f), new PointF(15.5f, 12f),
+                                                  new PointF(9.5f, 18.5f) });
+                    break;
+
+                case Plus:
+                    g.DrawLine(p, 12f, 5f, 12f, 19f);
+                    g.DrawLine(p, 5f, 12f, 19f, 12f);
+                    break;
+
+                case Keyboard:
+                    using (GraphicsPath path = RoundPath(2.5f, 6f, 19f, 12f, 2.5f)) g.DrawPath(p, path);
+                    foreach (float kx in new[] { 6.5f, 10f, 13.5f, 17f })
+                        g.FillEllipse(b, kx - 0.9f, 9.1f, 1.8f, 1.8f);
+                    g.DrawLine(p, 8f, 14.5f, 16f, 14.5f);
+                    break;
+
+                case Search:
+                    g.DrawEllipse(p, 4f, 4f, 12f, 12f);
+                    g.DrawLine(p, 14.6f, 14.6f, 20f, 20f);
+                    break;
+
+                case Star:
+                case StarFill:
+                    {
+                        var pts = new PointF[10];
+                        for (int i = 0; i < 10; i++)
+                        {
+                            double a = -Math.PI / 2 + i * Math.PI / 5;
+                            float r = (i % 2 == 0) ? 9.2f : 4f;
+                            pts[i] = new PointF(12f + (float)(Math.Cos(a) * r), 12.6f + (float)(Math.Sin(a) * r));
+                        }
+                        if (name == StarFill) g.FillPolygon(b, pts);
+                        g.DrawPolygon(p, pts);
+                    }
+                    break;
+
+                case Eye:
+                case EyeOff:
+                    using (GraphicsPath path = new GraphicsPath())
+                    {
+                        path.AddBezier(2.5f, 12f, 6f, 5.5f, 18f, 5.5f, 21.5f, 12f);
+                        path.AddBezier(21.5f, 12f, 18f, 18.5f, 6f, 18.5f, 2.5f, 12f);
+                        g.DrawPath(p, path);
+                    }
+                    g.DrawEllipse(p, 9.2f, 9.2f, 5.6f, 5.6f);
+                    if (name == EyeOff) g.DrawLine(p, 4f, 20f, 20f, 4f);
+                    break;
+
+                case External:
+                    g.DrawLines(p, new PointF[] { new PointF(18.5f, 13.5f), new PointF(18.5f, 19.5f),
+                                                  new PointF(4.5f, 19.5f), new PointF(4.5f, 5.5f),
+                                                  new PointF(10.5f, 5.5f) });
+                    g.DrawLine(p, 11f, 13f, 19.5f, 4.5f);
+                    g.DrawLines(p, new PointF[] { new PointF(14f, 4.5f), new PointF(19.5f, 4.5f), new PointF(19.5f, 10f) });
+                    break;
+
+                case Bolt:
+                    g.FillPolygon(b, new PointF[] { new PointF(13.5f, 2.5f), new PointF(5f, 13.5f), new PointF(11f, 13.5f),
+                                                    new PointF(10f, 21.5f), new PointF(19f, 10f), new PointF(13f, 10f) });
+                    break;
+
+                case Check:
+                    g.DrawLines(p, new PointF[] { new PointF(5f, 12.5f), new PointF(10f, 17.5f), new PointF(19.5f, 7f) });
+                    break;
+
+                case Palette:
+                    using (GraphicsPath path = new GraphicsPath())
+                    {
+                        path.AddArc(3f, 3f, 18f, 18f, 60, 300);
+                        path.AddBezier(21f, 12f + 0f, 20.5f, 14.5f, 15.5f, 13.5f, 15.5f, 17f);
+                        path.AddBezier(15.5f, 17f, 15.5f, 19.5f, 14f, 21f, 12f, 21f);
+                        g.DrawPath(p, path);
+                    }
+                    g.FillEllipse(b, 7f, 10f, 2.6f, 2.6f);
+                    g.FillEllipse(b, 10.5f, 6.2f, 2.6f, 2.6f);
+                    g.FillEllipse(b, 15f, 7.5f, 2.6f, 2.6f);
+                    break;
+
+                case Layers:
+                    g.DrawPolygon(p, new PointF[] { new PointF(12f, 3.5f), new PointF(21f, 8.5f),
+                                                    new PointF(12f, 13.5f), new PointF(3f, 8.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(3f, 12.5f), new PointF(12f, 17.5f), new PointF(21f, 12.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(3f, 16.5f), new PointF(12f, 21.5f), new PointF(21f, 16.5f) });
+                    break;
+
+                case Trash:
+                    g.DrawLine(p, 4f, 6.5f, 20f, 6.5f);
+                    g.DrawLines(p, new PointF[] { new PointF(9f, 6.5f), new PointF(9f, 3.5f),
+                                                  new PointF(15f, 3.5f), new PointF(15f, 6.5f) });
+                    g.DrawLines(p, new PointF[] { new PointF(6f, 6.5f), new PointF(7f, 20.5f),
+                                                  new PointF(17f, 20.5f), new PointF(18f, 6.5f) });
+                    g.DrawLine(p, 10.5f, 10f, 10.5f, 17f);
+                    g.DrawLine(p, 13.5f, 10f, 13.5f, 17f);
                     break;
 
                 default:

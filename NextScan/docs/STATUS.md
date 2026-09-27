@@ -1,11 +1,77 @@
 ﻿# NextScan Studio — Build Status
 
-Last updated: 2026-09-24
+Last updated: 2026-09-27
 Plan of record: [`NEXTSCAN_STUDIO_MASTER_PLAN.md`](../../NEXTSCAN_STUDIO_MASTER_PLAN.md)
 
 This file records what is **actually built and verified on hardware**, versus what
 is still only planned. It is deliberately conservative: if something is not listed
 as verified below, assume it does not work yet.
+
+---
+
+## Any number of OpenAI-compatible servers — 2026-09-27
+
+The one "OpenAI-compatible" provider is now a list the operator adds to
+(AiServers, `keys\servers.list`). Each server is a provider of its own: its own
+name in the Assist panel, its own card on AI providers (name, address, key,
+Save/Test/Remove), its own models on AI models. "Add a server" takes a name, an
+address and an optional key, with one-press addresses for Ollama, LM Studio,
+llama.cpp, vLLM, OpenRouter, Groq, Together AI, DeepSeek, Mistral, xAI,
+Fireworks and Cerebras. Names are kept unique ("Ollama test 2"). The server set
+up before keeps its id `openaicompat`, so its key, address and chosen models
+carry over untouched. With more than five providers the models page filters by
+a dropdown instead of a row of buttons.
+
+Fixed on the way: a server with no key could never work -- the OpenAI SDK
+refuses an empty key ("Value cannot be an empty string"), which the code had
+assumed it accepted. A placeholder key is sent instead, as Ollama and LM Studio
+document; checked against a local fake server, which saw `Bearer no-key` and
+returned its two models.
+
+Checked off-screen in a separate build (the app was open): three servers added
+through the card, one renamed through its own card, the page self-test, and the
+connection states. The test's server files were removed afterwards and the
+existing key files verified unchanged by checksum.
+
+---
+
+## Settings redesigned; the AI screens rebuilt — 2026-09-27
+
+**Settings.** Every page has its own colour and icon: a gradient tile in the
+list on the left, a banner across the top of the page, and the headings of its
+cards. The list's highlight glides to the page chosen; the new page rises and
+fades in over the old one (260 ms, timer-driven, removes itself). Each group of
+settings sits in its own card of a readable width (at most 900 px) instead of
+stretching across the window; nothing folds away. The section builders are the
+inspector's, unchanged: in card mode each heading they add starts a card.
+Appearance picks the theme from two small pictures of the window.
+
+**AI providers** (was half of "Assistant"). A card per provider, all visible,
+with its own colour and a status pill that reports whether the provider
+actually answered: Connected with the round-trip time, Can't connect with the
+provider's own error, Not set up, Checking. Save checks the key at once; Test
+checks again; the eye shows what was typed; the bin removes a key (asks
+first); "Get a key" opens the provider's key page. The compatible-server card
+has one-press addresses for Ollama, LM Studio, llama.cpp and OpenRouter.
+
+**AI models.** Search (name, id, description), Everything / On offer, a filter
+per provider, All / None per provider, and a star to choose the model the Assist
+panel opens on. Each row shows what the provider's own model list says -- and
+only that: context window, longest answer, pictures, PDF, thinking and release
+date from Anthropic's Models API; token limits, thinking and description from
+Gemini's; date and owner from OpenAI's. Unknown is shown as nothing, never as a
+number from a table of ours. "None" now means none: a `provider/-` marker in
+the allowed list records that a choice was made (before, unticking everything
+fell back to the defaults). "Starts on" shows where the assistant really
+starts, including a provider with no key (it used to show the first entry).
+
+Checked off-screen on the real window (never activated, never closed, so the
+settings file is untouched): the page self-test on all 8 pages (no control
+spills out of its card, every page scrolls to its end), both themes, the
+transition present and gone within 0.8 s, and the model logic (untick, None,
+star, All, search). The provider checks ran live against Gemini and the
+configured compatible server (listing models costs nothing). Not yet looked at
+by hand in the running app.
 
 ---
 

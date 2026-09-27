@@ -90,7 +90,12 @@ namespace NextScan.Ai
                 foreach (string no in NotForChat)
                     if (id.IndexOf(no, StringComparison.OrdinalIgnoreCase) >= 0) { likely = false; break; }
 
-                found.Add(new AiModel { Id = id, Name = model.DisplayName ?? id, Likely = likely });
+                var m = new AiModel { Id = id, Name = model.DisplayName ?? id, Likely = likely };
+                m.Description = (model.Description ?? "").Trim();
+                if (model.InputTokenLimit.HasValue) m.ContextTokens = model.InputTokenLimit.Value;
+                if (model.OutputTokenLimit.HasValue) m.OutputTokens = model.OutputTokenLimit.Value;
+                if (model.Thinking.HasValue) m.Thinking = model.Thinking.Value;
+                found.Add(m);
             }
 
             return found;

@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // NextScan Studio - Control library (ground-up rebuild)
 // Plan ref: MASTER_PLAN section 13.
 //
@@ -584,6 +584,9 @@ namespace NextScan.App
 
         public event EventHandler TextCommitted;
 
+        /// <summary>Every change to the text as it is typed, for a box that filters as you go.</summary>
+        public event EventHandler Edited;
+
         public NsTextBox()
         {
             Size = new Size(200, 30);
@@ -597,6 +600,7 @@ namespace NextScan.App
                 BackColor = Theme.Field
             };
             _box.GotFocus += delegate { Invalidate(); };
+            _box.TextChanged += delegate { if (Edited != null) Edited(this, EventArgs.Empty); };
 
             // Leaving a settings field means the value is settled, so it
             // commits. Leaving a message box does not mean send -- clicking
@@ -687,6 +691,44 @@ namespace NextScan.App
             set { if (_box != null) _box.UseSystemPasswordChar = value; }
         }
 
+        string _icon = "";
+
+        /// <summary>An icon inside the box on the left, such as a magnifier for a search box.</summary>
+        public string Icon
+        {
+            get { return _icon; }
+            set { _icon = value ?? ""; Layout_(); Invalidate(); }
+        }
+
+        string _cue = "";
+
+        /// <summary>
+        /// Grey text shown while the box is empty ("Search models…").
+        ///
+        /// The system's own cue banner rather than one we paint: the text box
+        /// is a real window lying over our paint, and the system draws the cue
+        /// inside it, where a caret and an IME already know to look.
+        /// </summary>
+        public string Cue
+        {
+            get { return _cue; }
+            set
+            {
+                _cue = value ?? "";
+                if (_box != null && _box.IsHandleCreated) SetCue();
+                else if (_box != null) _box.HandleCreated += delegate { SetCue(); };
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+
+        void SetCue()
+        {
+            const int EM_SETCUEBANNER = 0x1501;
+            try { SendMessage(_box.Handle, EM_SETCUEBANNER, (IntPtr)1, _cue); } catch { }
+        }
+
         /// <summary>Puts the caret at the end, for a box that was just filled.</summary>
         public void ToEnd()
         {
@@ -718,8 +760,9 @@ namespace NextScan.App
 
             // Centred vertically by height rather than by anchoring: the TextBox
             // sizes itself to its font and ignores a height we set.
-            _box.SetBounds(10, Math.Max(2, (Height - _box.PreferredHeight) / 2 + 1),
-                           Math.Max(10, Width - 20), _box.PreferredHeight);
+            int left = string.IsNullOrEmpty(_icon) ? 10 : 34;
+            _box.SetBounds(left, Math.Max(2, (Height - _box.PreferredHeight) / 2 + 1),
+                           Math.Max(10, Width - left - 10), _box.PreferredHeight);
         }
 
         protected override void OnFontChanged(EventArgs e)
@@ -762,6 +805,10 @@ namespace NextScan.App
                                                : Theme.Mix(Theme.Line, Theme.Accent, hot * 0.7), 1f))
                     g.DrawPath(p, path);
             }
+
+            if (!string.IsNullOrEmpty(_icon))
+                NsIcon.Draw(g, _icon, new RectangleF(11, (Height - 16) / 2f, 16, 16),
+                            focused ? Theme.Accent : Theme.TextFaint);
         }
     }
 
@@ -1141,6 +1188,120 @@ namespace NextScan.App
             TextRenderer.DrawText(g, Text, Font, new Rectangle(0, 0, Width, Height),
                 Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
+        }
+    }
+
+    /// <summary>
+    /// One entry in the settings sidebar: an icon, the name, and the value
+    /// currently set, which is what the operator actually wants to see when
+    /// they open the page -- not "which section is this" but "what is it set
+    /// to". The name tells them they are in the right place; the value tells
+    /// them whether anything needs changing.
+    ///
+    /// Windows 11 Settings, macOS System Settings and VS Code all land on the
+    /// same shape, and it is the one that survives having more sections than
+    /// fit: a fixed list of places on the left, one place's settings on the
+    /// right. An accordion was tried and removed. It hides everything that is
+    /// not the section being read, so the page cannot be scanned, and on this
+    /// window the sections were not tall enough to be worth a disclosure.
+    /// </summary>
+    public class NsNavItem : NsBase
+    {
+        public string Icon = "";
+        public string Value = "";
+        public bool Selected;
+        public string Accent = "";
+
+        const int RowHeight = 44;
+
+        public NsNavItem()
+        {
+            Size = new Size(220, RowHeight);
+            Font = Theme.Ui(9.5f);
+            Cursor = Cursors.Hand;
+            TabStop = true;
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+            if (Parent != null && Parent.Tag is Action<NsNavItem> pick) pick(this);
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            return keyData == Keys.Space || base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                if (Parent != null && Parent.Tag is Action<NsNavItem> pick) pick(this);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
+
+            // Up and down walk the list, which is what a list is expected to
+            // do and what makes the sidebar usable without a mouse.
+            Panel list = Parent as Panel;
+            if (list != null && (e.KeyCode == Keys.Up || e.KeyCode == Keys.Down))
+            {
+                int mine = list.Controls.GetChildIndex(this);
+                int step = e.KeyCode == Keys.Down ? 1 : -1;
+                for (int i = mine + step; i >= 0 && i < list.Controls.Count; i += step)
+                {
+                    NsNavItem next = list.Controls[i] as NsNavItem;
+                    if (next == null || !next.Visible) continue;
+                    next.Focus();
+                    e.Handled = true;
+                    return;
+                }
+            }
+            base.OnKeyDown(e);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            ClearBack(g);
+            Theme.Smooth(g);
+
+            Color tint = Accent.Length > 0 ? Theme.Parse(Accent) : Theme.Accent;
+            double hot = HotAnim.Eased;
+
+            if (Selected)
+            {
+                using (GraphicsPath path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(46, tint)))
+                    g.FillPath(b, path);
+            }
+            else if (hot > 0.01f)
+            {
+                using (GraphicsPath path = Theme.Round(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb((int)(24 * hot), Theme.Text.R, Theme.Text.G, Theme.Text.B)))
+                    g.FillPath(b, path);
+            }
+
+            // The bar on the left of the chosen one. It is not on its own --
+            // the tint and the weight say it too -- because a selected state
+            // carried by colour alone is invisible to anyone who cannot see
+            // that colour, and this is the one thing on the page that says
+            // where you are.
+            if (Selected)
+                using (SolidBrush b = new SolidBrush(tint))
+                using (GraphicsPath path = Theme.Round(new Rectangle(0, (Height - 18) / 2, 3, 18), 2))
+                    g.FillPath(b, path);
+
+            Color iconColour = Selected ? tint : Theme.Mix(Theme.TextFaint, Theme.Text, hot);
+            NsIcon.Draw(g, Icon, new Rectangle(14, (Height - 18) / 2, 18, 18), iconColour);
+
+            TextRenderer.DrawText(g, Text, Font, new Rectangle(42, 0, Width - 52, Height),
+                Selected ? Theme.Text : Theme.Mix(Theme.TextDim, Theme.Text, hot),
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
     }
 

@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using NextScan.Core;
 
@@ -119,6 +120,67 @@ namespace NextScan.App
         public bool AutoCrop = true;
 
         /// <summary>
+        /// Settings the page keeps for itself, rather than for a scan.
+        ///
+        /// Which sections of the settings page were left open is one of these.
+        /// It is not a scan setting and does not belong in a preset -- recalling
+        /// a preset should not close the section the operator was reading, nor
+        /// a scan should carry it -- but it does belong in the same file, so
+        /// that a preference survives without a second file to lose.
+        ///
+        /// Unknown keys are kept as they are found and written back unchanged,
+        /// which is the same rule the rest of the file follows: a settings file
+        /// written by a newer build is not damaged by an older one.
+        /// </summary>
+        public readonly Dictionary<string, string> Flags = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>A page flag, or "" when it has never been set.</summary>
+        public string Flag(string name)
+        {
+            string v;
+            return Flags.TryGetValue(name, out v) ? v : "";
+        }
+
+        public void SetFlag(string name, string value)
+        {
+            if (value == null || value.Length == 0) Flags.Remove(name);
+            else Flags[name] = value;
+        }
+
+        /// <summary>
+        /// Copies every preference field of <paramref name="from"/> into this
+        /// object, leaving the object's identity alone.
+        ///
+        /// The shell holds one settings object for the whole session, so
+        /// "reset" cannot mean "make a new one" -- every control on the page is
+        /// already pointing at the old one. This is how the values get back to
+        /// their defaults without any of those references going stale.
+        ///
+        /// It walks the fields rather than listing them, because a hand-written
+        /// list is a list that stops being right the moment a setting is added
+        /// and the reset quietly leaves that one alone. A field that cannot be
+        /// written is skipped rather than throwing: one read-only field should
+        /// not stop the other forty from being reset.
+        /// </summary>
+        public void CopyInto(StudioSettings from)
+        {
+            if (from == null || ReferenceEquals(from, this)) return;
+
+            FieldInfo[] fields = typeof(StudioSettings).GetFields(
+                BindingFlags.Public | BindingFlags.Instance);
+            foreach (FieldInfo field in fields)
+            {
+                // Flags are the page's own state, not a preference, and they
+                // were never reset by the old button either.
+                if (field.IsInitOnly || field.IsLiteral) continue;
+                if (field.Name == "Flags") continue;
+
+                try { field.SetValue(this, field.GetValue(from)); }
+                catch { }
+            }
+        }
+
+        /// <summary>
         /// Several items on one glass become several pages. Only consulted when
         /// AutoCrop is on, because finding one document is a prerequisite for
         /// deciding there are four of them.
@@ -210,7 +272,6 @@ namespace NextScan.App
             StudioSettings s = new StudioSettings();
             string path = iniPath ?? DefaultIniPath;
             if (!File.Exists(path)) return s;
-
             try
             {
                 string[] lines = File.ReadAllLines(path);
@@ -339,6 +400,14 @@ namespace NextScan.App
                         case "crop_y": { float v; if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) s.CropNorm = new RectangleF(s.CropNorm.X, v, s.CropNorm.Width, s.CropNorm.Height); break; }
                         case "crop_w": { float v; if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) s.CropNorm = new RectangleF(s.CropNorm.X, s.CropNorm.Y, v, s.CropNorm.Height); break; }
                         case "crop_h": { float v; if (float.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) s.CropNorm = new RectangleF(s.CropNorm.X, s.CropNorm.Y, s.CropNorm.Width, v); break; }
+
+                        // Anything we do not know is kept, not dropped. The
+                        // settings page stores its own state here, and a file
+                        // written by a newer build has to survive an older one
+                        // reading and writing it back.
+                        default:
+                            s.Flags[key] = val;
+                            break;
                     }
                 }
             }
@@ -417,6 +486,10 @@ namespace NextScan.App
                 lines.Add("crop_y=" + CropNorm.Y.ToString("0.####", CultureInfo.InvariantCulture));
                 lines.Add("crop_w=" + CropNorm.Width.ToString("0.####", CultureInfo.InvariantCulture));
                 lines.Add("crop_h=" + CropNorm.Height.ToString("0.####", CultureInfo.InvariantCulture));
+
+                // The page's own state, written after the known keys so a file
+                // a person has edited still reads in the order they expect.
+                foreach (var kv in Flags) lines.Add(kv.Key + "=" + kv.Value);
 
                 File.WriteAllLines(path, lines.ToArray(), Encoding.UTF8);
             }

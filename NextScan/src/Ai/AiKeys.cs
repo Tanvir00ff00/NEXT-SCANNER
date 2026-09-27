@@ -104,4 +104,66 @@ namespace NextScan.Ai
             return key.Length <= 4 ? new string('*', key.Length) : "****" + key.Substring(key.Length - 4);
         }
     }
+
+    /// <summary>
+    /// The endpoint a compatible provider is reached at, kept beside its key.
+    ///
+    /// Not in the settings file, and not in the diagnostics folder, for the
+    /// same reason the keys are not: a self-hosted or per-company gateway URL
+    /// often names an internal host, and that file is deliberately easy to
+    /// send to somebody. Encrypted the same way, in the same place, so the two
+    /// travel together -- a key with no endpoint cannot be used, and finding
+    /// one without the other is the confusing half of the problem.
+    ///
+    /// Unlike a key this is not a secret in the cryptographic sense, but it is
+    /// still account detail, and DPAPI costs nothing here.
+    /// </summary>
+    public static class AiEndpoints
+    {
+        static string PathFor(string providerId)
+        {
+            // Same validation as a key file name, for the same reason.
+            if (string.IsNullOrEmpty(providerId)) throw new AiTrouble("bad provider id");
+            foreach (char c in providerId)
+                if (!char.IsLetterOrDigit(c)) throw new AiTrouble("bad provider id");
+
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "NextScan", "keys", providerId.ToLowerInvariant() + ".endpoint");
+        }
+
+        public static string Get(string providerId)
+        {
+            try
+            {
+                string path = PathFor(providerId);
+                if (!File.Exists(path)) return "";
+                byte[] plain = ProtectedData.Unprotect(
+                    File.ReadAllBytes(path), null, DataProtectionScope.CurrentUser);
+                return Encoding.UTF8.GetString(plain).Trim();
+            }
+            catch { return ""; }
+        }
+
+        public static void Set(string providerId, string url)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(url)) { Forget(providerId); return; }
+                Directory.CreateDirectory(Path.GetDirectoryName(PathFor(providerId)));
+                byte[] sealed_ = ProtectedData.Protect(
+                    Encoding.UTF8.GetBytes(url.Trim()), null, DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(PathFor(providerId), sealed_);
+            }
+            catch (Exception ex)
+            {
+                throw new AiTrouble("Could not store the address: " + ex.Message, ex);
+            }
+        }
+
+        public static void Forget(string providerId)
+        {
+            try { File.Delete(PathFor(providerId)); } catch { }
+        }
+    }
 }

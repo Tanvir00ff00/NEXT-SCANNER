@@ -115,7 +115,13 @@ namespace NextScan.Tools
             {
                 if (string.IsNullOrEmpty(p.Info.Name)) throw new Exception(p.Info.Id + " has no name");
                 if (string.IsNullOrEmpty(p.Info.KeyHint)) throw new Exception(p.Info.Id + " does not say what its key looks like");
-                if (p.Info.Prefer.Length == 0) throw new Exception(p.Info.Id + " has no preference to fall back on");
+                // Every provider must be able to name something to fall back
+                // on, so that a key returning a list with nothing recognised
+                // in it still starts somewhere sensible -- unless the provider
+                // has said out loud that it has no names to go by, which is
+                // the case for a self-hosted server.
+                if (p.Info.Prefer.Length == 0 && !p.Info.PrefersNothing)
+                    throw new Exception(p.Info.Id + " has no preference to fall back on");
                 names.Add(p.Info.Name);
             }
             return string.Join(", ", names.ToArray());

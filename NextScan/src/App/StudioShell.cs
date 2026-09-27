@@ -1,4 +1,4 @@
-﻿// =============================================================================
+// =============================================================================
 // NextScan Studio - Application shell (ground-up rebuild)
 // Plan ref: MASTER_PLAN section 13.1 (shell layout), 13.4 (keyboard).
 //
@@ -70,6 +70,41 @@ namespace NextScan.App
         NsIconButton _settingsButton;
         bool _settingsOpen;
 
+        /// <summary>Which section the settings page is showing.</summary>
+        int _settingsIndex;
+
+        /// <summary>The list of sections, and the panel the chosen one is built in.</summary>
+        NsSettingsNav _settingsNav;
+        Panel _settingsContent;
+        NsHero _settingsHero;
+
+        // ---- cards: how a builder's controls land on the settings page ---------
+        //
+        // The section builders are the same ones the inspector uses, and they
+        // write into _drawerHost from the top down. On the settings page each
+        // heading they add starts a new card instead, and _drawerHost becomes
+        // that card, so every group lands on its own plate without a builder
+        // knowing about it.
+
+        /// <summary>True while a settings page is being built into cards.</summary>
+        bool _cardMode;
+
+        /// <summary>The card being filled, and where the next one goes.</summary>
+        NsSettingsCard _card;
+        int _cardsBottom;
+        int _cardLeft = 28;
+        int _cardWidth = 760;
+
+        /// <summary>The colour and icon for the next card, when a builder wants its own.</summary>
+        Color? _cardAccent;
+        string _cardIcon = "";
+
+        /// <summary>
+        /// The content width the section on screen was built for. Kept so that
+        /// resizing the window rebuilds the section once, when the width really
+        /// changed, rather than on every pass of the layout.
+        /// </summary>
+        int _settingsBuiltWidth;
         StudioCanvasView _canvas;
 
         /// <summary>
@@ -1265,7 +1300,8 @@ namespace NextScan.App
         /// </summary>
         const int MinDrawerWidth = 300;
 
-        const int Dx = 16;
+        /// <summary>Left edge of a control: the inspector's margin, or a card's.</summary>
+        int Dx { get { return _cardMode ? 24 : 16; } }
 
         /// <summary>Inspector width actually in use, after every clamp.</summary>
         int InspectorWidth
@@ -1301,8 +1337,25 @@ namespace NextScan.App
         /// Content width for one control, derived from the LIVE inspector width.
         /// Using a constant meant controls kept their original width when the
         /// splitter narrowed the panel, so labels clipped.
+        ///
+        /// While the settings page is up the same builders run into a much
+        /// wider panel, and this has to follow it -- otherwise every control on
+        /// the page is built 260 px wide in a 1000 px column, which is what
+        /// made the models list a narrow strip in the middle of an empty page.
         /// </summary>
-        int Dw { get { return Math.Max(120, InspectorContentWidth - Dx * 2); } }
+        int Dw
+        {
+            get
+            {
+                // Inside a card: its width, less the margins and the shadow.
+                // Only while a settings page is being built: the inspector is
+                // rebuilt with the settings page still open (a theme change
+                // does both), and it must keep its own width then.
+                if (_cardMode)
+                    return Math.Max(160, (_card != null ? _card.Width : _cardWidth) - Dx - 29);
+                return Math.Max(120, InspectorContentWidth - Dx * 2);
+            }
+        }
 
         /// <summary>
         /// Named jobs, at the top of the first section because recalling one is
@@ -1435,12 +1488,28 @@ namespace NextScan.App
             UpdateStatus();
         }
 
+        /// <summary>
+        /// A heading inside a settings group.
+        ///
+        /// On the settings page the card's own title is the heading, so a
+        /// builder that used to name itself would print that name a second
+        /// time, just inside the card that already says it. Those first
+        /// headings are dropped by <see cref="_skipSectionHeadings"/>; the ones
+        /// further down are real subdivisions and are kept, because "Colour"
+        /// inside Output is not the same thing as "Output".
+        /// </summary>
         void AddSectionLabel(string text, ref int y)
         {
+            if (_skipSectionHeadings) { _skipSectionHeadings = false; return; }
+            if (_cardMode) { StartCard(text, ref y); return; }
+
             NsSection s = new NsSection { Text = text, Location = new Point(Dx, y), Size = new Size(Dw, 20) };
             _drawerHost.Controls.Add(s);
             y += 26;
         }
+
+        /// <summary>Set for the first heading of each settings-page builder.</summary>
+        bool _skipSectionHeadings;
 
         Label AddFieldLabel(string text, ref int y)
         {
@@ -2767,28 +2836,118 @@ namespace NextScan.App
             _previewCost.Invalidate();
         }
 
-        /// <summary>
-        /// The keys, and only the keys.
-        ///
-        /// Which model and how hard it thinks used to be here, and that was
-        /// wrong: they are chosen per question, and Claude, ChatGPT, Gemini and
-        /// Copilot all keep them on the composer beside the send button. What is
-        /// left is the one part that belongs to the account rather than to the
-        /// turn.
-        ///
-        /// All three are shown at once rather than behind a picker. The question
-        /// this page answers is "which of these can I use", and a control that
-        /// shows one at a time cannot answer it.
-        ///
-        /// Each box is write-only. What is already stored is never put back on
-        /// screen -- the row says the last four characters, which is enough to
-        /// tell whether the right key is in there and no use to anybody reading
-        /// over a shoulder.
-        /// </summary>
-        void BuildAssistantSettings(ref int y)
-        {
-            AddSectionLabel("Assistant", ref y);
+        // =====================================================================
+        // AI providers
+        //
+        // One card per provider, all on the page at once: the question this
+        // page answers is "which of these can I use", and a picker showing one
+        // at a time cannot answer it. Each card says whether the provider
+        // works right now -- not whether a key was typed, but whether the
+        // provider answered with it -- and can check again on request.
+        //
+        // Each key box is write-only. What is already stored is never put back
+        // on screen: the card says its last four characters, which is enough to
+        // tell whether the right key is in there and no use to anybody reading
+        // over a shoulder.
+        // =====================================================================
 
+        /// <summary>What was last learnt about a provider, kept while the page is rebuilt.</summary>
+        class AiHealth
+        {
+            public PillState State = PillState.Idle;
+            public string Pill = "";
+            public string Detail = "";
+            public bool Trouble;
+        }
+
+        class AiProviderView
+        {
+            public Ai.IAiProvider Provider;
+            public NsStatusPill Pill;
+            public Label Detail;
+        }
+
+        readonly Dictionary<string, AiHealth> _aiHealth = new Dictionary<string, AiHealth>();
+        readonly List<AiProviderView> _aiProviderViews = new List<AiProviderView>();
+
+        /// <summary>Each provider's own colour, used for its card, its tick boxes and its models.</summary>
+        static Color BrandOf(string providerId)
+        {
+            switch (providerId)
+            {
+                case "claude": return Theme.Parse("#D97757");
+                case "openai": return Theme.Parse("#10A37F");
+                case "gemini": return Theme.Parse("#4285F4");
+            }
+
+            // Servers take colours in turn, so two side by side never match.
+            Color known;
+            lock (ServerBrands)
+            {
+                if (ServerBrands.Count == 0)
+                {
+                    List<Ai.AiServer> servers = Ai.AiServers.All();
+                    for (int i = 0; i < servers.Count; i++)
+                        ServerBrands[servers[i].Id] = Theme.Parse(ServerPalette[i % ServerPalette.Length]);
+                }
+                if (ServerBrands.TryGetValue(providerId, out known)) return known;
+            }
+            return Theme.Parse(ServerPalette[0]);
+        }
+
+        static readonly string[] ServerPalette =
+            { "#8B5CF6", "#0EA5E9", "#14B8A6", "#F43F5E", "#EAB308", "#6366F1", "#84CC16", "#FB923C" };
+
+        /// <summary>Each server's colour, worked out once and again whenever the list of servers changes.</summary>
+        static readonly Dictionary<string, Color> ServerBrands = new Dictionary<string, Color>();
+
+        static void ServersChanged() { lock (ServerBrands) ServerBrands.Clear(); }
+
+        static string BlurbOf(string providerId)
+        {
+            switch (providerId)
+            {
+                case "claude": return "Anthropic's Claude models. Read pages, pictures and PDFs, and work the documents in Assist.";
+                case "openai": return "OpenAI's GPT and o-series models.";
+                case "gemini": return "Google's Gemini models. A free key from Google AI Studio is enough to start.";
+                default: return "A server that speaks the OpenAI API. Its models appear in the Assist panel under this name.";
+            }
+        }
+
+        /// <summary>Where a key is made, for the providers that have one place for it.</summary>
+        static string KeyPageOf(string providerId)
+        {
+            switch (providerId)
+            {
+                case "claude": return "https://console.anthropic.com/settings/keys";
+                case "openai": return "https://platform.openai.com/api-keys";
+                case "gemini": return "https://aistudio.google.com/apikey";
+                default: return "";
+            }
+        }
+
+        /// <summary>
+        /// Well-known servers' own addresses, one press away: the ones that run
+        /// on this computer at their default ports, then the hosted services.
+        /// </summary>
+        static readonly string[][] ServerPresets =
+        {
+            new[] { "Ollama", "http://127.0.0.1:11434/v1" },
+            new[] { "LM Studio", "http://127.0.0.1:1234/v1" },
+            new[] { "llama.cpp", "http://127.0.0.1:8080/v1" },
+            new[] { "vLLM", "http://127.0.0.1:8000/v1" },
+            new[] { "OpenRouter", "https://openrouter.ai/api/v1" },
+            new[] { "Groq", "https://api.groq.com/openai/v1" },
+            new[] { "Together AI", "https://api.together.xyz/v1" },
+            new[] { "DeepSeek", "https://api.deepseek.com/v1" },
+            new[] { "Mistral", "https://api.mistral.ai/v1" },
+            new[] { "xAI", "https://api.x.ai/v1" },
+            new[] { "Fireworks", "https://api.fireworks.ai/inference/v1" },
+            new[] { "Cerebras", "https://api.cerebras.ai/v1" },
+        };
+
+        void BuildAiProviders(ref int y)
+        {
             if (_aiPanel == null)
             {
                 Label gone = AddFieldLabel("The assistant did not load on this machine.", ref y);
@@ -2798,271 +2957,859 @@ namespace NextScan.App
             }
 
             foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+                BuildProviderCard(provider, ref y);
+
+            BuildAddServerCard(ref y);
+
+            _cardIcon = NsIcon.Key;
+            AddSectionLabel("Your keys", ref y);
+            Label where = AddFieldLabel(
+                "Keys are encrypted under this Windows account and never written to the settings file or to a " +
+                "preset. Nothing is sent to a provider until you press something in the Assist panel.", ref y);
+            where.ForeColor = Theme.TextDim;
+            where.Size = new Size(Dw, 34);
+            y += 20;
+
+            // Anything not checked yet is checked now, once, in the background.
+            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+                if (provider.Ready && Ai.AiModels.Cached(provider) == null && !IsChecking(provider)) CheckProvider(provider, false);
+        }
+
+        void BuildProviderCard(Ai.IAiProvider provider, ref int y)
+        {
+            Ai.IAiProvider which = provider;
+            string id = which.Info.Id;
+            bool server = which is Ai.OpenAiCompatProvider;
+
+            _cardAccent = BrandOf(id);
+            _cardIcon = server ? NsIcon.Server : NsIcon.Key;
+            AddSectionLabel(which.Info.Name, ref y);
+            NsSettingsCard card = _card;
+
+            var pill = new NsStatusPill { Location = new Point(card.Width - 150, 17) };
+            card.Controls.Add(pill);
+
+            Label blurb = AddFieldLabel(BlurbOf(id), ref y);
+            blurb.ForeColor = Theme.TextDim;
+            blurb.Size = new Size(Dw, 18);
+            y += 8;
+
+            // A compatible server is found by its address first, so the
+            // address comes before its key.
+            NsTextBox address = null;
+            NsTextBox name = null;
+            if (server)
             {
-                Ai.IAiProvider which = provider;
-                AddFieldLabel(provider.Info.Name, ref y);
+                AddFieldLabel("Name, as the Assist panel shows it", ref y);
+                name = new NsTextBox { Location = new Point(Dx, y), Size = new Size(Dw, 34), Text = which.Info.Name, Cue = "e.g. Ollama on this PC" };
+                _themedFields.Add(name);
+                _drawerHost.Controls.Add(name);
+                y += 40;
 
-                NsTextBox key = new NsTextBox
+                AddFieldLabel("Server address", ref y);
+                address = new NsTextBox
                 {
-                    Secret = true,
+                    Secret = false,
                     Location = new Point(Dx, y),
-                    Size = new Size(Math.Max(60, Dw - 82), 32)
+                    Size = new Size(Dw, 34),
+                    Text = Ai.AiEndpoints.Get(id),
+                    Icon = NsIcon.Server,
+                    Cue = "http://127.0.0.1:11434/v1",
                 };
-                _themedFields.Add(key);
-                _drawerHost.Controls.Add(key);
+                _themedFields.Add(address);
+                _drawerHost.Controls.Add(address);
+                y += 42;
+            }
 
-                NsPill keep = new NsPill
+            AddFieldLabel(server ? "Key (leave empty if the server wants none)" : "API key", ref y);
+
+            const int gap = 6;
+            int keyWidth = Math.Max(120, Dw - (34 + gap) * 2 - (84 + gap) - (84 + gap));
+            NsTextBox key = new NsTextBox { Secret = true, Location = new Point(Dx, y), Size = new Size(keyWidth, 34),
+                                            Icon = NsIcon.Key, Cue = server ? "Paste the server's key, if it has one" : "Paste a new key here" };
+            _themedFields.Add(key);
+            _drawerHost.Controls.Add(key);
+
+            int bx = Dx + keyWidth + gap;
+            var reveal = new NsGlyphButton { Icon = NsIcon.Eye, Location = new Point(bx, y + 1), Size = new Size(34, 32) };
+            _tips.SetToolTip(reveal, "Show what you typed");
+            reveal.Click += delegate
+            {
+                key.Secret = !key.Secret;
+                reveal.Icon = key.Secret ? NsIcon.Eye : NsIcon.EyeOff;
+                reveal.Invalidate();
+            };
+            _drawerHost.Controls.Add(reveal);
+            bx += 34 + gap;
+
+            var keep = new NsPill { Text = "Save", Kind = PillKind.Primary, Radius = 8, Location = new Point(bx, y + 1), Size = new Size(84, 32) };
+            _drawerHost.Controls.Add(keep);
+            bx += 84 + gap;
+
+            var test = new NsPill { Text = "Test", Kind = PillKind.Normal, Radius = 8, Location = new Point(bx, y + 1), Size = new Size(84, 32) };
+            _drawerHost.Controls.Add(test);
+            bx += 84 + gap;
+
+            var remove = new NsGlyphButton { Icon = NsIcon.Trash, Tint = Theme.Danger, Location = new Point(bx, y + 1), Size = new Size(34, 32) };
+            _tips.SetToolTip(remove, server ? "Remove this server" : "Remove the saved key");
+            _drawerHost.Controls.Add(remove);
+            y += 42;
+
+            Label state = AddFieldLabel("", ref y);
+            state.Size = new Size(Math.Max(100, Dw - 150), 17);
+
+            string keyPage = KeyPageOf(id);
+            if (keyPage.Length > 0)
+            {
+                var link = new Label
                 {
-                    Text = "Save",
-                    Kind = PillKind.Normal,
-                    Radius = 7,
-                    Location = new Point(Dx + Math.Max(60, Dw - 78), y),
-                    Size = new Size(78, 32)
+                    Text = "Get a key  ↗",
+                    AutoSize = false,
+                    TextAlign = ContentAlignment.MiddleRight,
+                    Location = new Point(Dx + Dw - 140, state.Top - 1),
+                    Size = new Size(140, 19),
+                    ForeColor = BrandOf(id),
+                    BackColor = Color.Transparent,
+                    Font = Theme.UiSemi(8.5f),
+                    Cursor = Cursors.Hand,
                 };
-                _drawerHost.Controls.Add(keep);
-                y += 36;
-
-                Label state = AddFieldLabel("", ref y);
-                y += 6;
-
-                Action show = delegate
+                _tips.SetToolTip(link, keyPage);
+                link.MouseEnter += delegate { link.Font = new Font(link.Font, FontStyle.Bold | FontStyle.Underline); };
+                link.MouseLeave += delegate { link.Font = Theme.UiSemi(8.5f); };
+                link.Click += delegate
                 {
-                    string tail = Ai.AiKeys.Tail(which.Info.Id);
-                    state.Text = tail.Length > 0
-                        ? "Saved   " + tail
-                        : "No key. It looks like " + which.Info.KeyHint;
-                    state.ForeColor = tail.Length > 0 ? Theme.Good : Theme.TextDim;
+                    try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(keyPage) { UseShellExecute = true }); }
+                    catch (Exception ex) { SetStatus("Could not open the browser: " + ex.Message); }
                 };
-                show();
+                _drawerHost.Controls.Add(link);
+            }
 
-                keep.Click += delegate
+            Label detail = AddFieldLabel("", ref y);
+            detail.Size = new Size(Dw, 17);
+            y += 4;
+
+            var view = new AiProviderView { Provider = which, Pill = pill, Detail = detail };
+            _aiProviderViews.Add(view);
+
+            Action showKey = delegate
+            {
+                string tail = Ai.AiKeys.Tail(id);
+                if (server)
                 {
-                    string typed = key.Text.Trim();
-                    try
+                    string where_ = Ai.AiEndpoints.Get(id);
+                    state.Text = where_.Length == 0 ? "No address yet." : tail.Length > 0 ? "Key saved   " + tail : "No key: sent without one.";
+                }
+                else state.Text = tail.Length > 0 ? "Key saved   " + tail : "No key yet. It looks like " + which.Info.KeyHint;
+                state.ForeColor = tail.Length > 0 ? Theme.Good : Theme.TextDim;
+                remove.Enabled = server || tail.Length > 0;
+                remove.Invalidate();
+            };
+            showKey();
+            ShowHealth(view);
+
+            keep.Click += delegate
+            {
+                string typed = key.Text.Trim();
+                try
+                {
+                    if (address != null)
                     {
-                        // An empty box means remove, not store nothing. Clearing
-                        // it is the only way to take a key off a shared machine.
-                        Ai.AiKeys.Set(which.Info.Id, typed);
-
-                        // The list of models belongs to the key that fetched it.
-                        // A new key is a different account and may not reach the
-                        // same models at all.
-                        Ai.AiModels.Forget(which);
-
-                        SetStatus(typed.Length == 0
-                            ? "The " + which.Info.Name + " key has been removed."
-                            : which.Info.Name + " key saved.");
+                        string where_ = address.Text.Trim();
+                        if (where_.Length > 0 && !Ai.OpenAiCompatProvider.AddressLooksRight(where_))
+                        {
+                            SetStatus("That is not an address this can send to. It should look like http://127.0.0.1:11434/v1");
+                            return;
+                        }
+                        Ai.AiEndpoints.Set(id, where_);
                     }
-                    catch (Exception ex) { SetStatus("Could not store the key: " + ex.Message); }
+                    else if (typed.Length == 0)
+                    {
+                        SetStatus("Type or paste a key first. To take a key off this computer, use the bin.");
+                        return;
+                    }
 
-                    key.Text = "";
-                    show();
+                    // A compatible server may want no key; its box being empty
+                    // then means "none", and is stored as that.
+                    if (typed.Length > 0 || server) Ai.AiKeys.Set(id, typed);
+
+                    // The list of models belongs to the key that fetched it:
+                    // a new key is a different account, a new address a
+                    // different server.
+                    Ai.AiModels.Forget(which);
+                    SetStatus(which.Info.Name + " saved. Checking that it works…");
+                }
+                catch (Exception ex) { SetStatus("Could not store the key: " + ex.Message); return; }
+
+                key.Text = "";
+                showKey();
+
+                // A new name is a new card title and a new name in the panel,
+                // so the page is built again around it.
+                if (name != null && name.Text.Trim().Length > 0 && name.Text.Trim() != which.Info.Name)
+                {
+                    try { Ai.AiServers.Rename(id, name.Text); ServersChanged(); }
+                    catch (Exception ex) { SetStatus("Could not rename it: " + ex.Message); }
+                    Ai.IAiProvider renamed = Ai.AiProviders.ById(id) ?? which;
                     _aiPanel.Rebind();
                     if (_inspHead != null) _inspHead.Invalidate();
-                };
-            }
+                    BeginInvoke((MethodInvoker)delegate { ShowSettingsSection(_settingsIndex); CheckProvider(renamed, true); });
+                    return;
+                }
 
-            Label where = AddFieldLabel(
-                "Encrypted under this Windows account. Never written to the settings file " +
-                "or to a preset.", ref y);
-            where.ForeColor = Theme.TextFaint;
-            where.Size = new Size(Dw, 30);
-            y += 26;
+                _aiPanel.Rebind();
+                if (_inspHead != null) _inspHead.Invalidate();
+                CheckProvider(which, true);
+            };
 
-            BuildAssistantModels(ref y);
+            test.Click += delegate
+            {
+                if (!which.Ready) { SetStatus(server ? "Set the server's address first." : "Save a key first."); return; }
+                CheckProvider(which, true);
+            };
+
+            remove.Click += delegate
+            {
+                DialogResult sure = MessageBox.Show(this,
+                    server ? "Remove " + which.Info.Name + "? Its address, its key and the models chosen for it go with it."
+                           : "Remove the saved " + which.Info.Name + " key from this computer?",
+                    which.Info.Name, MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+                if (sure != DialogResult.Yes) return;
+
+                if (server)
+                {
+                    try
+                    {
+                        Ai.AiModels.Forget(which);
+                        Ai.AiServers.Remove(id);
+                        ServersChanged();
+                        _aiHealth.Remove(id);
+                        Ai.AiAllowed allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
+                        allowed.Clear(id);
+                        _settings.AiAllowedModels = allowed.ToString();
+                        _aiPanel.Allowed = allowed;
+                        SetStatus(which.Info.Name + " removed.");
+                    }
+                    catch (Exception ex) { SetStatus("Could not remove it: " + ex.Message); }
+                    _aiPanel.Rebind();
+                    if (_inspHead != null) _inspHead.Invalidate();
+                    BeginInvoke((MethodInvoker)delegate { ShowSettingsSection(_settingsIndex); });
+                    return;
+                }
+                try
+                {
+                    Ai.AiKeys.Set(id, "");
+                    if (server) Ai.AiEndpoints.Set(id, "");
+                    Ai.AiModels.Forget(which);
+                    _aiHealth.Remove(id);
+                    if (address != null) address.Text = "";
+                    SetStatus(server ? which.Info.Name + " forgotten." : "The " + which.Info.Name + " key has been removed.");
+                }
+                catch (Exception ex) { SetStatus("Could not remove it: " + ex.Message); }
+                showKey();
+                ShowHealth(view);
+                _aiPanel.Rebind();
+                if (_inspHead != null) _inspHead.Invalidate();
+            };
         }
-
-        NsCheckList _aiModelList;
-        NsDropdown _aiDefaultModel;
 
         /// <summary>
-        /// Which models the panel offers, and which of them it starts on.
-        ///
-        /// The lists are the providers' own and can run to dozens -- this
-        /// machine's Gemini key reaches forty-two, most of them for music,
-        /// images or speech. Choosing once here is what keeps the menu on the
-        /// composer down to the handful actually used in the shop.
-        ///
-        /// Nothing fetched is hidden from this list, including the rows our own
-        /// guess thinks are not chat models: those come unticked rather than
-        /// absent, because a guess that removes a row is one the operator cannot
-        /// argue with.
+        /// A card for adding another OpenAI-compatible server: a name, an
+        /// address, and a key if it wants one. A press on a well-known server
+        /// fills the first two. There is no limit: each server added becomes a
+        /// provider of its own, in its own card above and in the Assist panel.
         /// </summary>
-        void BuildAssistantModels(ref int y)
+        void BuildAddServerCard(ref int y)
         {
-            AddSectionLabel("Models", ref y);
+            _cardIcon = NsIcon.Plus;
+            _cardAccent = Theme.Parse("#8B5CF6");
+            AddSectionLabel("Add a server", ref y);
 
-            _aiModelList = new NsCheckList { Location = new Point(Dx, y), Size = new Size(Dw, 190) };
-            _drawerHost.Controls.Add(_aiModelList);
-            y += 196;
+            Label say = AddFieldLabel(
+                "Any server that speaks the OpenAI API: on this computer, in your office, or a hosted service. " +
+                "Add as many as you like; each gets its own card and appears in the Assist panel under its own name.", ref y);
+            say.ForeColor = Theme.TextDim;
+            say.Size = new Size(Dw, 34);
+            y += 20;
 
-            NsPill refresh = new NsPill
+            AddFieldLabel("Start from a well-known one", ref y);
+            y += 2;
+
+            const int gap = 8;
+            int half = (Dw - gap) / 2;
+            var name = new NsTextBox { Size = new Size(half, 34), Cue = "Name, e.g. Ollama on this PC" };
+            var address = new NsTextBox { Size = new Size(Dw - half - gap, 34), Icon = NsIcon.Server, Cue = "Address, e.g. http://127.0.0.1:11434/v1" };
+
+            int x = Dx;
+            foreach (string[] preset in ServerPresets)
             {
-                Text = "Ask the providers again",
-                Kind = PillKind.Normal,
-                Radius = 7,
-                Location = new Point(Dx, y),
-                Size = new Size(Dw, 30)
+                string label = preset[0], url = preset[1];
+                var chip = new NsPill { Text = label, Kind = PillKind.Normal, Radius = 13 };
+                chip.Size = new Size(TextRenderer.MeasureText(label, chip.Font).Width + 26, 28);
+                if (x + chip.Width > Dx + Dw) { x = Dx; y += 34; }
+                chip.Location = new Point(x, y);
+                _tips.SetToolTip(chip, url);
+                chip.Click += delegate
+                {
+                    name.Text = label;
+                    address.Text = url;
+                    SetStatus(label + " filled in. Add a key if it needs one, then press Add server.");
+                };
+                _drawerHost.Controls.Add(chip);
+                x += chip.Width + 6;
+            }
+            y += 40;
+
+            AddFieldLabel("Name and address", ref y);
+            name.Location = new Point(Dx, y);
+            address.Location = new Point(Dx + half + gap, y);
+            _themedFields.Add(name);
+            _themedFields.Add(address);
+            _drawerHost.Controls.Add(name);
+            _drawerHost.Controls.Add(address);
+            y += 42;
+
+            AddFieldLabel("Key (leave empty if the server wants none)", ref y);
+            int addW = 150;
+            var key = new NsTextBox { Secret = true, Location = new Point(Dx, y), Size = new Size(Dw - addW - gap, 34),
+                                      Icon = NsIcon.Key, Cue = "Paste the server's key, if it has one" };
+            _themedFields.Add(key);
+            _drawerHost.Controls.Add(key);
+
+            var add = new NsPill { Text = "Add server", Kind = PillKind.Primary, Radius = 8,
+                                   Location = new Point(Dx + Dw - addW, y + 1), Size = new Size(addW, 32) };
+            _drawerHost.Controls.Add(add);
+            y += 44;
+
+            add.Click += delegate
+            {
+                string where_ = address.Text.Trim();
+                if (where_.Length == 0) { SetStatus("Type the server's address, or press one of the servers above."); address.TakeFocus(); return; }
+                if (!Ai.OpenAiCompatProvider.AddressLooksRight(where_))
+                {
+                    SetStatus("That is not an address this can send to. It should look like http://127.0.0.1:11434/v1");
+                    address.TakeFocus();
+                    return;
+                }
+
+                string called = name.Text.Trim();
+                if (called.Length == 0)
+                {
+                    Uri parsed;
+                    called = Uri.TryCreate(Ai.OpenAiCompatProvider.Normalise(where_), UriKind.Absolute, out parsed) ? parsed.Host : "Server";
+                }
+
+                Ai.AiServer added;
+                try
+                {
+                    added = Ai.AiServers.Add(called);
+                    Ai.AiEndpoints.Set(added.Id, where_);
+                    Ai.AiKeys.Set(added.Id, key.Text.Trim());
+                    ServersChanged();
+                }
+                catch (Exception ex) { SetStatus("Could not add the server: " + ex.Message); return; }
+
+                SetStatus(added.Name + " added. Checking that it answers…");
+                _aiPanel.Rebind();
+                if (_inspHead != null) _inspHead.Invalidate();
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    ShowSettingsSection(_settingsIndex);
+                    Ai.IAiProvider fresh = Ai.AiProviders.ById(added.Id);
+                    if (fresh != null) CheckProvider(fresh, true);
+                });
             };
-            refresh.Click += delegate { RefreshAiModels(true); };
-            _drawerHost.Controls.Add(refresh);
-            y += 38;
-
-            AddFieldLabel("Starts on", ref y);
-            _aiDefaultModel = AddDropdown(new string[0], 0, ref y);
-            _aiDefaultModel.SelectedIndexChanged += delegate { TakeAiDefault(); };
-
-            Label note = AddFieldLabel(
-                "The panel opens on this one. The effort is chosen per question, " +
-                "on the box in the Assist panel.", ref y);
-            note.ForeColor = Theme.TextFaint;
-            note.Size = new Size(Dw, 30);
-            y += 24;
-
-            _aiModelList.Changed += delegate { TakeAiAllowed(); };
-
-            FillAiModelList();
-            RefreshAiModels(false);
         }
 
-        /// <summary>The ids behind the rows, in the order they were added.</summary>
-        readonly List<string[]> _aiModelRows = new List<string[]>();
-
-        void FillAiModelList()
+        AiHealth HealthOf(Ai.IAiProvider provider)
         {
-            if (_aiModelList == null) return;
+            AiHealth h;
+            if (_aiHealth.TryGetValue(provider.Info.Id, out h)) return h;
 
-            Ai.AiAllowed allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
-            _aiModelList.Clear();
-            _aiModelRows.Clear();
-
-            var forDefault = new List<string>();
-            var defaultIds = new List<string[]>();
-            int chosen = 0;
-
-            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+            h = new AiHealth();
+            bool server = provider is Ai.OpenAiCompatProvider;
+            if (!provider.Ready)
             {
-                IList<Ai.AiModel> models = provider.Ready ? Ai.AiModels.Cached(provider) : null;
-
-                if (!provider.Ready) { _aiModelList.AddHeader(provider.Info.Name, "no key"); continue; }
-                if (models == null) { _aiModelList.AddHeader(provider.Info.Name, "asking..."); continue; }
-                if (models.Count == 0) { _aiModelList.AddHeader(provider.Info.Name, "none"); continue; }
-
-                _aiModelList.AddHeader(provider.Info.Name, models.Count + "");
-                bool said = allowed.Any(provider.Info.Id);
-
-                foreach (Ai.AiModel model in models)
+                h.State = PillState.Idle;
+                h.Pill = "Not set up";
+                h.Detail = server ? "Set an address to use a server of your own." : "Add a key to use " + provider.Info.Name + ".";
+            }
+            else
+            {
+                IList<Ai.AiModel> had = Ai.AiModels.Cached(provider);
+                if (had != null)
                 {
-                    bool on = said ? allowed.Has(provider.Info.Id, model.Id) : model.Likely;
-                    _aiModelList.Add(model.ToString(), "", on, !model.Likely,
-                                     new string[] { provider.Info.Id, model.Id });
-                    _aiModelRows.Add(new string[] { provider.Info.Id, model.Id });
-
-                    if (!on) continue;
-                    if (provider.Info.Id == _settings.AiProvider && model.Id == _settings.AiModel)
-                        chosen = forDefault.Count;
-                    forDefault.Add(provider.Info.Name + " · " + model.ToString());
-                    defaultIds.Add(new string[] { provider.Info.Id, model.Id });
+                    h.State = PillState.Good;
+                    h.Pill = "Connected";
+                    h.Detail = had.Count + " models available.";
+                }
+                else
+                {
+                    h.State = PillState.Warn;
+                    h.Pill = "Not checked";
+                    h.Detail = "Press Test to check it answers.";
                 }
             }
-
-            _aiDefaults = defaultIds;
-            if (_aiDefaultModel != null)
-            {
-                if (forDefault.Count == 0) forDefault.Add("nothing chosen yet");
-                _aiDefaultModel.SetItems(forDefault, chosen);
-            }
+            return h;
         }
 
-        List<string[]> _aiDefaults = new List<string[]>();
-
-        void TakeAiAllowed()
+        bool IsChecking(Ai.IAiProvider provider)
         {
-            if (_aiModelList == null) return;
-
-            Ai.AiAllowed allowed = Ai.AiAllowed.Read("");
-            foreach (NsCheckList.Row row in _aiModelList.Rows)
-            {
-                if (row.Header || !row.Ticked) continue;
-                string[] id = row.Tag as string[];
-                if (id != null) allowed.Set(id[0], id[1], true);
-            }
-
-            _settings.AiAllowedModels = allowed.ToString();
-            if (_aiPanel != null) { _aiPanel.Allowed = allowed; _aiPanel.Rebind(); }
-
-            // The default can only be one of the ones on offer.
-            FillAiModelList();
+            AiHealth h;
+            return _aiHealth.TryGetValue(provider.Info.Id, out h) && h.State == PillState.Busy;
         }
 
-        void TakeAiDefault()
+        void ShowHealth(AiProviderView view)
         {
-            if (_aiDefaultModel == null || _aiPanel == null) return;
+            if (view == null || view.Pill.IsDisposed) return;
+            AiHealth h = HealthOf(view.Provider);
+            view.Pill.Set(h.State, h.Pill);
+            if (view.Pill.Parent != null) view.Pill.Left = view.Pill.Parent.Width - view.Pill.Width - 30;
+            view.Detail.Text = h.Detail;
+            view.Detail.ForeColor = h.Trouble ? Theme.Danger : Theme.TextFaint;
+        }
 
-            int i = _aiDefaultModel.SelectedIndex;
-            if (i < 0 || i >= _aiDefaults.Count) return;
-
-            _aiPanel.ProviderId = _aiDefaults[i][0];
-            _aiPanel.Model = _aiDefaults[i][1];
-            if (_inspHead != null) _inspHead.Invalidate();
+        void ShowHealth(Ai.IAiProvider provider)
+        {
+            foreach (AiProviderView view in _aiProviderViews)
+                if (view.Provider.Info.Id == provider.Info.Id) ShowHealth(view);
         }
 
         /// <summary>
-        /// Asks every provider with a key for its list.
-        ///
-        /// On opening the page it uses what is already in hand; the button asks
-        /// again, for when a model has been released since the application
-        /// started.
+        /// Asks a provider for its models, which is the cheapest request that
+        /// proves the key and the address both work, and says how it went and
+        /// how long it took.
         /// </summary>
+        void CheckProvider(Ai.IAiProvider provider, bool again)
+        {
+            Ai.IAiProvider which = provider;
+            string id = which.Info.Id;
+            _aiHealth.Remove(id);
+            if (!which.Ready) { ShowHealth(which); return; }
+
+            _aiHealth[id] = new AiHealth { State = PillState.Busy, Pill = "Checking…", Detail = "Asking " + which.Info.Name + " for its models…" };
+            ShowHealth(which);
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            System.Threading.CancellationToken token =
+                new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
+
+            System.Threading.Tasks.Task.Run(delegate { return Ai.AiModels.Fetch(which, again, token); })
+                .ContinueWith(delegate (System.Threading.Tasks.Task<IList<Ai.AiModel>> done)
+                {
+                    long ms = clock.ElapsedMilliseconds;
+                    if (IsDisposed || !IsHandleCreated) return;
+                    try
+                    {
+                        BeginInvoke((MethodInvoker)delegate
+                        {
+                            if (done.IsFaulted || done.IsCanceled)
+                            {
+                                string why = done.IsCanceled ? "No answer within 30 seconds."
+                                                             : FirstLine(done.Exception.GetBaseException().Message);
+                                _aiHealth[id] = new AiHealth { State = PillState.Bad, Pill = "Can't connect", Detail = why, Trouble = true };
+                                SetStatus("Could not reach " + which.Info.Name + ".");
+                            }
+                            else
+                            {
+                                int n = done.Result.Count;
+                                _aiHealth[id] = new AiHealth
+                                {
+                                    State = PillState.Good,
+                                    Pill = "Connected · " + ms.ToString(CultureInfo.InvariantCulture) + " ms",
+                                    Detail = n + (n == 1 ? " model" : " models") + " available.",
+                                };
+                                SetStatus(which.Info.Name + ": " + n + " models");
+                            }
+                            ShowHealth(which);
+                            if (_settingsOpen && _aiModelList != null) FillAiModelList(true);
+                        });
+                    }
+                    catch (InvalidOperationException) { }
+                });
+        }
+
+        static string FirstLine(string message)
+        {
+            string s = (message ?? "").Replace("\r", "");
+            int nl = s.IndexOf('\n');
+            if (nl >= 0) s = s.Substring(0, nl);
+            return s.Length > 170 ? s.Substring(0, 167) + "…" : s;
+        }
+
+        /// <summary>Asks every provider that can be asked for its list: again, or only where none is in hand.</summary>
         void RefreshAiModels(bool again)
         {
             foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
             {
                 if (!provider.Ready) continue;
-                if (!again && Ai.AiModels.Cached(provider) != null) continue;
-
-                Ai.IAiProvider which = provider;
-                System.Threading.CancellationToken token =
-                    new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30)).Token;
-
-                System.Threading.Tasks.Task.Run(delegate { return Ai.AiModels.Fetch(which, again, token); })
-                    .ContinueWith(delegate (System.Threading.Tasks.Task<IList<Ai.AiModel>> done)
-                    {
-                        if (IsDisposed || !IsHandleCreated) return;
-                        try
-                        {
-                            BeginInvoke((MethodInvoker)delegate
-                            {
-                                if (done.IsFaulted || done.IsCanceled)
-                                {
-                                    SetStatus("Could not reach " + which.Info.Name + ".");
-                                    return;
-                                }
-                                SetStatus(which.Info.Name + ": " + done.Result.Count + " models");
-                                if (_settingsOpen && _aiModelList != null) FillAiModelList();
-                            });
-                        }
-                        catch (InvalidOperationException) { }
-                    });
+                if (!again && (Ai.AiModels.Cached(provider) != null || IsChecking(provider))) continue;
+                CheckProvider(provider, again);
             }
+        }
+
+        // =====================================================================
+        // AI models
+        //
+        // Which models the panel offers, and which it opens on.
+        //
+        // The lists are the providers' own and can run to hundreds -- a
+        // gateway key here reaches three hundred. Choosing once here is what
+        // keeps the menu on the composer down to the handful actually used.
+        //
+        // What each row says about a model -- its window, its longest answer,
+        // pictures, PDFs, thinking, its date -- is what the provider's own
+        // model list says, and nothing else. Where a provider does not say,
+        // the row shows nothing rather than a number from a table of ours that
+        // would be wrong the week a model ships.
+        //
+        // Nothing fetched is hidden, including the rows our own guess thinks
+        // are not chat models: those come unticked and marked rather than
+        // absent, because a guess that removes a row is one the operator
+        // cannot argue with.
+        // =====================================================================
+
+        NsModelList _aiModelList;
+        NsDropdown _aiDefaultModel;
+        Label _aiModelStats;
+        string _aiSearch = "";
+        string _aiShowProvider = "";
+        bool _aiOnlyOffered;
+
+        /// <summary>Marks a provider as chosen-for even when nothing of it is ticked.</summary>
+        const string NoneMarker = "-";
+
+        void BuildAiModels(ref int y)
+        {
+            if (_aiPanel == null)
+            {
+                Label gone = AddFieldLabel("The assistant did not load on this machine.", ref y);
+                gone.ForeColor = Theme.Warn;
+                y += 10;
+                return;
+            }
+
+            _cardIcon = NsIcon.StarFill;
+            _cardAccent = Theme.Parse("#F2A516");
+            AddSectionLabel("Starts on", ref y);
+            Label says = AddFieldLabel("The model the Assist panel opens on. Pick it here, or with the star beside a model below.", ref y);
+            says.ForeColor = Theme.TextDim;
+            says.Size = new Size(Dw, 17);
+            y += 6;
+            _aiDefaultModel = AddDropdown(new string[0], 0, ref y);
+            _aiDefaultModel.SelectedIndexChanged += delegate { TakeAiDefault(); };
+            _aiModelStats = AddFieldLabel("", ref y);
+            _aiModelStats.ForeColor = Theme.TextFaint;
+            y += 6;
+
+            AddSectionLabel("Models", ref y);
+
+            // Search, what to show, and asking again, on one line.
+            const int gap = 8;
+            int segW = 200, refreshW = 104;
+            int searchW = Math.Max(160, Dw - segW - refreshW - gap * 2);
+            var search = new NsTextBox { Location = new Point(Dx, y), Size = new Size(searchW, 34), Text = _aiSearch,
+                                         Icon = NsIcon.Search, Cue = "Search models by name, id or description" };
+            _themedFields.Add(search);
+            _drawerHost.Controls.Add(search);
+            _tips.SetToolTip(search, "Search by name, id or description");
+            search.Edited += delegate
+            {
+                _aiSearch = search.Text.Trim();
+                FillAiModelList(false);
+            };
+
+            var show = new NsSegment { Location = new Point(Dx + searchW + gap, y + 2), Size = new Size(segW, 30) };
+            show.Items = new[] { "Everything", "On offer" };
+            show.SelectedIndex = _aiOnlyOffered ? 1 : 0;
+            show.SelectedIndexChanged += delegate { _aiOnlyOffered = show.SelectedIndex == 1; FillAiModelList(false); };
+            _drawerHost.Controls.Add(show);
+
+            var refresh = new NsPill { Text = "Refresh", Kind = PillKind.Normal, Radius = 8,
+                                       Location = new Point(Dx + searchW + gap + segW + gap, y + 1), Size = new Size(refreshW, 32) };
+            _tips.SetToolTip(refresh, "Ask every provider for its list again");
+            refresh.Click += delegate { RefreshAiModels(true); };
+            _drawerHost.Controls.Add(refresh);
+            y += 44;
+
+            // Which provider's models, as a row of choices.
+            var names = new List<string> { "All providers" };
+            var ids = new List<string> { "" };
+            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+            {
+                if (!provider.Ready) continue;
+                names.Add(provider.Info.Name);
+                ids.Add(provider.Info.Id);
+            }
+            if (!ids.Contains(_aiShowProvider)) _aiShowProvider = "";
+            if (names.Count > 5)
+            {
+                // Too many to sit side by side: one per server soon runs past
+                // what a row of buttons can name legibly.
+                AddFieldLabel("Provider", ref y);
+                NsDropdown pick = AddDropdown(names, Math.Max(0, ids.IndexOf(_aiShowProvider)), ref y);
+                pick.SelectedIndexChanged += delegate
+                {
+                    _aiShowProvider = ids[Math.Max(0, Math.Min(ids.Count - 1, pick.SelectedIndex))];
+                    FillAiModelList(false);
+                };
+            }
+            else if (names.Count > 2)
+            {
+                var which = new NsSegment { Location = new Point(Dx, y), Size = new Size(Dw, 30) };
+                which.Items = names.ToArray();
+                which.SelectedIndex = Math.Max(0, ids.IndexOf(_aiShowProvider));
+                which.SelectedIndexChanged += delegate
+                {
+                    _aiShowProvider = ids[Math.Max(0, Math.Min(ids.Count - 1, which.SelectedIndex))];
+                    FillAiModelList(false);
+                };
+                _drawerHost.Controls.Add(which);
+                y += 40;
+            }
+            else _aiShowProvider = "";
+
+            int listHeight = Math.Max(340, Math.Min(620, (_settingsContent != null ? _settingsContent.Height : 700) - 150));
+            _aiModelList = new NsModelList { Location = new Point(Dx, y), Size = new Size(Dw, listHeight) };
+            _aiModelList.Toggled += delegate (NsModelList.Item it) { SetModelOffered(it.ProviderId, it.Model.Id, !it.On); };
+            _aiModelList.Starred += delegate (NsModelList.Item it) { MakeDefaultModel(it.ProviderId, it.Model.Id); };
+            _aiModelList.SetAll += delegate (string providerId, bool on) { SetAllOffered(providerId, on); };
+            _drawerHost.Controls.Add(_aiModelList);
+            y += listHeight + 10;
+
+            Label legend = AddFieldLabel(
+                "Tick a model to offer it in the Assist panel; the star is the one it opens on. Context, output, " +
+                "pictures, PDF and thinking are what each provider's own model list says. Where it says nothing, nothing is shown.",
+                ref y);
+            legend.ForeColor = Theme.TextFaint;
+            legend.Size = new Size(Dw, 32);
+            y += 18;
+
+            FillAiModelList(false);
+            RefreshAiModels(false);
+        }
+
+        /// <summary>The ids behind the rows of the "Starts on" list, in order.</summary>
+        List<string[]> _aiDefaults = new List<string[]>();
+
+        /// <summary>
+        /// Rebuilds the rows from what the providers returned and what the
+        /// operator has chosen, through the search and the filters.
+        /// </summary>
+        void FillAiModelList(bool keepScroll)
+        {
+            if (_aiModelList == null) return;
+
+            Ai.AiAllowed allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
+            string defProvider = _aiPanel != null ? _aiPanel.ProviderId : _settings.AiProvider;
+            string defModel = _aiPanel != null ? _aiPanel.Model : _settings.AiModel;
+
+            var items = new List<NsModelList.Item>();
+            var forDefault = new List<string>();
+            var defaultIds = new List<string[]>();
+            int chosen = -1, connected = 0, total = 0, offered = 0, ready = 0;
+            string needle = _aiSearch ?? "";
+
+            foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
+            {
+                string pid = provider.Info.Id;
+                if (provider.Ready) ready++;
+                bool shown = _aiShowProvider.Length == 0 || _aiShowProvider == pid;
+                IList<Ai.AiModel> models = provider.Ready ? Ai.AiModels.Cached(provider) : null;
+
+                var head = new NsModelList.Item
+                {
+                    Header = true, ProviderId = pid, ProviderName = provider.Info.Name, Brand = BrandOf(pid),
+                };
+                if (!provider.Ready) head.Note = "not set up: add it on AI providers";
+                else if (models == null) head.Note = IsChecking(provider) ? "asking…" : "not fetched yet: press Refresh";
+                else if (models.Count == 0) head.Note = "the server listed no models";
+                else connected++;
+
+                var rows = new List<NsModelList.Item>();
+                if (models != null)
+                {
+                    bool said = allowed.Any(pid);
+                    var ordered = new List<Ai.AiModel>(models);
+                    ordered.Sort(delegate (Ai.AiModel a, Ai.AiModel b)
+                    {
+                        if (a.Likely != b.Likely) return a.Likely ? -1 : 1;
+                        int byDate = b.Released.CompareTo(a.Released);
+                        return byDate != 0 ? byDate : string.Compare(a.ToString(), b.ToString(), StringComparison.OrdinalIgnoreCase);
+                    });
+
+                    foreach (Ai.AiModel model in ordered)
+                    {
+                        bool on = said ? allowed.Has(pid, model.Id) : model.Likely;
+                        total++;
+                        head.Count++;
+                        if (on)
+                        {
+                            offered++;
+                            head.CountOn++;
+                            if (pid == defProvider && model.Id == defModel) chosen = forDefault.Count;
+                            forDefault.Add(provider.Info.Name + "  ·  " + model);
+                            defaultIds.Add(new[] { pid, model.Id });
+                        }
+
+                        if (!shown) continue;
+                        if (_aiOnlyOffered && !on) continue;
+                        if (needle.Length > 0 &&
+                            model.ToString().IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0 &&
+                            model.Id.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0 &&
+                            model.Description.IndexOf(needle, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+                        rows.Add(new NsModelList.Item
+                        {
+                            ProviderId = pid, ProviderName = provider.Info.Name, Brand = BrandOf(pid),
+                            Model = model, On = on, Default = pid == defProvider && model.Id == defModel,
+                        });
+                    }
+                }
+
+                if (!shown) continue;
+                if (rows.Count == 0 && (needle.Length > 0 || _aiOnlyOffered) && head.Note.Length == 0) continue;
+                items.Add(head);
+                items.AddRange(rows);
+            }
+
+            _aiModelList.Empty = ready == 0
+                ? "No provider is set up yet. Add a key on the AI providers page and its models appear here."
+                : "Nothing matches.";
+            _aiModelList.SetItems(items, keepScroll);
+
+            // The model it really opens on, even when that is not one on
+            // offer -- a provider with no key, or none named at all. Showing
+            // the first of the list instead, as this did, says the assistant
+            // starts somewhere it does not.
+            if (chosen < 0 && defProvider.Length > 0)
+            {
+                Ai.IAiProvider current = Ai.AiProviders.ById(defProvider);
+                string who = current != null ? current.Info.Name : defProvider;
+                string what = current == null || !current.Ready ? who + "  ·  not set up: star a model below"
+                            : defModel.Length == 0 ? who + "  ·  its newest model, chosen for you"
+                            : who + "  ·  " + Ai.AiModels.NameOf(current, defModel) + "  (not ticked)";
+                forDefault.Insert(0, what);
+                defaultIds.Insert(0, new[] { defProvider, defModel });
+                chosen = 0;
+            }
+
+            _aiDefaults = defaultIds;
+            if (_aiDefaultModel != null)
+            {
+                if (forDefault.Count == 0) forDefault.Add("Nothing on offer yet: tick a model below");
+                _aiDefaultModel.SetItems(forDefault, Math.Max(0, chosen));
+            }
+            if (_aiModelStats != null)
+                _aiModelStats.Text = connected + (connected == 1 ? " provider" : " providers") + " connected   ·   " +
+                                     total + " models   ·   " + offered + " on offer";
+        }
+
+        /// <summary>
+        /// The operator's choice for one provider, made explicit: until they
+        /// tick or untick something, the likely models are the offer, and the
+        /// first change has to start from that rather than from nothing.
+        /// </summary>
+        Ai.AiAllowed ChoiceFor(string providerId)
+        {
+            Ai.AiAllowed allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
+            if (allowed.Any(providerId)) return allowed;
+
+            Ai.IAiProvider provider = Ai.AiProviders.ById(providerId);
+            IList<Ai.AiModel> models = provider != null ? Ai.AiModels.Cached(provider) : null;
+            if (models != null) foreach (Ai.AiModel m in models) if (m.Likely) allowed.Set(providerId, m.Id, true);
+            allowed.Set(providerId, NoneMarker, true);
+            return allowed;
+        }
+
+        void SetModelOffered(string providerId, string modelId, bool on)
+        {
+            Ai.AiAllowed allowed = ChoiceFor(providerId);
+            allowed.Set(providerId, NoneMarker, true);
+            allowed.Set(providerId, modelId, on);
+            TakeAllowed(allowed);
+        }
+
+        void SetAllOffered(string providerId, bool on)
+        {
+            Ai.AiAllowed allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
+            allowed.Clear(providerId);
+            allowed.Set(providerId, NoneMarker, true);
+            Ai.IAiProvider provider = Ai.AiProviders.ById(providerId);
+            IList<Ai.AiModel> models = provider != null ? Ai.AiModels.Cached(provider) : null;
+            if (on && models != null) foreach (Ai.AiModel m in models) allowed.Set(providerId, m.Id, true);
+            TakeAllowed(allowed);
+        }
+
+        void MakeDefaultModel(string providerId, string modelId)
+        {
+            if (_aiPanel == null) return;
+            Ai.AiAllowed allowed = ChoiceFor(providerId);
+            allowed.Set(providerId, NoneMarker, true);
+            allowed.Set(providerId, modelId, true);
+            _settings.AiAllowedModels = allowed.ToString();
+            _aiPanel.Allowed = allowed;
+            _aiPanel.ProviderId = providerId;
+            _aiPanel.Model = modelId;
+            _aiPanel.Rebind();
+            if (_inspHead != null) _inspHead.Invalidate();
+            Ai.IAiProvider provider = Ai.AiProviders.ById(providerId);
+            SetStatus("The assistant now opens on " + (provider != null ? Ai.AiModels.NameOf(provider, modelId) : modelId) + ".");
+            FillAiModelList(true);
+        }
+
+        /// <summary>Stores the offer, hands it to the panel, and keeps the model it opens on one of those offered.</summary>
+        void TakeAllowed(Ai.AiAllowed allowed)
+        {
+            _settings.AiAllowedModels = allowed.ToString();
+            if (_aiPanel != null) { _aiPanel.Allowed = allowed; _aiPanel.Rebind(); }
+            FillAiModelList(true);
+
+            // Only when the model it opened on was one on offer and has just
+            // been unticked: then it moves to the first still offered.
+            if (_aiPanel == null) return;
+            Ai.IAiProvider was = Ai.AiProviders.ById(_aiPanel.ProviderId);
+            if (was == null || !was.Ready || _aiPanel.Model.Length == 0) return;
+            if (IsOffered(allowed, _aiPanel.ProviderId, _aiPanel.Model)) return;
+            foreach (string[] one in _aiDefaults)
+                if (IsOffered(allowed, one[0], one[1])) { MakeDefaultModel(one[0], one[1]); return; }
+        }
+
+        /// <summary>The panel's own rule: the operator's choice for a provider once made, the likely models until then.</summary>
+        static bool IsOffered(Ai.AiAllowed allowed, string providerId, string modelId)
+        {
+            if (allowed.Any(providerId)) return allowed.Has(providerId, modelId);
+            Ai.IAiProvider provider = Ai.AiProviders.ById(providerId);
+            IList<Ai.AiModel> models = provider != null ? Ai.AiModels.Cached(provider) : null;
+            if (models != null) foreach (Ai.AiModel m in models) if (m.Id == modelId) return m.Likely;
+            return false;
+        }
+
+        void TakeAiDefault()
+        {
+            if (_aiDefaultModel == null || _aiPanel == null) return;
+            int i = _aiDefaultModel.SelectedIndex;
+            if (i < 0 || i >= _aiDefaults.Count) return;
+            if (_aiDefaults[i][0] == _aiPanel.ProviderId && _aiDefaults[i][1] == _aiPanel.Model) return;
+            MakeDefaultModel(_aiDefaults[i][0], _aiDefaults[i][1]);
         }
 
         void BuildAppearanceSettings(ref int y)
         {
             AddSectionLabel("Appearance", ref y);
 
-            NsSegment theme = new NsSegment();
-            theme.Items = new string[] { "Light", "Graphite" };
+            AddFieldLabel("Theme", ref y);
+            y += 4;
+            NsThemeChoice theme = new NsThemeChoice();
             theme.SelectedIndex = _layout.LightTheme ? 0 : 1;
             theme.Location = new Point(Dx, y);
-            theme.Size = new Size(Dw, 30);
+            theme.Size = new Size(Math.Min(Dw, 560), 176);
             theme.SelectedIndexChanged += delegate
             {
                 _layout.LightTheme = (theme.SelectedIndex == 0);
                 ApplyTheme();
             };
             _drawerHost.Controls.Add(theme);
-            y += 40;
+            y += 184;
 
             AddSectionLabel("Window", ref y);
 
@@ -3409,7 +4156,7 @@ namespace NextScan.App
         {
             if (!Docs.DocsEngine.IsInstalled)
             {
-                SetStatus("The document editor is not installed. Run tools\\get_onlyoffice.ps1, then build again.");
+                SetStatus("The document editor is not installed. Run tools\\get_onlyoffice.ps1, then build again...");
                 return null;
             }
 
@@ -3620,9 +4367,29 @@ namespace NextScan.App
                 Graphics g = e.Graphics;
                 Theme.Smooth(g);
                 g.Clear(Theme.Surface);
+
+                // The app's own tile: every page's colour at once, since this
+                // bar is above all of them.
+                var tile = new Rectangle(24, (_settingsHead.Height - 36) / 2, 36, 36);
+                using (GraphicsPath path = Theme.Round(tile, 10))
+                using (var brush = new LinearGradientBrush(tile, Color.Black, Color.Black, 45f))
+                {
+                    var blend = new ColorBlend
+                    {
+                        Colors = new[] { Theme.Parse("#3B82F6"), Theme.Parse("#8B5CF6"), Theme.Parse("#EC4899"), Theme.Parse("#F97316") },
+                        Positions = new[] { 0f, 0.4f, 0.75f, 1f },
+                    };
+                    brush.InterpolationColors = blend;
+                    g.FillPath(brush, path);
+                }
+                NsIcon.Draw(g, NsIcon.Settings, new RectangleF(tile.X + 8, tile.Y + 8, 20, 20), Color.White);
+
                 using (Font f = Theme.UiSemi(13f))
-                    TextRenderer.DrawText(g, "Settings", f, new Rectangle(28, 0, 400, _settingsHead.Height),
-                        Theme.Text, TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+                    TextRenderer.DrawText(g, "Settings", f, new Rectangle(72, 9, 400, 26),
+                        Theme.Text, TextFormatFlags.NoPrefix);
+                using (Font f = Theme.Ui(8.5f))
+                    TextRenderer.DrawText(g, "Changes apply as you make them", f, new Rectangle(73, 34, 400, 18),
+                        Theme.TextFaint, TextFormatFlags.NoPrefix);
                 using (Pen pen = new Pen(Theme.LineSoft, 1f))
                     g.DrawLine(pen, 0, _settingsHead.Height - 1, _settingsHead.Width, _settingsHead.Height - 1);
             };
@@ -3633,12 +4400,81 @@ namespace NextScan.App
             done.Name = "settingsDone";
             _settingsHead.Controls.Add(done);
 
-            // AutoScroll, because the page does not fit. It never did on a
-            // window that is not maximised, and there was no way to reach what
-            // was below the fold: the columns simply ran off the bottom.
+            // One control that undoes the page, on the page that has all the
+            // settings on it. It is not a window command and it is not undo --
+            // there is no history here -- so it says "reset" rather than
+            // pretending otherwise, and it asks first, because the one thing it
+            // cannot do is put back a scan that was already made.
+            NsPill reset = new NsPill
+            {
+                Text = "Reset settings",
+                Kind = PillKind.Quiet,
+                Radius = 7,
+                Size = new Size(132, 32),
+            };
+            reset.Name = "settingsReset";
+            reset.Click += delegate { ConfirmResetSettings(); };
+            _settingsHead.Controls.Add(reset);
+
+            // The page is a fixed frame: a list of places on the left, and the
+            // settings of the chosen one on the right. Only the right side
+            // scrolls, so the list of places stays put while a long section is
+            // read -- which is the whole reason for the list being there.
             _settingsBody = new Panel { BackColor = Theme.Ground, AutoScroll = true };
             _settingsBody.MouseWheel += OnSettingsWheel;
             _settingsPage.Controls.Add(_settingsBody);
+        }
+
+        /// <summary>
+        /// Puts the page back to how a fresh install has it, after asking.
+        ///
+        /// The keys are left alone. They are the one thing here that a person
+        /// had to go and find, they are not written in the settings file at
+        /// all, and there is no way to get them back once they are gone -- so a
+        /// control that tidies up the page has no business destroying them.
+        /// The watched folder and the saved presets are kept for the same
+        /// reason: they point at real files rather than describing a choice.
+        ///
+        /// What goes back is every preference: the format, the resolution, the
+        /// look, the shortcuts. That is what "reset settings" means to someone
+        /// whose settings have drifted, and it is the part they cannot type
+        /// their way back to without going through all of it again.
+        /// </summary>
+        void ConfirmResetSettings()
+        {
+            DialogResult ask = MessageBox.Show(
+                this,
+                "Put every preference back to its default?\r\n\r\n" +
+                "API keys, the watched folder and your saved presets are kept.",
+                "Reset settings",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+            if (ask != DialogResult.Yes) { SetStatus("Nothing was reset."); return; }
+
+            try
+            {
+                // The shell holds one settings object for the whole session, so
+                // a reset cannot swap the object -- it has to write defaults
+                // into the one that is there. Loading a fresh instance and
+                // copying its fields over does that without the shell having
+                // to hold a mutable reference, and it cannot leave half the
+                // fields behind the way assigning a handful of them would.
+                StudioSettings defaults = new StudioSettings();
+                defaults.CopyInto(_settings);
+                _settings.Save();
+
+                _settingsIndex = 0;
+                FillSettings();
+                ApplyTheme();
+                LayoutAll();
+                SetStatus("Settings are back to their defaults.");
+            }
+            catch (Exception ex)
+            {
+                Log("could not reset settings: " + ex.Message);
+                SetStatus("Could not reset the settings.");
+            }
         }
 
         void OpenSettings(bool open)
@@ -3665,94 +4501,322 @@ namespace NextScan.App
         }
 
         /// <summary>
-        /// Lays the settings out in columns across the page.
+        /// Builds the settings page: the pages down the left, each with its own
+        /// colour and icon, and the chosen page on the right -- its banner,
+        /// then its settings in cards.
         ///
-        /// One 300 px column on a 1300 px page would be nine tenths empty, which
-        /// is exactly the kind of hollow screen a full page has to justify. The
-        /// column count follows the width.
+        /// A list of places and one place's settings is the arrangement
+        /// Windows, macOS and every editor use, and it keeps working as pages
+        /// are added. Nothing folds away: a page is short enough to read whole,
+        /// and one that is not scrolls, with the list staying put beside it.
+        ///
+        /// The builders are the inspector's, unchanged. They write into
+        /// _drawerHost; in card mode every heading they add starts a card and
+        /// _drawerHost becomes it (see StartCard).
         /// </summary>
-        void FillSettings()
+        void FillSettings() { FillSettings(false); }
+
+        void FillSettings(bool animate)
         {
             _settingsBody.SuspendLayout();
-            while (_settingsBody.Controls.Count > 0)
+
+            // Everything goes but the list of pages: it is the same list on
+            // every page, and keeping it is what lets its highlight glide
+            // from the old page to the new one instead of reappearing there.
+            for (int i = _settingsBody.Controls.Count - 1; i >= 0; i--)
             {
-                Control previous = _settingsBody.Controls[0];
-                _settingsBody.Controls.Remove(previous);
+                Control previous = _settingsBody.Controls[i];
+                if (previous == _settingsNav) continue;
+                _settingsBody.Controls.RemoveAt(i);
                 previous.Dispose();
             }
             _previewCost = null;
             _aiModelList = null;
             _aiDefaultModel = null;
+            _aiModelStats = null;
+            _aiProviderViews.Clear();
 
             Panel host = _drawerHost;
-            int columnWidth = SettingsColumnWidth;
-            int count = SettingsColumns;
+            int bodyHeight = Math.Max(100, _settingsBody.Height);
 
-            // Centred rather than flush left. There is genuinely not a screen's
-            // worth of settings here, and a left-packed pair of columns on a
-            // wide monitor reads as a page that failed to load; a centred band
-            // reads as a sheet, which is what it is.
-            const int gutter = 44;
-            int band = count * columnWidth + (count - 1) * gutter;
-            int originX = Math.Max(28, (_settingsBody.ClientSize.Width - band) / 2);
-
-            Panel[] columns = new Panel[count];
-            for (int i = 0; i < columns.Length; i++)
+            if (_settingsNav == null || _settingsNav.IsDisposed)
             {
-                columns[i] = new Panel
-                {
-                    BackColor = Color.Transparent,
-                    Location = new Point(originX + i * (columnWidth + gutter), 4),
-                    Size = new Size(columnWidth, Math.Max(100, _settingsBody.Height - 8))
-                };
-                // A wheel turned over a column has to reach the panel that
-                // scrolls. Unhandled wheel messages climb to the parent, but
-                // only once something has focus, and nothing has focus on a page
-                // that has just opened.
-                columns[i].MouseWheel += OnSettingsWheel;
-                _settingsBody.Controls.Add(columns[i]);
+                _settingsNav = new NsSettingsNav();
+                _settingsNav.SetPages(SettingsPages, _settingsIndex);
+                _settingsNav.Picked += delegate (int index) { ShowSettingsSection(index, true); };
+                _settingsBody.Controls.Add(_settingsNav);
             }
+            _settingsNav.SetBounds(0, 0, SettingsNavWidth, bodyHeight);
+            _settingsNav.Selected = _settingsIndex;
+            _settingsNav.Invalidate();
 
-            SectionBuilder[] parts = { BuildOutputGroup, BuildPreviewSettings, BuildShortcutSettings,
-                                       BuildAssistantSettings, BuildWatchGroup,
-                                       BuildAppearanceSettings, BuildAboutSettings };
-            int[] into = { 0, 0, 0, 1, 1, 1, 1 };
-            int tallest = 0;
-            for (int i = 0; i < parts.Length; i++)
+            // The content scrolls, not the page.
+            //
+            // The trick is AutoScrollMinSize with AutoScroll left off. With
+            // AutoScroll on, WinForms grows the panel to fit its content, so
+            // the panel ends up taller than the window and everything below
+            // the window's edge is simply clipped with nothing to scroll to.
+            // With it off, the panel stays exactly the window's height and
+            // AutoScrollMinSize is the amount that does not fit, which is
+            // what puts a working scrollbar on the right.
+            Panel content = new Panel
             {
-                _drawerHost = columns[Math.Min(into[i], columns.Length - 1)];
-                int y = _drawerHost.Tag == null ? 8 : (int)_drawerHost.Tag;
-                parts[i](ref y);
-                y += 20;
-                _drawerHost.Tag = y;
-                tallest = Math.Max(tallest, y);
-            }
+                BackColor = Theme.Ground,
+                Location = new Point(SettingsNavWidth, 0),
+                Size = new Size(Math.Max(200, _settingsBody.Width - SettingsNavWidth), bodyHeight),
+                AutoScroll = false,
+            };
+            content.MouseWheel += OnSettingsWheel;
+            _settingsBody.Controls.Add(content);
+            _settingsContent = content;
+
+            // A readable column, not the whole window: an input 900 px wide
+            // is one nobody's eye can follow to its end.
+            _cardLeft = 28;
+            _cardWidth = Math.Max(360, Math.Min(900, content.Width - _cardLeft - 44));
+
+            SettingsPageInfo page = SettingsPages[Math.Max(0, Math.Min(SettingsPages.Length - 1, _settingsIndex))];
+            NsHero hero = new NsHero
+            {
+                Location = new Point(_cardLeft, 24),
+                Size = new Size(_cardWidth - 5, 118),
+            };
+            hero.Show(page, animate);
+            content.Controls.Add(hero);
+            _settingsHero = hero;
+
+            _cardsBottom = hero.Bottom + 18;
+            _cardMode = true;
+            _cardAccent = null;
+            _cardIcon = "";
+            _drawerHost = content;
+            int y = 0;
+            StartCard("", ref y);
+            SettingsBuilders[Math.Max(0, Math.Min(SettingsBuilders.Length - 1, _settingsIndex))](ref y);
+            EndCard(y);
+            _cardMode = false;
             _drawerHost = host;
 
-            for (int i = 0; i < columns.Length; i++)
-            {
-                columns[i].Height = Math.Max(tallest, _settingsBody.Height);
-                columns[i].Tag = null;
-            }
+            // Only what does not fit is asked for. A section that fits gets a
+            // minimum no larger than itself, so no bar appears it cannot use.
+            _settingsBody.PerformLayout();
+            int needed = 0;
+            foreach (Control made in content.Controls) needed = Math.Max(needed, made.Bottom);
+            content.AutoScrollMinSize = new Size(1, Math.Max(content.Height, needed + 28));
 
             _settingsBody.ResumeLayout();
             _settingsBody.PerformLayout();
-
-            // Back to the top. Filling the page gives something focus, and
-            // WinForms scrolls whatever has focus into view, so the page opened
-            // at its own end with the first setting above the fold.
             _settingsBody.AutoScrollPosition = new Point(0, 0);
+            content.AutoScrollPosition = new Point(0, 0);
         }
 
+        /// <summary>
+        /// Starts a card for the heading a builder just asked for.
+        ///
+        /// An empty card is reused rather than left behind, and the first
+        /// heading of a page that only repeats the page's own name (every
+        /// builder starts with one, from when it was a panel of its own) is
+        /// dropped: the banner already says it.
+        /// </summary>
+        void StartCard(string title, ref int y)
+        {
+            string pageTitle = SettingsPages[Math.Max(0, Math.Min(SettingsPages.Length - 1, _settingsIndex))].Title;
+            if (_card != null && _card.Controls.Count == 0)
+            {
+                if (!string.Equals(title, pageTitle, StringComparison.OrdinalIgnoreCase)) Title(_card, title);
+                y = _card.ContentTop;
+                return;
+            }
+
+            EndCard(y);
+            _card = new NsSettingsCard { Location = new Point(_cardLeft - 4, _cardsBottom), Size = new Size(_cardWidth + 4, 600) };
+            Title(_card, string.Equals(title, pageTitle, StringComparison.OrdinalIgnoreCase) ? "" : title);
+            _settingsContent.Controls.Add(_card);
+            _drawerHost = _card;
+            y = _card.ContentTop;
+        }
+
+        void Title(NsSettingsCard card, string title)
+        {
+            SettingsPageInfo page = SettingsPages[Math.Max(0, Math.Min(SettingsPages.Length - 1, _settingsIndex))];
+            card.Title = title ?? "";
+            card.Accent = _cardAccent ?? page.From;
+            string icon;
+            card.Icon = _cardIcon.Length > 0 ? _cardIcon
+                      : CardIcons.TryGetValue(card.Title, out icon) ? icon : "";
+            _cardAccent = null;
+            _cardIcon = "";
+            card.Invalidate();
+        }
+
+        /// <summary>Closes the card being filled at the height its controls reached.</summary>
+        void EndCard(int y)
+        {
+            if (_card == null) return;
+            if (_card.Controls.Count == 0)
+            {
+                _settingsContent.Controls.Remove(_card);
+                _card.Dispose();
+            }
+            else
+            {
+                int bottom = 0;
+                foreach (Control c in _card.Controls) if (c.Visible) bottom = Math.Max(bottom, c.Bottom);
+                _card.Height = Math.Max(y, bottom) + 22;
+                _cardsBottom = _card.Bottom + 10;
+            }
+            _card = null;
+            _drawerHost = _settingsContent;
+        }
+
+        /// <summary>Icons for the cards the builders name, so a card can be found by eye.</summary>
+        static readonly Dictionary<string, string> CardIcons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Colour profile", NsIcon.Palette }, { "Compression", NsIcon.Layers }, { "Keyboard", NsIcon.Keyboard },
+            { "Files", NsIcon.Files }, { "Window", NsIcon.Panel }, { "Save & Reset", NsIcon.Reset },
+            { "Models", NsIcon.Model }, { "Watched folder", NsIcon.Folder },
+        };
+
+        /// <summary>Width of the list of pages, wide enough for a name and what it holds.</summary>
+        const int SettingsNavWidth = 284;
+
+        static readonly SettingsPageInfo[] SettingsPages =
+        {
+            new SettingsPageInfo("Output", "Format, names and folder", NsIcon.Output, "#3B82F6", "#6366F1"),
+            new SettingsPageInfo("Preview", "The quick look at the glass", NsIcon.Image, "#10B981", "#0EA5A4"),
+            new SettingsPageInfo("Shortcuts", "Keys for the things you do all day", NsIcon.Keyboard, "#8B5CF6", "#C026D3"),
+            new SettingsPageInfo("AI providers", "Keys, servers, connection checks", NsIcon.Key, "#F97316", "#E11D48"),
+            new SettingsPageInfo("AI models", "What the assistant can use", NsIcon.AssistantIcon, "#EC4899", "#7C3AED"),
+            new SettingsPageInfo("Watched folder", "Files handled as they arrive", NsIcon.Folder, "#06B6D4", "#2563EB"),
+            new SettingsPageInfo("Appearance", "Light or graphite, and the window", NsIcon.Palette, "#F59E0B", "#EF4444"),
+            new SettingsPageInfo("About", "Version, credits and licences", NsIcon.About, "#64748B", "#1E293B"),
+        };
+
+        /// <summary>The pages' names, in order (the self-test and the harnesses read these).</summary>
+        static readonly string[] SettingsSections = Array.ConvertAll(SettingsPages, p => p.Title);
+
+        SectionBuilder[] SettingsBuilders
+        {
+            get
+            {
+                return new SectionBuilder[] { BuildOutputGroup, BuildPreviewSettings, BuildShortcutSettings,
+                                              BuildAiProviders, BuildAiModels, BuildWatchGroup,
+                                              BuildAppearanceSettings, BuildAboutSettings };
+            }
+        }
+
+        /// <summary>Swaps the right-hand side to another page.</summary>
+        void ShowSettingsSection(int index) { ShowSettingsSection(index, false); }
+
+        /// <summary>
+        /// Swaps the right-hand side to another page, sliding the new one in
+        /// over the old when the operator chose it (not when a resize or a
+        /// theme change rebuilds the same page).
+        /// </summary>
+        void ShowSettingsSection(int index, bool animate)
+        {
+            _settingsIndex = Math.Max(0, Math.Min(SettingsSections.Length - 1, index));
+            Bitmap before = animate ? Picture(_settingsContent) : null;
+            FillSettings(animate);
+            if (_settingsNav != null) _settingsNav.Selected = _settingsIndex;
+            if (!animate || _settingsContent == null) { if (before != null) before.Dispose(); return; }
+
+            Bitmap after = Picture(_settingsContent);
+            if (after == null) { if (before != null) before.Dispose(); return; }
+            var cover = new NsPageTransition(before, after) { Bounds = _settingsContent.Bounds };
+            _settingsBody.Controls.Add(cover);
+            cover.BringToFront();
+        }
+
+        /// <summary>The visible part of a panel as a picture, for the transition.</summary>
+        static Bitmap Picture(Control c)
+        {
+            if (c == null || c.IsDisposed || c.Width < 2 || c.Height < 2 || !c.IsHandleCreated) return null;
+            try
+            {
+                var bmp = new Bitmap(c.Width, c.Height);
+                c.DrawToBitmap(bmp, new Rectangle(0, 0, c.Width, c.Height));
+                return bmp;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// Renders the settings page offscreen and reports whether it came out
+        /// whole, so a layout fault is caught by a test rather than by the
+        /// operator opening the page and finding it blank.
+        ///
+        /// It builds the real page on the real controls and then checks the
+        /// things that can go quietly wrong: that the list of pages was built,
+        /// that the chosen page's settings are actually in cards beside it,
+        /// that no control spills out of its card, and that every page can be
+        /// shown in turn and scrolled to its end.
+        ///
+        /// Returns "" when the page is sound, and the problem otherwise.
+        /// </summary>
+        internal string RenderSettingsPageForTest()
+        {
+            try
+            {
+                Size keep = _settingsBody.Size;
+                _settingsBody.Size = new Size(1360, 900);
+                FillSettings();
+
+                if (_settingsNav == null || _settingsContent == null) return "the page has no list or no content panel";
+
+                for (int i = 0; i < SettingsSections.Length; i++)
+                {
+                    ShowSettingsSection(i);
+                    if (_settingsNav.Selected != i) return "page " + i + " is not marked as chosen in the list";
+
+                    int cards = 0;
+                    foreach (Control made in _settingsContent.Controls)
+                    {
+                        NsSettingsCard card = made as NsSettingsCard;
+                        if (card == null) continue;
+                        cards++;
+                        foreach (Control inside in card.Controls)
+                        {
+                            if (!inside.Visible) continue;
+                            if (inside.Right > card.Width - 4 || inside.Bottom > card.Height - 6 || inside.Left < 0)
+                                return "on '" + SettingsSections[i] + "', a " + inside.GetType().Name +
+                                       " spills out of the card '" + card.Title + "'";
+                        }
+                    }
+                    if (cards == 0) return "page '" + SettingsSections[i] + "' built no settings at all";
+
+                    int needed = 0;
+                    foreach (Control made in _settingsContent.Controls) needed = Math.Max(needed, made.Bottom);
+                    if (needed + 24 > _settingsBody.Height && _settingsContent.AutoScrollMinSize.Height < needed)
+                        return "page '" + SettingsSections[i] + "' is " + needed + " px tall in a " +
+                               _settingsBody.Height + " px window but has no scroll range";
+                }
+
+                ShowSettingsSection(0);
+                _settingsBody.Size = keep;
+                return "";
+            }
+            catch (Exception ex) { return ex.GetType().Name + ": " + ex.Message; }
+        }
+
+        /// <summary>
+        /// Scrolls the settings section.
+        ///
+        /// It moves the content panel rather than the page, because the content
+        /// panel is the one that is taller than the window. The page is exactly
+        /// the window's height by then, so asking it to scroll does nothing --
+        /// which is why the wheel appeared to do nothing at all on this page.
+        /// </summary>
         void OnSettingsWheel(object sender, MouseEventArgs e)
         {
-            if (_settingsBody == null) return;
+            Panel target = _settingsContent ?? _settingsBody;
+            if (target == null) return;
 
-            int room = _settingsBody.DisplayRectangle.Height - _settingsBody.ClientSize.Height;
+            int room = target.DisplayRectangle.Height - target.ClientSize.Height;
             if (room <= 0) return;
 
-            int at = -_settingsBody.AutoScrollPosition.Y + (e.Delta > 0 ? -72 : 72);
-            _settingsBody.AutoScrollPosition = new Point(0, Math.Max(0, Math.Min(room, at)));
+            int at = -target.AutoScrollPosition.Y + (e.Delta > 0 ? -72 : 72);
+            target.AutoScrollPosition = new Point(0, Math.Max(0, Math.Min(room, at)));
         }
 
         int SettingsColumns
@@ -3836,15 +4900,57 @@ namespace NextScan.App
             {
                 const int settingsHeadHeight = 62;
                 _settingsHead.SetBounds(0, 0, ClientSize.Width, settingsHeadHeight);
-                foreach (Control control in _settingsHead.Controls)
+
+                // Laid out from the right in a fixed order, so the buttons sit
+                // side by side instead of on top of each other. Done is right
+                // most because it is what most people came for, and Reset
+                // sits next to it rather than being buried in About, which is
+                // where it used to be and where nobody found it.
+                int headX = ClientSize.Width - 28;
+                foreach (string wanted in new[] { "settingsDone", "settingsReset" })
                 {
-                    NsPill button = control as NsPill;
-                    if (button == null) continue;
-                    button.Location = new Point(Math.Max(28, ClientSize.Width - button.Width - 28),
-                                                (settingsHeadHeight - button.Height) / 2);
+                    Control found = null;
+                    foreach (Control c in _settingsHead.Controls) if (c.Name == wanted) { found = c; break; }
+                    if (found == null) continue;
+                    headX -= found.Width + 8;
+                    found.Location = new Point(Math.Max(28, headX), (settingsHeadHeight - found.Height) / 2);
                 }
-                _settingsBody.SetBounds(0, settingsHeadHeight, ClientSize.Width,
-                                        Math.Max(1, bodyHeight - settingsHeadHeight));
+
+                int settingsBodyHeight = Math.Max(1, bodyHeight - settingsHeadHeight);
+                _settingsBody.SetBounds(0, settingsHeadHeight, ClientSize.Width, settingsBodyHeight);
+
+                // The list keeps its width; the settings beside it take what is
+                // left, with a floor so that a narrow window narrows the
+                // content rather than sliding the list off the left edge.
+                if (_settingsNav != null)
+                    _settingsNav.SetBounds(0, 0, SettingsNavWidth, settingsBodyHeight);
+                if (_settingsContent != null)
+                {
+                    int contentWidth = Math.Max(240, ClientSize.Width - SettingsNavWidth);
+
+                    // Only the width is set here, and the height stays the
+                    // window's: this panel is the viewport, and the part of
+                    // the section that does not fit is described by
+                    // AutoScrollMinSize rather than by making the panel taller,
+                    // which would just push it off the bottom of the window.
+                    _settingsContent.SetBounds(SettingsNavWidth, 0, contentWidth, settingsBodyHeight);
+
+                    int needed = 0;
+                    foreach (Control made in _settingsContent.Controls)
+                        needed = Math.Max(needed, made.Bottom);
+                    _settingsContent.AutoScrollMinSize =
+                        new Size(1, Math.Max(settingsBodyHeight, needed + 28));
+
+                    // The controls inside were built against Dw, which reads
+                    // this panel's width, so changing the window width is done
+                    // by rebuilding the section rather than by restretching
+                    // controls that were laid out for a different one.
+                    if (_settingsBuiltWidth != contentWidth)
+                    {
+                        _settingsBuiltWidth = contentWidth;
+                        ShowSettingsSection(_settingsIndex);
+                    }
+                }
             }
 
             // ---- columns -----------------------------------------------------
@@ -4133,7 +5239,7 @@ namespace NextScan.App
                 _deviceBar.TransportText = "check power and cable";
                 _deviceBar.Connected = false;
                 _deviceBar.Invalidate();
-                SetStatus("No scanner found. Check it is switched on, then press Search again.");
+                SetStatus("No scanner found. Check it is switched on, then press Search again...");
             }
             else
             {

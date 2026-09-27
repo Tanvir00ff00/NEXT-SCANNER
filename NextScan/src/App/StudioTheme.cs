@@ -184,6 +184,38 @@ namespace NextScan.App
                 (int)Math.Round(a.B + (b.B - a.B) * t));
         }
 
+        /// <summary>
+        /// A named colour written as a hex string, so a section can carry its
+        /// own accent without the theme having to know about it.
+        ///
+        /// "#RRGGBB", "RRGGBB" and the leading "#" being absent all work, which
+        /// is the range of what a person will type. Anything else falls back to
+        /// the accent rather than throwing: this is called from OnPaint, and a
+        /// colour that could crash the paint of a settings page would be a
+        /// worse bug than a wrong shade.
+        /// </summary>
+        public static Color Parse(string hex)
+        {
+            if (!string.IsNullOrEmpty(hex))
+            {
+                string s = hex.Trim();
+                if (s.StartsWith("#", StringComparison.Ordinal)) s = s.Substring(1);
+                if (s.Length == 6)
+                {
+                    try
+                    {
+                        int r = Convert.ToInt32(s.Substring(0, 2), 16);
+                        int g = Convert.ToInt32(s.Substring(2, 2), 16);
+                        int b = Convert.ToInt32(s.Substring(4, 2), 16);
+                        return Color.FromArgb(255, r, g, b);
+                    }
+                    catch (FormatException) { }
+                    catch (OverflowException) { }
+                }
+            }
+            return Accent;
+        }
+
         /// <summary>Soft drop shadow under a rounded rect, drawn as fading outlines.</summary>
         public static void Shadow(Graphics g, Rectangle r, int radius, int depth, int alpha)
         {

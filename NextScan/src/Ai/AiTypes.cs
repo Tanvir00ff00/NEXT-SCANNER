@@ -148,6 +148,40 @@ namespace NextScan.Ai
         /// </summary>
         public bool Likely = true;
 
+        // ---- what the provider itself says about the model ------------------
+        //
+        // Only ever filled from the provider's own model list, never from a
+        // table of ours: a table is out of date the week a model ships, and a
+        // wrong number on the settings page is worse than no number. Unknown
+        // stays 0, null or empty, and the page shows nothing for it.
+
+        /// <summary>The provider's own one-line description, where it gives one.</summary>
+        public string Description = "";
+
+        /// <summary>How much it reads in one request, in tokens. 0 when not said.</summary>
+        public long ContextTokens;
+
+        /// <summary>The most it writes in one answer, in tokens. 0 when not said.</summary>
+        public long OutputTokens;
+
+        /// <summary>When the provider published it. MinValue when not said.</summary>
+        public DateTime Released = DateTime.MinValue;
+
+        /// <summary>Reads pictures. Null when the provider does not say.</summary>
+        public bool? Vision;
+
+        /// <summary>Reads PDF files directly. Null when the provider does not say.</summary>
+        public bool? Pdf;
+
+        /// <summary>Thinks before answering. Null when the provider does not say.</summary>
+        public bool? Thinking;
+
+        /// <summary>The effort levels it takes, lowest first ("low medium high max"), or "".</summary>
+        public string Efforts = "";
+
+        /// <summary>Who publishes it, where a server says (OpenAI and compatible servers).</summary>
+        public string Owner = "";
+
         public override string ToString() { return Name.Length > 0 ? Name : Id; }
     }
 
@@ -165,8 +199,25 @@ namespace NextScan.Ai
         /// the provider returned. It is not a menu: nothing here is ever
         /// offered, and a model that is not in the fetched list is not picked
         /// however high it sits here.
+        ///
+        /// May be empty, and one provider has to leave it empty: a
+        /// self-hosted server names its models whatever the operator loaded,
+        /// so there is no family of names to have an opinion about. Naming
+        /// one would either be ignored or, worse, be a guess about a machine
+        /// we know nothing about.
         /// </summary>
         public string[] Prefer = new string[0];
+
+        /// <summary>
+        /// True when having no preference is correct rather than an oversight.
+        ///
+        /// The regression test checks that every provider can name something
+        /// to fall back on, which is right for the three whose model lists
+        /// come from a vendor with a house naming scheme. This is the fourth
+        /// case, and the flag is how it says so out loud instead of the test
+        /// being quietly relaxed for everybody.
+        /// </summary>
+        public bool PrefersNothing = false;
 
         /// <summary>
         /// Fragments that make a model a poor default -- the small and cheap

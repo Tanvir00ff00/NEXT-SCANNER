@@ -70,7 +70,11 @@ namespace NextScan.Ai
                 foreach (string no in NotForChat)
                     if (id.IndexOf(no, StringComparison.OrdinalIgnoreCase) >= 0) { likely = false; break; }
 
-                found.Add(new AiModel { Id = id, Name = id, Likely = likely });
+                found.Add(new AiModel
+                {
+                    Id = id, Name = id, Likely = likely,
+                    Released = model.CreatedAt.UtcDateTime, Owner = model.OwnedBy ?? "",
+                });
             }
 
             found.Sort(delegate (AiModel a, AiModel b) { return string.CompareOrdinal(a.Id, b.Id); });
