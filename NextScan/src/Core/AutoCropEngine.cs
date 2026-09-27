@@ -73,6 +73,15 @@ namespace NextScan.Core
         /// is a different question and can have a different answer.
         /// </summary>
         public bool Thorough;
+
+        /// <summary>
+        /// Where a vision model says the items are, as fractions of the page
+        /// (0..1), or null. A hint is not a crop: it is where to ask the
+        /// segmentation model, and a region of its own only when nothing else
+        /// found the item -- and then the shadow pass still places every edge.
+        /// Detection is only ever run on a preview, so this is too.
+        /// </summary>
+        public List<RectangleF> Hints;
     }
 
     public class AutoCropResult

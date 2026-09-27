@@ -53,6 +53,15 @@ namespace NextScan.Core
         public readonly List<string> Lines = new List<string>();
         public int UnresolvedCandidates;
 
+        /// <summary>How many items the vision model saw, when it was asked.</summary>
+        public int HintCount;
+
+        /// <summary>Of those, how many only the vision model found, so they stand on its box alone.</summary>
+        public int HintOnly;
+
+        /// <summary>How many regions the vision model showed to be several items, and were split.</summary>
+        public int HintSplit;
+
         internal void Add(string message)
         {
             Lines.Add(message);
@@ -278,9 +287,22 @@ namespace NextScan.Core
                 // stop". Neither can do the other's job, and the order matters:
                 // repairing the set of regions first means the shadow pass
                 // measures the right things.
+                // Where a vision model said the items are: asked about first,
+                // ahead of the blind grid, which is what finds the pale card on
+                // pale glass that the grid walks past.
+                List<CropRegion> asked = found;
+                List<CropRegion> hinted = HintRegions(page, options.Hints);
+                if (hinted.Count > 0)
+                {
+                    report.HintCount = hinted.Count;
+                    report.Add("vision model hints: " + hinted.Count);
+                    asked = new List<CropRegion>(hinted);
+                    asked.AddRange(found);
+                }
+
                 if (options.UseModel)
                 {
-                    SamProposals.Result model = SamProposals.Propose(page, found, options.Thorough);
+                    SamProposals.Result model = SamProposals.Propose(page, asked, options.Thorough);
                     if (model.Boxes.Count > 0)
                     {
                         SamRepair.Apply(page, found, model, options, report);
@@ -293,6 +315,44 @@ namespace NextScan.Core
                     }
                     else report.Add("model: " + model.Note);
                 }
+
+                // Where the vision model sees several items inside what the
+                // engine took for one -- two white cards laid edge to edge, the
+                // failure no threshold can see -- the region becomes those items.
+                if (hinted.Count > 1) SplitByHints(found, hinted, report);
+
+                // An item the vision model saw and nothing else did stands on
+                // its box, marked for review; the shadow pass below still looks
+                // for its real edges.
+                foreach (CropRegion hint in hinted)
+                {
+                    if (CoveredByAny(hint, found)) continue;
+                    report.HintOnly++;
+                    report.Add("vision model only: " + hint.NormRect);
+                    found.Add(hint);
+                }
+                if (report.HintOnly > 0 && report.HintSplit == 0) PlatenFragments.Join(page, found, report);
+
+                // A region that stands on the vision model's box is only as
+                // good as that box: a millimetre or so, and square to the page
+                // whatever the item's tilt. The segmentation model, asked about
+                // exactly that box, draws the item's own outline -- one card,
+                // not its neighbour -- and that is the region's shape from here.
+                // Not for the pieces of a split: between two items laid edge to
+                // edge there is no seam in the pixels for either model to find,
+                // and there the vision model's own line was the better one --
+                // a third of a millimetre against nearly two for the outline.
+                if (options.UseModel)
+                    foreach (CropRegion region in found)
+                        if (hinted.Contains(region) && (region.Reason ?? "").IndexOf("split by the vision model", StringComparison.Ordinal) < 0)
+                            SharpenHint(page, region, report, channels, w, h, scale);
+
+                // Then every side of those regions onto the page's own edges,
+                // at full resolution: a box from either model is a millimetre
+                // or two from the edge, and the shadow pass below can only grow
+                // a region, never bring a too-large one in.
+                foreach (CropRegion region in found)
+                    if (hinted.Contains(region)) HintEdges.Snap(page, region, found, report);
 
                 PlatenShadowEdges.Refine(page, found, report);
                 Order(found);
@@ -314,6 +374,179 @@ namespace NextScan.Core
                 found.Clear();
             }
             return found;
+        }
+
+        /// <summary>
+        /// The vision model's boxes as regions: axis-aligned, low confidence,
+        /// clipped to the page, and without the tiny or bed-sized ones a model
+        /// sometimes returns.
+        /// </summary>
+        static List<CropRegion> HintRegions(RawImage page, List<RectangleF> hints)
+        {
+            var regions = new List<CropRegion>();
+            if (hints == null) return regions;
+            foreach (RectangleF raw in hints)
+            {
+                RectangleF n = RectangleF.Intersect(raw, new RectangleF(0, 0, 1, 1));
+                if (n.Width <= 0.01f || n.Height <= 0.01f) continue;
+                if (n.Width * n.Height > 0.9f) continue;
+
+                float left = n.Left * page.Width, top = n.Top * page.Height;
+                float right = n.Right * page.Width, bottom = n.Bottom * page.Height;
+                var box = new RotatedBox
+                {
+                    IsValid = true,
+                    Angle = 0, RawAngle = 0,
+                    Width = right - left, Height = bottom - top,
+                    Center = new PointF((left + right) / 2, (top + bottom) / 2),
+                    Corners = new[] { new PointF(left, top), new PointF(right, top), new PointF(right, bottom), new PointF(left, bottom) },
+                    AABB = Rectangle.FromLTRB((int)left, (int)top, (int)Math.Ceiling(right), (int)Math.Ceiling(bottom)),
+                    Score = 0.3f,
+                };
+                regions.Add(new CropRegion
+                {
+                    Box = box,
+                    NormRect = n,
+                    Confidence = CropConfidence.Low,
+                    Score = 0.3f,
+                    Reason = "vision model box",
+                    WidthInches = (right - left) / page.XDpi,
+                    HeightInches = (bottom - top) / page.YDpi,
+                });
+            }
+            return regions;
+        }
+
+        /// <summary>
+        /// Splits a region the vision model says holds several items.
+        ///
+        /// Only on positive evidence, and only when it is unambiguous: at least
+        /// two of the model's boxes lie almost wholly inside the one region,
+        /// they do not overlap each other, and together they account for most
+        /// of it. That is "these are two cards", not the model's silence, so
+        /// the engine's rule of never deleting an item on a model's word still
+        /// holds. The pieces start from the model's boxes and the shadow pass
+        /// then measures each edge as it would any other region.
+        /// </summary>
+        static void SplitByHints(List<CropRegion> found, List<CropRegion> hinted, PlatenDetectionReport report)
+        {
+            for (int index = found.Count - 1; index >= 0; index--)
+            {
+                CropRegion region = found[index];
+                double area = region.NormRect.Width * region.NormRect.Height;
+                if (area <= 0) continue;
+
+                var inside = new List<CropRegion>();
+                double covered = 0;
+                foreach (CropRegion hint in hinted)
+                {
+                    double own = hint.NormRect.Width * hint.NormRect.Height;
+                    RectangleF both = RectangleF.Intersect(hint.NormRect, region.NormRect);
+                    if (own <= 0 || both.Width <= 0 || both.Height <= 0) continue;
+                    if (both.Width * both.Height / own < 0.8) continue;
+                    inside.Add(hint);
+                    covered += own;
+                }
+                if (inside.Count < 2 || covered / area < 0.6) continue;
+
+                bool separate = true;
+                for (int a = 0; a < inside.Count && separate; a++)
+                    for (int b = a + 1; b < inside.Count; b++)
+                    {
+                        RectangleF both = RectangleF.Intersect(inside[a].NormRect, inside[b].NormRect);
+                        double shared = both.Width > 0 && both.Height > 0 ? both.Width * both.Height : 0;
+                        double smaller = Math.Min(inside[a].NormRect.Width * inside[a].NormRect.Height,
+                                                  inside[b].NormRect.Width * inside[b].NormRect.Height);
+                        if (smaller > 0 && shared / smaller > 0.15) { separate = false; break; }
+                    }
+                if (!separate) continue;
+
+                report.HintSplit++;
+                report.Add("vision model split " + region.NormRect + " into " + inside.Count + " items");
+                found.RemoveAt(index);
+                foreach (CropRegion piece in inside)
+                {
+                    piece.Confidence = CropConfidence.Good;
+                    piece.Score = 0.5f;
+                    piece.Reason = "split by the vision model: " + inside.Count + " items in one region";
+                    found.Add(piece);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Replaces a hint's box with the segmentation model's outline of the
+        /// item in it, when the two agree -- about the same size (the model did
+        /// not answer with a printed detail or with two cards) and centred in
+        /// the same place -- and the page's own edges agree with the outline at
+        /// least as well as with the hint. Neither source is trusted blind: on a
+        /// real 300 dpi card the outline was the better of the two by a
+        /// millimetre, on faint white-on-white it was the worse by one and a
+        /// half, and the pixels are what tell them apart.
+        /// </summary>
+        static void SharpenHint(RawImage page, CropRegion region, PlatenDetectionReport report,
+                                byte[][] channels, int w, int h, int scale)
+        {
+            RotatedBox box = SamProposals.ProbeBox(page, region.NormRect);
+            if (box == null || !box.IsValid) { report.Add("box answer: none for " + region.NormRect); return; }
+
+            double hintArea = region.NormRect.Width * page.Width * region.NormRect.Height * page.Height;
+            double ratio = hintArea > 0 ? box.Width * box.Height / hintArea : 0;
+            float cx = (region.NormRect.Left + region.NormRect.Width / 2) * page.Width;
+            float cy = (region.NormRect.Top + region.NormRect.Height / 2) * page.Height;
+            double drift = Math.Sqrt((box.Center.X - cx) * (box.Center.X - cx) + (box.Center.Y - cy) * (box.Center.Y - cy));
+            double allowed = 0.15 * Math.Min(region.NormRect.Width * page.Width, region.NormRect.Height * page.Height);
+            if (ratio < 0.75 || ratio > 1.1 || drift > allowed)
+            {
+                report.Add("box answer disagrees with the hint (area " + ratio.ToString("0.00") + ", drift " +
+                           drift.ToString("0") + " px); the hint's box stays: " + region.NormRect);
+                return;
+            }
+
+            var trial = new CropRegion
+            {
+                Confidence = region.Confidence, Score = region.Score, Reason = region.Reason,
+                NormRect = region.NormRect, WidthInches = region.WidthInches, HeightInches = region.HeightInches,
+            };
+            SamRepair.Adopt(page, trial, box);
+
+            double hintSupport = EdgeSupport(channels, w, h, scale, region);
+            double outlineSupport = EdgeSupport(channels, w, h, scale, trial);
+            if (outlineSupport + 0.02 < hintSupport)
+            {
+                report.Add("box answer kept out: the page's edges support the hint better (" +
+                           hintSupport.ToString("0.00") + " against " + outlineSupport.ToString("0.00") + ")");
+                return;
+            }
+
+            SamRepair.Adopt(page, region, box);
+            region.Reason += "; outline from the segmentation model's answer to its box";
+            report.Add("box answer adopted: " + region.WidthInches.ToString("0.00") + " x " +
+                       region.HeightInches.ToString("0.00") + " in, " + box.Angle.ToString("0.0") + " deg (edge support " +
+                       outlineSupport.ToString("0.00") + " against the hint's " + hintSupport.ToString("0.00") + ")");
+        }
+
+        /// <summary>How much of a region's outline lies on a real edge of the page, averaged over its sides.</summary>
+        static double EdgeSupport(byte[][] channels, int w, int h, int scale, CropRegion region)
+        {
+            try { return PlatenBoundaryProposals.BoundarySupport(channels, w, h, scale, region, 3, 96); }
+            catch { return 0; }
+        }
+
+        /// <summary>Whether most of a hint lies inside a region already found.</summary>
+        static bool CoveredByAny(CropRegion hint, List<CropRegion> found)
+        {
+            double own = hint.NormRect.Width * hint.NormRect.Height;
+            if (own <= 0) return true;
+            foreach (CropRegion r in found)
+            {
+                RectangleF both = RectangleF.Intersect(hint.NormRect, r.NormRect);
+                if (both.Width <= 0 || both.Height <= 0) continue;
+                double shared = both.Width * both.Height;
+                double theirs = r.NormRect.Width * r.NormRect.Height;
+                if (shared / own > 0.5 || (theirs > 0 && shared / theirs > 0.8)) return true;
+            }
+            return false;
         }
 
         sealed class EvidencePass

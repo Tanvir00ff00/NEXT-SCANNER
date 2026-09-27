@@ -424,6 +424,97 @@ namespace NextScan.Core
         /// The smallest rectangle, at any angle, holding a mask -- measured on
         /// the mask's outline and given back in the page's own pixels.
         /// </summary>
+        /// <summary>
+        /// Asks about one box -- where a vision model says an item is -- and
+        /// returns the item's own outline as a rotated box, or null.
+        ///
+        /// A box prompt rather than a point, because the question is "the
+        /// object in here", which is what separates two cards laid edge to edge:
+        /// a point on one of them is honestly answered with both. And the full
+        /// mask rather than the small one the proposals use: the small one is
+        /// 256 across, a millimetre a step on a scanned card, and this answer is
+        /// the edge itself, not a proposal for the shadow pass to correct. Only
+        /// the mask inside the box (grown a little) is kept, so a neighbour the
+        /// model leaks into is not drawn round too.
+        ///
+        /// Uses the reading of the page taken during this preview's detection;
+        /// without it, null.
+        /// </summary>
+        internal static RotatedBox ProbeBox(RawImage page, RectangleF norm)
+        {
+            float[] embedding; long[] shape; int width, height;
+            lock (CacheGate)
+            {
+                if (!ReferenceEquals(_seen, page) || _embedding == null) return null;
+                embedding = _embedding; shape = _embeddingShape;
+                width = _seenWidth; height = _seenHeight;
+            }
+
+            string encoderPath, decoderPath;
+            Locate(out encoderPath, out decoderPath);
+            if (!File.Exists(decoderPath) || !Ort.Available) return null;
+
+            float x0 = (float)(norm.Left * width), y0 = (float)(norm.Top * height);
+            float x1 = (float)(norm.Right * width), y1 = (float)(norm.Bottom * height);
+            if (x1 - x0 < 8 || y1 - y0 < 8) return null;
+
+            try
+            {
+                using (Ort.Session decoder = new Ort.Session(decoderPath, Environment.ProcessorCount))
+                {
+                    if (!decoder.Loaded) return null;
+
+                    const int Low = 256;
+                    long[][] outShapes;
+                    float[][] outputs = decoder.Run(
+                        new float[][] { embedding, new float[] { x0, y0, x1, y1 }, new float[] { 2, 3 },
+                                        new float[Low * Low], new float[] { 0 },
+                                        new float[] { height, width } },
+                        new long[][] { shape, new long[] { 1, 2, 2 }, new long[] { 1, 2 },
+                                       new long[] { 1, 1, Low, Low }, new long[] { 1 }, new long[] { 2 } },
+                        new int[] { 0, 1 }, out outShapes);
+                    if (outputs == null || outputs.Length < 2) return null;
+
+                    float[] masks = outputs[0], scores = outputs[1];
+                    int plane = width * height;
+                    int readings = Math.Min(scores.Length, masks.Length / plane);
+                    if (readings < 1) return null;
+
+                    // Inside the box, grown by a little, and nothing else.
+                    double growX = (x1 - x0) * 0.04 + 3, growY = (y1 - y0) * 0.04 + 3;
+                    int left = Math.Max(0, (int)(x0 - growX)), right = Math.Min(width - 1, (int)(x1 + growX));
+                    int top = Math.Max(0, (int)(y0 - growY)), bottom = Math.Min(height - 1, (int)(y1 + growY));
+                    double boxArea = (x1 - x0) * (y1 - y0);
+
+                    // The reading that fills the box best: not a detail printed
+                    // on the card, not the glass around it.
+                    int bestReading = -1; double bestFit = 0;
+                    for (int reading = 0; reading < readings; reading++)
+                    {
+                        int offset = reading * plane, inside = 0, outside = 0;
+                        for (int y = 0; y < height; y += 2)
+                            for (int x = 0; x < width; x += 2)
+                            {
+                                if (masks[offset + y * width + x] <= 0) continue;
+                                if (x >= left && x <= right && y >= top && y <= bottom) inside++; else outside++;
+                            }
+                        double filled = inside * 4.0 / boxArea;
+                        if (filled < 0.6 || filled > 1.2) continue;
+                        double fit = filled * scores[reading] - outside * 4.0 / boxArea;
+                        if (fit > bestFit) { bestFit = fit; bestReading = reading; }
+                    }
+                    if (bestReading < 0) return null;
+
+                    float[] mask = new float[plane];
+                    int from = bestReading * plane;
+                    for (int y = top; y <= bottom; y++)
+                        Array.Copy(masks, from + y * width + left, mask, y * width + left, right - left + 1);
+                    return BoxOf(mask, width, width, height, (double)page.Width / width);
+                }
+            }
+            catch { return null; }
+        }
+
         static RotatedBox BoxOf(float[] mask, int stride, int width, int height, double toPage)
         {
             // One piece only. A single prompt can come back as a mask covering

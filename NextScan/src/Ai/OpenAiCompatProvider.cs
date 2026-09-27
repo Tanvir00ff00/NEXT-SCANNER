@@ -16,6 +16,9 @@
 using System;
 using System.Collections.Generic;
 using System.ClientModel;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using OpenAI;
@@ -184,8 +187,97 @@ namespace NextScan.Ai
                     "You can still type the model names in Settings.", ex);
             }
 
+            await Describe(endpoint, found, cancel).ConfigureAwait(false);
             found.Sort(delegate (AiModel a, AiModel b) { return string.CompareOrdinal(a.Id, b.Id); });
             return found;
+        }
+
+        static readonly HttpClient Raw = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+
+        /// <summary>
+        /// What the server says about each model beyond its name.
+        ///
+        /// The SDK's model list keeps only the id, the owner and the date, and
+        /// throws the rest away -- but gateways send more, and it is exactly
+        /// what the operator chooses by: NaraRouter marks "vision": true and
+        /// gives "context_window"; OpenRouter gives "context_length",
+        /// "architecture.input_modalities" and the longest answer. So the same
+        /// list is read once more as plain JSON, and whatever is there is kept.
+        /// Nothing here is guessed: a field the server does not send stays
+        /// unknown, and any failure leaves the list as the SDK gave it.
+        /// </summary>
+        async Task Describe(string endpoint, List<AiModel> found, CancellationToken cancel)
+        {
+            try
+            {
+                using (var request = new HttpRequestMessage(HttpMethod.Get, endpoint + "/models"))
+                {
+                    string key = AiKeys.Get(Info.Id);
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", string.IsNullOrEmpty(key) ? NoKey : key);
+                    using (HttpResponseMessage response = await Raw.SendAsync(request, cancel).ConfigureAwait(false))
+                    {
+                        if (!response.IsSuccessStatusCode) return;
+                        string json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        using (JsonDocument doc = JsonDocument.Parse(json))
+                        {
+                            JsonElement list = doc.RootElement, inner;
+                            if (list.ValueKind == JsonValueKind.Object && list.TryGetProperty("data", out inner)) list = inner;
+                            if (list.ValueKind != JsonValueKind.Array) return;
+
+                            var byId = new Dictionary<string, AiModel>(StringComparer.Ordinal);
+                            foreach (AiModel m in found) byId[m.Id] = m;
+                            foreach (JsonElement e in list.EnumerateArray())
+                            {
+                                JsonElement v;
+                                if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty("id", out v) || v.ValueKind != JsonValueKind.String) continue;
+                                AiModel m;
+                                if (!byId.TryGetValue(v.GetString(), out m)) continue;
+
+                                if (e.TryGetProperty("name", out v) && v.ValueKind == JsonValueKind.String && v.GetString().Length > 0) m.Name = v.GetString();
+                                if (e.TryGetProperty("description", out v) && v.ValueKind == JsonValueKind.String) m.Description = FirstSentence(v.GetString());
+                                long n;
+                                if (Number(e, "context_window", out n) || Number(e, "context_length", out n) || Number(e, "max_context_length", out n)) m.ContextTokens = n;
+                                if (Number(e, "max_output_tokens", out n) || Number(e, "max_completion_tokens", out n)) m.OutputTokens = n;
+                                else if (e.TryGetProperty("top_provider", out v) && v.ValueKind == JsonValueKind.Object && Number(v, "max_completion_tokens", out n)) m.OutputTokens = n;
+                                if (e.TryGetProperty("vision", out v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False)) m.Vision = v.GetBoolean();
+                                if (e.TryGetProperty("reasoning", out v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.False)) m.Thinking = v.GetBoolean();
+                                if (e.TryGetProperty("architecture", out v) && v.ValueKind == JsonValueKind.Object)
+                                {
+                                    JsonElement modalities;
+                                    if (v.TryGetProperty("input_modalities", out modalities) && modalities.ValueKind == JsonValueKind.Array)
+                                    {
+                                        bool image = false;
+                                        foreach (JsonElement x in modalities.EnumerateArray())
+                                            if (x.ValueKind == JsonValueKind.String && x.GetString() == "image") image = true;
+                                        m.Vision = image;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { }
+        }
+
+        static bool Number(JsonElement e, string name, out long value)
+        {
+            value = 0;
+            JsonElement v;
+            if (!e.TryGetProperty(name, out v) || v.ValueKind != JsonValueKind.Number) return false;
+            double d;
+            if (!v.TryGetDouble(out d) || d <= 0) return false;
+            value = (long)d;
+            return true;
+        }
+
+        static string FirstSentence(string s)
+        {
+            s = (s ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            int dot = s.IndexOf(". ", StringComparison.Ordinal);
+            if (dot > 0 && dot < 200) s = s.Substring(0, dot + 1);
+            return s.Length > 200 ? s.Substring(0, 197) + "…" : s;
         }
 
         static ChatReasoningEffortLevel EffortFor(ThinkingLevel level)

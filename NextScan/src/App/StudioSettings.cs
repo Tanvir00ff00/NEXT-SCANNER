@@ -67,6 +67,15 @@ namespace NextScan.App
         /// <summary>Put each kind in its own folder, when the name pattern does not place {kind} itself.</summary>
         public bool JevFolders = true;
 
+        /// <summary>Ask a vision model where the items are on every preview (AiCrop). Each is a paid request.</summary>
+        public bool AiCropAlways = false;
+
+        /// <summary>The provider that looks for AI crop, or "" to choose automatically (Gemini first).</summary>
+        public string AiCropVia = "";
+
+        /// <summary>That provider's model, or "" for its fast one.</summary>
+        public string AiCropModel = "";
+
         /// <summary>Where Jev is reached: "" for TypeSafe's own API, or a server's provider id (AiServers).</summary>
         public string JevVia = "";
 
@@ -338,6 +347,9 @@ namespace NextScan.App
                         case "jevkinds": if (val.Length > 0) s.JevKinds = val; break;
                         case "jevfolders": s.JevFolders = IsOn(val); break;
                         case "jevvia": s.JevVia = val; break;
+                        case "aicropalways": s.AiCropAlways = IsOn(val); break;
+                        case "aicropvia": s.AiCropVia = val; break;
+                        case "aicropmodel": s.AiCropModel = val; break;
                         case "jevmodel": s.JevModel = val; break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
@@ -466,6 +478,9 @@ namespace NextScan.App
                 lines.Add("jevkinds=" + JevKinds);
                 lines.Add("jevfolders=" + (JevFolders ? "on" : "off"));
                 lines.Add("jevvia=" + JevVia);
+                lines.Add("aicropalways=" + (AiCropAlways ? "on" : "off"));
+                lines.Add("aicropvia=" + AiCropVia);
+                lines.Add("aicropmodel=" + AiCropModel);
                 lines.Add("jevmodel=" + JevModel);
                 lines.Add("autotone=" + AutoTone);
                 lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));

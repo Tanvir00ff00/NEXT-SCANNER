@@ -317,6 +317,19 @@ namespace NextScan.App
         bool _thoroughDetect;
 
         /// <summary>
+        /// Where a vision model said the items are on the current preview
+        /// (AiCrop), as fractions of it, or null. Belongs to that preview:
+        /// dropped when a new one arrives, kept when the same one is looked at
+        /// again.
+        /// </summary>
+        List<RectangleF> _aiHints;
+
+        /// <summary>What the vision model called each item, in the order of the hints.</summary>
+        List<string> _aiHintLabels;
+
+        bool _aiCropping;
+
+        /// <summary>
         /// Every item of the last scan, shown together as one picture.
         ///
         /// Built at display resolution and never exported: the pages it is made
@@ -1712,6 +1725,25 @@ namespace NextScan.App
             _findAgainPill.Click += delegate { RedetectFromPreview("asked to look again"); };
             _drawerHost.Controls.Add(_findAgainPill);
             y += 40;
+
+            // The vision model, when the engine alone missed something. A
+            // button first: each look is a paid request with the page on it.
+            _aiCropPill = new NsPill
+            {
+                Text = "Find items with AI",
+                Icon = NsIcon.AssistantIcon,
+                Kind = PillKind.Normal,
+                Radius = 7,
+                Location = new Point(Dx, y),
+                Size = new Size(Dw, 32)
+            };
+            _tips.SetToolTip(_aiCropPill, "A vision model looks at the preview and says where each item is; the engine then finds their exact edges.");
+            _aiCropPill.Click += delegate { FindItemsWithAi(); };
+            _drawerHost.Controls.Add(_aiCropPill);
+            y += 38;
+
+            NsToggle aiAlways = AddToggle("Use AI on every preview", _settings.AiCropAlways, ref y);
+            aiAlways.CheckedChanged += delegate { _settings.AiCropAlways = aiAlways.Checked; };
 
             // A standing notice about when cropping happens used to sit here. It
             // said the same thing as the line above the Preview button, which is
@@ -3870,6 +3902,8 @@ namespace NextScan.App
             _aiModelStats.ForeColor = Theme.TextFaint;
             y += 6;
 
+            BuildAiCropModelCard(ref y);
+
             AddSectionLabel("Models", ref y);
 
             // Search, what to show, and asking again, on one line.
@@ -3955,6 +3989,132 @@ namespace NextScan.App
 
             FillAiModelList(false);
             RefreshAiModels(false);
+        }
+
+        /// <summary>
+        /// Which model looks at previews for "Find items with AI": automatic
+        /// (Gemini first, since giving boxes is something it is trained to do),
+        /// or any provider that is set up -- Claude, OpenAI, Gemini or any of
+        /// the operator's servers -- with any of its models. Those the provider
+        /// says can see pictures come first and are marked; one that cannot see
+        /// will simply fail to find anything, and the status line says so.
+        /// </summary>
+        void BuildAiCropModelCard(ref int y)
+        {
+            _cardIcon = NsIcon.Detect;
+            _cardAccent = Theme.Parse("#0EA5E9");
+            AddSectionLabel("AI crop", ref y);
+
+            Label says = AddFieldLabel("The model that looks at the preview when you press \"Find items with AI\". It must be able to see pictures.", ref y);
+            says.ForeColor = Theme.TextDim;
+            says.Size = new Size(Dw, 17);
+            y += 6;
+
+            var providers = new List<Ai.IAiProvider>();
+            foreach (Ai.IAiProvider p in Ai.AiProviders.All()) if (p.Ready) providers.Add(p);
+            var names = new List<string> { "Automatic (Gemini first)" };
+            var ids = new List<string> { "" };
+            foreach (Ai.IAiProvider p in providers) { names.Add(p.Info.Name); ids.Add(p.Info.Id); }
+
+            const int gap = 8;
+            int half = (Dw - gap) / 2;
+            int chosen = Math.Max(0, ids.IndexOf(_settings.AiCropVia));
+            var where = new NsDropdown { Location = new Point(Dx, y), Size = new Size(half, 34) };
+            where.SetItems(names, chosen);
+            _drawerHost.Controls.Add(where);
+
+            var modelIds = new List<string>();
+            NsDropdown model = new NsDropdown { Location = new Point(Dx + half + gap, y), Size = new Size(Dw - half - gap, 34) };
+            var shown = new List<string>();
+            if (chosen == 0)
+            {
+                Ai.IAiProvider auto = AiCrop.Looker("", _aiPanel != null ? _aiPanel.ProviderId : "");
+                shown.Add(auto == null ? "no provider that can see is set up" : "its fast model, chosen for you (" + auto.Info.Name + ")");
+                modelIds.Add("");
+                model.Enabled = false;
+            }
+            else
+            {
+                Ai.IAiProvider provider = providers[chosen - 1];
+                IList<Ai.AiModel> listed = Ai.AiModels.Cached(provider);
+                shown.Add("its fast model, chosen for you");
+                modelIds.Add("");
+                if (listed == null)
+                {
+                    shown.Add("asking " + provider.Info.Name + " for its models…");
+                    modelIds.Add("");
+                    RefreshCropModels(provider);
+                }
+                else
+                {
+                    var ordered = new List<Ai.AiModel>(listed);
+                    ordered.Sort((a, b) =>
+                    {
+                        int va = a.Vision == true ? 0 : a.Vision == null ? 1 : 2, vb = b.Vision == true ? 0 : b.Vision == null ? 1 : 2;
+                        if (va != vb) return va.CompareTo(vb);
+                        if (a.Likely != b.Likely) return a.Likely ? -1 : 1;
+                        return string.Compare(a.ToString(), b.ToString(), StringComparison.OrdinalIgnoreCase);
+                    });
+                    foreach (Ai.AiModel m in ordered)
+                    {
+                        modelIds.Add(m.Id);
+                        shown.Add(m + (m.Vision == true ? "   (sees pictures)" : m.Vision == false ? "   (text only)" : ""));
+                    }
+                }
+                if (_settings.AiCropModel.Length > 0 && !modelIds.Contains(_settings.AiCropModel))
+                {
+                    modelIds.Add(_settings.AiCropModel);
+                    shown.Add(_settings.AiCropModel + "   (not listed)");
+                }
+            }
+            model.SetItems(shown, Math.Max(0, modelIds.IndexOf(_settings.AiCropModel)));
+            _drawerHost.Controls.Add(model);
+            y += 42;
+
+            where.SelectedIndexChanged += delegate
+            {
+                int i = Math.Max(0, Math.Min(ids.Count - 1, where.SelectedIndex));
+                _settings.AiCropVia = ids[i];
+                _settings.AiCropModel = "";
+                SetStatus(i == 0 ? "AI crop chooses its model automatically." : "AI crop now looks with " + names[i] + ".");
+                BeginInvoke((MethodInvoker)delegate { ShowSettingsSection(_settingsIndex); });
+            };
+            model.SelectedIndexChanged += delegate
+            {
+                int i = model.SelectedIndex;
+                if (i < 0 || i >= modelIds.Count) return;
+                _settings.AiCropModel = modelIds[i];
+                SetStatus(modelIds[i].Length == 0 ? "AI crop uses the provider's fast model." : "AI crop now looks with " + modelIds[i] + ".");
+            };
+
+            NsToggle always = AddToggle("Use AI on every preview", _settings.AiCropAlways, ref y);
+            always.CheckedChanged += delegate { _settings.AiCropAlways = always.Checked; };
+
+            Label how = AddFieldLabel(
+                "Gemini gives the most exact boxes, because finding objects is part of its training; other models find the " +
+                "items but may place them less exactly -- the engine then puts every edge on the item itself either way. " +
+                "Each look is one paid request with the preview in it.", ref y);
+            how.ForeColor = Theme.TextFaint;
+            how.Size = new Size(Dw, 34);
+            y += 22;
+        }
+
+        /// <summary>Fetches a provider's models for the AI crop list, and rebuilds the page when they come.</summary>
+        void RefreshCropModels(Ai.IAiProvider provider)
+        {
+            var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
+            System.Threading.Tasks.Task.Run(() => Ai.AiModels.Fetch(provider, false, cancel.Token)).ContinueWith(done =>
+            {
+                if (done.IsFaulted || done.IsCanceled || IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (_settingsOpen && SettingsPages[_settingsIndex].Title == "AI models") ShowSettingsSection(_settingsIndex);
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
         }
 
         /// <summary>The ids behind the rows of the "Starts on" list, in order.</summary>
@@ -6751,6 +6911,11 @@ namespace NextScan.App
             again.Click += delegate { DetectAgain(); };
             menu.Items.Add(again);
 
+            ToolStripMenuItem withAi = new ToolStripMenuItem("Find items with AI");
+            withAi.Enabled = _previewPage != null && !_aiCropping;
+            withAi.Click += delegate { FindItemsWithAi(); };
+            menu.Items.Add(withAi);
+
             menu.Show(_canvas, at);
         }
 
@@ -6862,6 +7027,73 @@ namespace NextScan.App
         /// and accepts less certainty, so it can find what the first pass walked
         /// past -- and it takes longer, which is the trade being made.
         /// </summary>
+        NsPill _aiCropPill;
+
+        /// <summary>
+        /// Asks a vision model where the items are on the preview, and runs the
+        /// detector again with its answer as hints (AiCrop). The engine's own
+        /// answer stays on screen until the model's arrives, and stays if the
+        /// model cannot be reached.
+        /// </summary>
+        async void FindItemsWithAi()
+        {
+            if (_previewPage == null) { SetStatus("Preview first: the AI looks at the preview."); return; }
+            if (!_settings.AutoCrop) { SetStatus("Turn on \"Find items on the glass\" first."); return; }
+            if (_aiCropping) return;
+
+            Ai.IAiProvider looker = AiCrop.Looker(_settings.AiCropVia, _aiPanel != null ? _aiPanel.ProviderId : "");
+            if (looker == null)
+            {
+                SetStatus("Set up Gemini, Claude or OpenAI in Settings > AI providers, so a model can look at the preview.");
+                return;
+            }
+
+            RawImage preview = _previewPage;
+            _aiCropping = true;
+            if (_aiCropPill != null) { _aiCropPill.Enabled = false; _aiCropPill.Text = "The AI is looking…"; }
+            try
+            {
+                var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(90));
+                string asked = _aiPanel != null && looker.Info.Id == _aiPanel.ProviderId ? _aiPanel.Model : "";
+                string model = await AiCrop.Model(looker, _settings.AiCropVia, _settings.AiCropModel, asked, cancel.Token);
+                PinStatus(looker.Info.Name + " (" + model + ") is looking at the preview…");
+
+                byte[] jpeg = StudioAiPanel.Encode(preview);
+                if (jpeg == null) { SetStatus("The preview could not be prepared for the AI."); return; }
+                List<AiCrop.Item> items = await System.Threading.Tasks.Task.Run(() => AiCrop.Find(looker, model, jpeg, cancel.Token));
+
+                // The operator may have previewed again meanwhile; this answer
+                // belongs to the old one.
+                if (!ReferenceEquals(preview, _previewPage)) return;
+
+                if (items.Count == 0)
+                {
+                    _aiHints = null;
+                    _aiHintLabels = null;
+                    PinStatus("The AI saw nothing on the glass. The engine's own answer stands.");
+                    return;
+                }
+
+                _aiHints = new List<RectangleF>();
+                _aiHintLabels = new List<string>();
+                foreach (AiCrop.Item item in items) { _aiHints.Add(item.Box); _aiHintLabels.Add(item.Label); }
+                Log("AI crop: " + looker.Info.Name + " " + model + " saw " + items.Count + ": " +
+                    string.Join(", ", _aiHintLabels.ToArray()));
+                PreviewAutoCrop(preview);
+            }
+            catch (Exception ex)
+            {
+                Log("AI crop failed: " + ex.Message);
+                PinStatus("The AI could not look at the preview: " + FirstLine(ex.GetBaseException().Message) +
+                          " The engine's own answer stands.");
+            }
+            finally
+            {
+                _aiCropping = false;
+                if (_aiCropPill != null && !_aiCropPill.IsDisposed) { _aiCropPill.Enabled = true; _aiCropPill.Text = "Find items with AI"; }
+            }
+        }
+
         void DetectAgain()
         {
             if (_previewPage == null) { SetStatus("There is no preview to look at."); return; }
@@ -7004,6 +7236,35 @@ namespace NextScan.App
             _canvas.DetectedRegions = outlines;
             _canvas.DetectedRegionConfidence = confidences;
             _canvas.Invalidate();
+
+            // An item lying against the edge of the glass loses whatever is
+            // under the frame: no crop can bring back what was never scanned,
+            // so the operator is told where the fix is -- move it in a little.
+            var atEdge = new List<int>();
+            for (int k = 0; k < items.Count; k++)
+            {
+                RectangleF n = items[k].NormRect;
+                if (n.Left < 0.002f || n.Top < 0.002f || n.Right > 0.998f || n.Bottom > 0.998f) atEdge.Add(k + 1);
+            }
+            if (atEdge.Count > 0)
+            {
+                string which = atEdge.Count == 1 ? "Item " + atEdge[0] + " touches" : "Items " + string.Join(", ", atEdge) + " touch";
+                PinStatus("Found " + items.Count + (items.Count == 1 ? " item" : " items") + ". " + which +
+                          " the edge of the glass, so part may be under the frame and not scanned -- move it in a few millimetres and preview again.");
+                return;
+            }
+
+            if (detectionReport.HintCount > 0)
+            {
+                string saw = "AI saw " + detectionReport.HintCount + (detectionReport.HintCount == 1 ? " item" : " items");
+                if (detectionReport.HintSplit > 0)
+                    saw += "; it separated " + detectionReport.HintSplit + (detectionReport.HintSplit == 1 ? " region" : " regions") + " into touching items";
+                if (detectionReport.HintOnly > 0)
+                    saw += "; " + detectionReport.HintOnly + " of them only the AI found -- check their edges";
+                PinStatus("Found " + items.Count + (items.Count == 1 ? " item" : " items") + " (" + saw + "). Scan will produce " +
+                          items.Count + (items.Count == 1 ? " page." : " separate pages."));
+                return;
+            }
 
             if (items.Count == 1)
             {
@@ -7168,6 +7429,7 @@ namespace NextScan.App
                 MultiRegion = _settings.MultiRegionCrop,
                 Deskew = _settings.AutoDeskew,
                 Thorough = _thoroughDetect,
+                Hints = _aiHints,
 
                 // Detection only ever runs on a preview -- a scan applies the
                 // plan the preview already made -- so this costs the preview a
@@ -7387,6 +7649,8 @@ namespace NextScan.App
             if (preview)
             {
                 _previewPage = pages[0];
+                _aiHints = null;
+                _aiHintLabels = null;
                 _canvas.SetImage(pages[0]);
                 _canvas.CaptureDpi = pages[0].XDpi;
 
@@ -7448,6 +7712,11 @@ namespace NextScan.App
                 // feature is invisible until after the scan - which reads as it
                 // not working at all.
                 PreviewAutoCrop(pages[0]);
+
+                // And, when the operator asked for it on every preview, what a
+                // vision model sees -- after the engine's own answer is already
+                // on screen, so nothing waits for the network.
+                if (_settings.AiCropAlways && _settings.AutoCrop) FindItemsWithAi();
             }
             else
             {

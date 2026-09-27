@@ -188,7 +188,7 @@ namespace NextScan.Core
         }
 
         /// <summary>Puts a model box onto a region, in the form the rest of the engine builds.</summary>
-        static void Adopt(RawImage page, CropRegion region, RotatedBox box)
+        internal static void Adopt(RawImage page, CropRegion region, RotatedBox box)
         {
             PointF[] corners = box.Corners;
             float left = corners[0].X, right = corners[0].X, top = corners[0].Y, bottom = corners[0].Y;

@@ -9,6 +9,80 @@ as verified below, assume it does not work yet.
 
 ---
 
+## AI crop: a vision model tells the engine where the items are — 2026-09-27
+
+Jev cannot help here (text only). A vision model can: shown the preview, it
+says how many items there are and roughly where. It is used for exactly that
+and nothing more (AiCrop, `AutoCropOptions.Hints`):
+
+- its boxes are asked about first by the segmentation model, ahead of the
+  blind grid of points;
+- where two or more of its boxes lie inside one engine region and fill it, the
+  region is split into those items (two white cards edge to edge -- the case
+  no threshold and no grid prompt separates);
+- an item only the model saw becomes a region marked for review;
+- every edge is then still placed by the shadow pass, to the millimetre.
+
+Nothing the engine found is removed on the model's silence. Gemini is asked
+first (boxes are something it is trained to give), in the `box_2d` 0-1000 form;
+the fast tier (Flash) is used. Only on "Find items with AI" (Capture panel, and
+the right-click menu on an item), or with "Use AI on every preview" on (off by
+default: each look is a paid request with the page on it).
+
+Measured on synthetic 100 dpi beds (never the real identity scans in
+tests/real, which are not to be uploaded), against the true corners:
+
+- ordinary bed (pale card, tilted photo, receipt, business card): the engine
+  alone already had all four within 0.1-0.7 mm; with the AI, identical.
+- hard bed (two white cards touching on white glass, a blank sheet, a small
+  white card): the engine alone returned the two cards as one region, 85 mm
+  out. Gemini's boxes were within 0.3-1.0 mm once told that items touch; with
+  them, both cards came out separately, corners within 0.6 and 0.4 mm.
+
+The auto-crop regression suite (nscroptest) passes unchanged.
+
+**Accuracy pass, same day, after the first real preview** (two NID cards and an
+open passport): the AI split the two cards the engine had merged, but the
+pieces were the model's boxes -- 3.40 in wide against a 3.37 in card, and
+square to the page -- because the shadow pass only ever grows an edge.
+Now:
+
+- an item only the model saw is re-drawn by the segmentation model asked
+  about that box (a box prompt, and the full-resolution mask, not the
+  256-pixel one), when its answer agrees with the box in size and place;
+- every side of a model-derived region is then slid up to 2.5 mm along its
+  normal at full resolution onto the sharpest brightness step (the outermost
+  strong one; the nearest to the seam on a side facing another item), and the
+  corners are rebuilt from the four lines (HintEdges);
+- pieces of a split keep the model's seam: between two cards edge to edge
+  there is no seam in the pixels, and there the model's line was a third of a
+  millimetre where the segmentation outline was nearly two.
+
+Results: the real preview's cards 3.375 in wide against 3.367 measured in the
+image (0.2 mm); their height is the visible extent, because both lay against
+the top of the glass and their first millimetre was under the frame, which the
+status line now says ("touches the edge of the glass -- move it in a few
+millimetres"). Synthetic touching cards: 0.7 mm (were 85 mm out, engine alone).
+Ordinary bed unchanged. nscroptest: 82 of 83; the other needs the TWAIN
+simulator and was run where it is not installed. The real preview was tested
+on this machine only, with the model's boxes taken from its report; nothing
+was uploaded again. The free Gemini key reached its daily limit (20 requests)
+during testing.
+
+**Choosing the AI crop model** (Settings → AI models → "AI crop"): Automatic
+(Gemini first, as before), or any provider that is set up -- a server included
+-- and any of its models, those the provider says can see pictures first and
+marked "(sees pictures)". Servers now say more about their models: the SDK
+keeps only id/owner/date, so the list is read once more as plain JSON for
+`vision`, `context_window`/`context_length`, `architecture.input_modalities`,
+`reasoning` and the longest answer (NaraRouter marks 41 of its 57 as seeing).
+Routing checked live: requests went to the chosen server and model, and each
+server's own refusal came back to the status line -- NaraRouter "insufficient
+credits" / "plan does not include the model", aihub "invalid API key" for
+chat -- so no server-side crop could be measured today.
+
+---
+
 ## Jev (TypeSafe) — 2026-09-27
 
 Jev is TypeSafe's "System One" model (released 15 Sep 2026, early access). It
