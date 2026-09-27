@@ -52,6 +52,8 @@ namespace NextScan.Ai
     {
         public static IReadOnlyList<IAiProvider> All()
         {
+            // Before any provider opens a connection (AiNet).
+            AiNet.ModernTls();
             var all = new List<IAiProvider>
             {
                 new ClaudeProvider(),

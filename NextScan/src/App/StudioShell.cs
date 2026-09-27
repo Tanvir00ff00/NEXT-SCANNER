@@ -540,6 +540,9 @@ namespace NextScan.App
         {
             _settings = settings ?? new StudioSettings();
 
+            // Where Jev is reached, before anything can ask it.
+            Ai.JevClient.Route(_settings.JevVia, _settings.JevModel);
+
             // Palette first: every control reads Theme in its constructor.
             Theme.Apply(_layout.LightTheme);
 
@@ -2280,7 +2283,7 @@ namespace NextScan.App
 
             Label tokens = new Label
             {
-                Text = @"{date} {time} {nnn} {device} {dpi} {mode} {doc}   \ makes subfolders",
+                Text = @"{date} {time} {nnn} {device} {dpi} {mode} {doc} {kind}   \ makes subfolders",
                 Location = new Point(Dx, y),
                 Size = new Size(Dw, 16),
                 ForeColor = Theme.TextFaint,
@@ -2959,6 +2962,7 @@ namespace NextScan.App
             foreach (Ai.IAiProvider provider in Ai.AiProviders.All())
                 BuildProviderCard(provider, ref y);
 
+            BuildJevCard(ref y);
             BuildAddServerCard(ref y);
 
             _cardIcon = NsIcon.Key;
@@ -3320,6 +3324,361 @@ namespace NextScan.App
             };
         }
 
+        // ---- Jev --------------------------------------------------------------
+
+        NsStatusPill _jevPill;
+        Label _jevDetail;
+
+        /// <summary>
+        /// Jev's card. Not a chat provider, so not in the Assist panel's list:
+        /// its key, a check that it works, and what it is used for here -- the
+        /// assistant's jev_ask tool, and sorting scans by kind when saving.
+        /// </summary>
+        void BuildJevCard(ref int y)
+        {
+            _cardAccent = Theme.Parse("#0D9488");
+            _cardIcon = NsIcon.Bolt;
+            AddSectionLabel("Jev by TypeSafe", ref y);
+            NsSettingsCard card = _card;
+
+            _jevPill = new NsStatusPill { Location = new Point(card.Width - 150, 17) };
+            card.Controls.Add(_jevPill);
+
+            Label blurb = AddFieldLabel(
+                "Not a chat model. Jev answers typed questions about text (yes or no, one of several, a score) with " +
+                "probabilities, in milliseconds and for very little. The assistant can ask it, and it can sort your " +
+                "scans by kind when you save.", ref y);
+            blurb.ForeColor = Theme.TextDim;
+            blurb.Size = new Size(Dw, 34);
+            y += 22;
+
+            BuildJevRoute(ref y);
+
+            AddFieldLabel(Ai.JevClient.Via.Length == 0 ? "TypeSafe API key" : "TypeSafe API key (not used while Jev runs through " + Ai.JevClient.Where + ")", ref y);
+            const int gap = 6;
+            int keyWidth = Math.Max(120, Dw - (34 + gap) * 2 - (84 + gap) * 2);
+            var key = new NsTextBox { Secret = true, Location = new Point(Dx, y), Size = new Size(keyWidth, 34),
+                                      Icon = NsIcon.Key, Cue = "Paste a TypeSafe key here" };
+            _themedFields.Add(key);
+            _drawerHost.Controls.Add(key);
+
+            int bx = Dx + keyWidth + gap;
+            var reveal = new NsGlyphButton { Icon = NsIcon.Eye, Location = new Point(bx, y + 1), Size = new Size(34, 32) };
+            _tips.SetToolTip(reveal, "Show what you typed");
+            reveal.Click += delegate { key.Secret = !key.Secret; reveal.Icon = key.Secret ? NsIcon.Eye : NsIcon.EyeOff; reveal.Invalidate(); };
+            _drawerHost.Controls.Add(reveal);
+            bx += 34 + gap;
+            var keep = new NsPill { Text = "Save", Kind = PillKind.Primary, Radius = 8, Location = new Point(bx, y + 1), Size = new Size(84, 32) };
+            _drawerHost.Controls.Add(keep);
+            bx += 84 + gap;
+            var test = new NsPill { Text = "Test", Kind = PillKind.Normal, Radius = 8, Location = new Point(bx, y + 1), Size = new Size(84, 32) };
+            _drawerHost.Controls.Add(test);
+            bx += 84 + gap;
+            var remove = new NsGlyphButton { Icon = NsIcon.Trash, Tint = Theme.Danger, Location = new Point(bx, y + 1), Size = new Size(34, 32) };
+            _tips.SetToolTip(remove, "Remove the saved key");
+            _drawerHost.Controls.Add(remove);
+            y += 42;
+
+            Label state = AddFieldLabel("", ref y);
+            state.Size = new Size(Math.Max(100, Dw - 150), 17);
+            var link = new Label
+            {
+                Text = "Get a key  ↗", AutoSize = false, TextAlign = ContentAlignment.MiddleRight,
+                Location = new Point(Dx + Dw - 140, state.Top - 1), Size = new Size(140, 19),
+                ForeColor = Theme.Parse("#0D9488"), BackColor = Color.Transparent, Font = Theme.UiSemi(8.5f), Cursor = Cursors.Hand,
+            };
+            _tips.SetToolTip(link, Ai.JevClient.KeyPage);
+            link.Click += delegate
+            {
+                try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Ai.JevClient.KeyPage) { UseShellExecute = true }); }
+                catch (Exception ex) { SetStatus("Could not open the browser: " + ex.Message); }
+            };
+            _drawerHost.Controls.Add(link);
+            _jevDetail = AddFieldLabel("", ref y);
+            _jevDetail.Size = new Size(Dw, 17);
+            y += 12;
+
+            Action showKey = delegate
+            {
+                string tail = Ai.AiKeys.Tail(Ai.JevClient.KeyId);
+                state.Text = tail.Length > 0 ? "Key saved   " + tail : "No key yet. Jev is in early access; keys come from TypeSafe's console.";
+                state.ForeColor = tail.Length > 0 ? Theme.Good : Theme.TextDim;
+                remove.Enabled = tail.Length > 0;
+                remove.Invalidate();
+            };
+            showKey();
+            ShowJevHealth();
+
+            keep.Click += delegate
+            {
+                string typed = key.Text.Trim();
+                if (typed.Length == 0) { SetStatus("Type or paste a key first. To take a key off this computer, use the bin."); return; }
+                try { Ai.AiKeys.Set(Ai.JevClient.KeyId, typed); }
+                catch (Exception ex) { SetStatus("Could not store the key: " + ex.Message); return; }
+                key.Text = "";
+                showKey();
+                SetStatus("Jev key saved. Checking that it works…");
+                CheckJev();
+            };
+            test.Click += delegate
+            {
+                if (!Ai.JevClient.Ready) { SetStatus(Ai.JevClient.Via.Length == 0 ? "Save a key first." : "The chosen server has no address."); return; }
+                CheckJev();
+            };
+            remove.Click += delegate
+            {
+                if (MessageBox.Show(this, "Remove the saved Jev key from this computer?", "Jev",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+                Ai.AiKeys.Forget(Ai.JevClient.KeyId);
+                _aiHealth.Remove(Ai.JevClient.KeyId);
+                showKey();
+                ShowJevHealth();
+                SetStatus("The Jev key has been removed.");
+            };
+
+            // ---- sorting scans by kind ----
+            AddFieldLabel("Sorting scans", ref y);
+            y += 2;
+            NsToggle sort = AddToggle("Sort documents by kind when saving the session", _settings.JevSort, ref y);
+            sort.CheckedChanged += delegate { _settings.JevSort = sort.Checked; };
+            NsToggle folders = AddToggle("A folder for each kind", _settings.JevFolders, ref y);
+            folders.CheckedChanged += delegate { _settings.JevFolders = folders.Checked; };
+
+            AddFieldLabel("Kinds, separated by commas (\"Other\" is always added)", ref y);
+            var kinds = new NsTextBox { Location = new Point(Dx, y), Size = new Size(Dw, 34), Text = _settings.JevKinds, Icon = NsIcon.Layers };
+            _themedFields.Add(kinds);
+            kinds.TextCommitted += delegate
+            {
+                _settings.JevKinds = string.Join(", ", JevSorter.Kinds(kinds.Text).ToArray());
+                kinds.Text = _settings.JevKinds;
+                SetStatus("Kinds: " + _settings.JevKinds);
+            };
+            _drawerHost.Controls.Add(kinds);
+            y += 42;
+
+            Ai.IAiProvider reader = JevSorter.Reader(_aiPanel != null ? _aiPanel.ProviderId : "");
+            Label how = AddFieldLabel(
+                (reader != null
+                    ? "Jev reads text, not pictures, so each document's first page is read by " + reader.Info.Name + " first, and that is a paid request per document. "
+                    : "Jev reads text, not pictures, so a model that can read a page (Claude, Gemini or OpenAI) has to be set up too. ") +
+                "Put {kind} in the name pattern on the Output page to place it yourself. The watched folder is not sorted.", ref y);
+            how.ForeColor = Theme.TextFaint;
+            how.Size = new Size(Dw, 34);
+            y += 20;
+
+            if (Ai.JevClient.Ready && !_aiHealth.ContainsKey(Ai.JevClient.KeyId)) CheckJev();
+        }
+
+        /// <summary>
+        /// Where Jev runs: TypeSafe's own API, or any of the operator's servers
+        /// with any of the models it lists. A gateway may offer Jev under its
+        /// own name ("jev" on NaraRouter); those that look like Jev are listed
+        /// first and a server offering one is pointed out, but every model is
+        /// there to choose, since this application cannot know every name a
+        /// gateway gives it. Test says whether the choice really answers.
+        /// </summary>
+        void BuildJevRoute(ref int y)
+        {
+            AddFieldLabel("Where Jev runs", ref y);
+
+            var servers = new List<Ai.IAiProvider>();
+            foreach (Ai.IAiProvider p in Ai.AiProviders.All())
+                if (p is Ai.OpenAiCompatProvider && p.Ready) servers.Add(p);
+
+            var names = new List<string> { "TypeSafe, the official API" };
+            var ids = new List<string> { "" };
+            foreach (Ai.IAiProvider p in servers) { names.Add(p.Info.Name); ids.Add(p.Info.Id); }
+
+            const int gap = 8;
+            int half = (Dw - gap) / 2;
+            int chosen = Math.Max(0, ids.IndexOf(Ai.JevClient.Via));
+            NsDropdown where = new NsDropdown { Location = new Point(Dx, y), Size = new Size(half, 34) };
+            where.SetItems(names, chosen);
+            _drawerHost.Controls.Add(where);
+
+            NsDropdown model = null;
+            List<string> modelIds = new List<string>();
+            if (chosen > 0)
+            {
+                Ai.IAiProvider server = servers[chosen - 1];
+                IList<Ai.AiModel> listed = Ai.AiModels.Cached(server);
+                model = new NsDropdown { Location = new Point(Dx + half + gap, y), Size = new Size(Dw - half - gap, 34) };
+                var shown = new List<string>();
+                if (listed == null)
+                {
+                    shown.Add("asking " + server.Info.Name + " for its models…");
+                    modelIds.Add(Ai.JevClient.Model);
+                    RefreshJevModels(server);
+                }
+                else
+                {
+                    var ordered = new List<Ai.AiModel>(listed);
+                    ordered.Sort((a, b) => JevLike(a) != JevLike(b) ? (JevLike(a) ? -1 : 1)
+                                                                    : string.Compare(a.Id, b.Id, StringComparison.OrdinalIgnoreCase));
+                    foreach (Ai.AiModel m in ordered)
+                    {
+                        modelIds.Add(m.Id);
+                        shown.Add(JevLike(m) ? m.Id + "   (Jev)" : m.Id);
+                    }
+                    if (!modelIds.Contains(Ai.JevClient.Model))
+                    {
+                        modelIds.Insert(0, Ai.JevClient.Model);
+                        shown.Insert(0, Ai.JevClient.Model + "   (not listed)");
+                    }
+                }
+                model.SetItems(shown, Math.Max(0, modelIds.IndexOf(Ai.JevClient.Model)));
+                _drawerHost.Controls.Add(model);
+                _tips.SetToolTip(model, "Every model " + server.Info.Name + " lists. Pick the one that is Jev.");
+            }
+            y += 42;
+
+            where.SelectedIndexChanged += delegate
+            {
+                int i = Math.Max(0, Math.Min(ids.Count - 1, where.SelectedIndex));
+                string via = ids[i];
+                string guess = "";
+                if (via.Length > 0)
+                {
+                    Ai.IAiProvider server = servers[i - 1];
+                    IList<Ai.AiModel> listed = Ai.AiModels.Cached(server);
+                    if (listed != null) foreach (Ai.AiModel m in listed) if (JevLike(m)) { guess = m.Id; break; }
+                }
+                UseJevRoute(via, guess);
+            };
+            if (model != null)
+                model.SelectedIndexChanged += delegate
+                {
+                    int i = model.SelectedIndex;
+                    if (i < 0 || i >= modelIds.Count || modelIds[i] == Ai.JevClient.Model) return;
+                    UseJevRoute(Ai.JevClient.Via, modelIds[i]);
+                };
+
+            // A server that offers Jev, pointed out while TypeSafe is chosen.
+            if (chosen == 0)
+            {
+                foreach (Ai.IAiProvider server in servers)
+                {
+                    IList<Ai.AiModel> listed = Ai.AiModels.Cached(server);
+                    if (listed == null) continue;
+                    Ai.AiModel jev = null;
+                    foreach (Ai.AiModel m in listed) if (JevLike(m)) { jev = m; break; }
+                    if (jev == null) continue;
+
+                    Ai.IAiProvider found = server;
+                    Ai.AiModel foundModel = jev;
+                    var use = new NsPill
+                    {
+                        Text = "Use Jev from " + server.Info.Name + " (" + jev.Id + ")", Kind = PillKind.Normal, Radius = 13,
+                        Location = new Point(Dx, y), Icon = NsIcon.Bolt,
+                    };
+                    use.Size = new Size(TextRenderer.MeasureText(use.Text, use.Font).Width + 50, 30);
+                    use.Click += delegate { UseJevRoute(found.Info.Id, foundModel.Id); };
+                    _drawerHost.Controls.Add(use);
+                    _jevHintShown = true;
+                    y += 38;
+                    break;
+                }
+            }
+            y += 4;
+        }
+
+        /// <summary>Whether the page already points out a server that offers Jev.</summary>
+        bool _jevHintShown;
+
+        /// <summary>A model that looks like Jev by its id, its name or who publishes it.</summary>
+        static bool JevLike(Ai.AiModel m)
+        {
+            foreach (string s in new[] { m.Id, m.Name, m.Owner })
+                if (!string.IsNullOrEmpty(s) &&
+                    (System.Text.RegularExpressions.Regex.IsMatch(s, @"(^|[^a-z])jev([^a-z]|$)", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ||
+                     s.IndexOf("typesafe", StringComparison.OrdinalIgnoreCase) >= 0))
+                    return true;
+            return false;
+        }
+
+        void UseJevRoute(string via, string model)
+        {
+            _settings.JevVia = via ?? "";
+            _settings.JevModel = model ?? "";
+            Ai.JevClient.Route(_settings.JevVia, _settings.JevModel);
+            _aiHealth.Remove(Ai.JevClient.KeyId);
+            SetStatus(via.Length == 0 ? "Jev now runs through TypeSafe's own API."
+                                      : "Jev now runs through " + Ai.JevClient.Where + " as " + Ai.JevClient.Model + ". Checking it answers…");
+            BeginInvoke((MethodInvoker)delegate
+            {
+                ShowSettingsSection(_settingsIndex);
+                if (Ai.JevClient.Ready) CheckJev();
+            });
+        }
+
+        /// <summary>Fetches a server's models for the Jev list, and rebuilds the page when they come.</summary>
+        void RefreshJevModels(Ai.IAiProvider server)
+        {
+            var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
+            System.Threading.Tasks.Task.Run(() => Ai.AiModels.Fetch(server, false, cancel.Token)).ContinueWith(done =>
+            {
+                if (done.IsFaulted || done.IsCanceled || IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (_settingsOpen && SettingsPages[_settingsIndex].Title == "AI providers") ShowSettingsSection(_settingsIndex);
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        void ShowJevHealth()
+        {
+            if (_jevPill == null || _jevPill.IsDisposed) return;
+            AiHealth h;
+            if (!_aiHealth.TryGetValue(Ai.JevClient.KeyId, out h))
+                h = Ai.JevClient.Ready
+                    ? new AiHealth { State = PillState.Warn, Pill = "Not checked", Detail = "Press Test to check that Jev answers through " + Ai.JevClient.Where + "." }
+                    : new AiHealth { State = PillState.Idle, Pill = "Not set up", Detail = "Add a TypeSafe key, or run Jev through one of your servers above." };
+            _jevPill.Set(h.State, h.Pill);
+            if (_jevPill.Parent != null) _jevPill.Left = _jevPill.Parent.Width - _jevPill.Width - 30;
+            _jevDetail.Text = h.Detail;
+            _jevDetail.ForeColor = h.Trouble ? Theme.Danger : Theme.TextFaint;
+        }
+
+        /// <summary>Lists Jev's models, which costs nothing and proves the key.</summary>
+        void CheckJev()
+        {
+            _aiHealth[Ai.JevClient.KeyId] = new AiHealth { State = PillState.Busy, Pill = "Checking…",
+                Detail = Ai.JevClient.Via.Length == 0 ? "Asking TypeSafe for its models…" : "Asking Jev a test question through " + Ai.JevClient.Where + "…" };
+            ShowJevHealth();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
+            System.Threading.Tasks.Task.Run(() => Ai.JevClient.Check(cancel.Token)).ContinueWith(done =>
+            {
+                long ms = clock.ElapsedMilliseconds;
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (done.IsFaulted || done.IsCanceled)
+                            _aiHealth[Ai.JevClient.KeyId] = new AiHealth
+                            {
+                                State = PillState.Bad, Pill = "Can't connect", Trouble = true,
+                                Detail = done.IsCanceled ? "No answer within 30 seconds." : FirstLine(done.Exception.GetBaseException().Message),
+                            };
+                        else
+                            _aiHealth[Ai.JevClient.KeyId] = new AiHealth
+                            {
+                                State = PillState.Good,
+                                Pill = "Connected · " + ms.ToString(CultureInfo.InvariantCulture) + " ms",
+                                Detail = done.Result,
+                            };
+                        ShowJevHealth();
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
         AiHealth HealthOf(Ai.IAiProvider provider)
         {
             AiHealth h;
@@ -3419,6 +3778,16 @@ namespace NextScan.App
                                     Detail = n + (n == 1 ? " model" : " models") + " available.",
                                 };
                                 SetStatus(which.Info.Name + ": " + n + " models");
+
+                                // A server that turns out to offer Jev is worth
+                                // pointing out on the Jev card, once.
+                                if (_settingsOpen && Ai.JevClient.Via.Length == 0 && !_jevHintShown &&
+                                    which is Ai.OpenAiCompatProvider && new List<Ai.AiModel>(done.Result).Exists(JevLike) &&
+                                    SettingsPages[_settingsIndex].Title == "AI providers")
+                                {
+                                    _jevHintShown = true;
+                                    BeginInvoke((MethodInvoker)delegate { ShowSettingsSection(_settingsIndex); });
+                                }
                             }
                             ShowHealth(which);
                             if (_settingsOpen && _aiModelList != null) FillAiModelList(true);
@@ -4535,6 +4904,7 @@ namespace NextScan.App
             _aiDefaultModel = null;
             _aiModelStats = null;
             _aiProviderViews.Clear();
+            _jevHintShown = false;
 
             Panel host = _drawerHost;
             int bodyHeight = Math.Max(100, _settingsBody.Height);
@@ -7166,13 +7536,33 @@ namespace NextScan.App
             List<RawImage> pages = _film.AllImages();
             if (pages.Count == 0) { SetStatus("There are no pages to save yet."); return; }
 
+            if (_sorting) { SetStatus("Still sorting the last save. It will finish in a moment."); return; }
+            if (JevSortWillRun()) { SaveSorted(pages); return; }
+            WriteSession(pages, null, "");
+        }
+
+        /// <summary>
+        /// Writes the session's pages. <paramref name="kindOf"/> gives each
+        /// document's kind when they were sorted, and <paramref name="sorted"/>
+        /// says so in the status line.
+        /// </summary>
+        void WriteSession(List<RawImage> pages, Func<int, string> kindOf, string sorted)
+        {
             try
             {
                 Directory.CreateDirectory(_settings.OutputDirectory);
 
+                ExportPlan plan = ExportPlanFromSettings();
+
+                // A folder per kind, unless the pattern already says where the
+                // kind goes.
+                if (kindOf != null && _settings.JevFolders &&
+                    (plan.Pattern ?? "").IndexOf("{kind}", StringComparison.OrdinalIgnoreCase) < 0)
+                    plan.Pattern = "{kind}\\" + plan.Pattern;
+
                 int documents;
                 List<string> written = BatchSplitter.WriteBatch(pages, BatchOptionsFromSettings(),
-                                                                ExportPlanFromSettings(), out documents);
+                                                                plan, kindOf, out documents);
 
                 if (written.Count == 0)
                 {
@@ -7198,9 +7588,93 @@ namespace NextScan.App
                 // the window closes - is it safe to throw away.
                 RetireJournal();
 
-                SetStatus("Saved " + what + how + "  in " + _settings.OutputDirectory);
+                SetStatus("Saved " + what + how + "  in " + _settings.OutputDirectory + sorted);
             }
             catch (Exception ex) { SetStatus("Save failed: " + ex.Message); }
+        }
+
+        // ---- sorting by kind (JevSorter) -----------------------------------
+
+        bool _sorting;
+
+        /// <summary>Sorting is on, Jev has a key, and there is a model that can read a page for it.</summary>
+        bool JevSortWillRun()
+        {
+            return _settings.JevSort && Ai.JevClient.Ready &&
+                   JevSorter.Reader(_aiPanel != null ? _aiPanel.ProviderId : "") != null;
+        }
+
+        /// <summary>
+        /// Saves the session with each document sorted by kind: its first page
+        /// read by the assistant's model, the kind decided by Jev. A document
+        /// that cannot be sorted is saved as "Unsorted" rather than not at all:
+        /// the save is what the operator asked for, the sorting only helps.
+        /// </summary>
+        async void SaveSorted(List<RawImage> pages)
+        {
+            _sorting = true;
+            var said = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var found = new Dictionary<int, string>();
+            string trouble = "";
+            try
+            {
+                List<BatchDocument> docs = BatchSplitter.Split(pages, BatchOptionsFromSettings());
+                if (docs.Count == 0) { WriteSession(pages, null, ""); return; }
+
+                List<string> kinds = JevSorter.Kinds(_settings.JevKinds);
+                Ai.IAiProvider reader = JevSorter.Reader(_aiPanel != null ? _aiPanel.ProviderId : "");
+                string asked = _aiPanel != null && reader.Info.Id == _aiPanel.ProviderId ? _aiPanel.Model : "";
+                var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(5));
+
+                SetStatus("Sorting: choosing the model that reads the pages…");
+                string model = await JevSorter.ReaderModel(reader, asked, cancel.Token);
+
+                int n = 0;
+                foreach (BatchDocument d in docs)
+                {
+                    n++;
+                    string of = docs.Count > 1 ? " " + n + " of " + docs.Count : "";
+                    try
+                    {
+                        SetStatus("Sorting document" + of + ": " + reader.Info.Name + " (" + model + ") is reading it…");
+                        byte[] jpeg = StudioAiPanel.Encode(d.Pages[0]);
+                        if (jpeg == null) throw new InvalidOperationException("the page could not be prepared");
+                        string text = await System.Threading.Tasks.Task.Run(() => JevSorter.Read(reader, model, jpeg, cancel.Token));
+
+                        SetStatus("Sorting document" + of + ": asking Jev what it is…");
+                        Ai.JevChoice kind = await System.Threading.Tasks.Task.Run(() => JevSorter.KindOf(text, kinds, cancel.Token));
+                        found[d.Index] = kind.Choice;
+                        Log("sorted document " + d.Index + " as " + kind.Choice + " (" +
+                            kind.Confidence.ToString("0.00", CultureInfo.InvariantCulture) + ", " + kind.Model + ")");
+                    }
+                    catch (Exception ex)
+                    {
+                        found[d.Index] = "Unsorted";
+                        trouble = FirstLine(ex.GetBaseException().Message);
+                        Log("could not sort document " + d.Index + ": " + ex.Message);
+                    }
+                    int count;
+                    said[found[d.Index]] = said.TryGetValue(found[d.Index], out count) ? count + 1 : 1;
+                }
+
+                var parts = new List<string>();
+                foreach (KeyValuePair<string, int> kv in said) parts.Add(kv.Value + " " + kv.Key);
+                string note = "   ·   sorted: " + string.Join(", ", parts.ToArray());
+                if (trouble.Length > 0) note += "  (some could not be sorted: " + trouble + ")";
+
+                WriteSession(pages, delegate (int index)
+                {
+                    string k;
+                    return found.TryGetValue(index, out k) ? k : "Unsorted";
+                }, note);
+            }
+            catch (Exception ex)
+            {
+                // Sorting failed as a whole; the pages are saved anyway.
+                Log("sorting failed: " + ex.Message);
+                WriteSession(pages, null, "   ·   not sorted: " + FirstLine(ex.GetBaseException().Message));
+            }
+            finally { _sorting = false; }
         }
 
         // =====================================================================

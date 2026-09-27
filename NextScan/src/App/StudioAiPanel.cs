@@ -253,6 +253,8 @@ namespace NextScan.App
             "that font, not English. Leave such text as it is unless asked, and when you add " +
             "Bengali write it in Unicode with a Unicode Bengali font such as Nirmala UI or " +
             "Kalpurush, unless the operator asks for Bijoy.\n" +
+            "- When the jev_ask tool is offered, use it for quick typed judgements over text -- sorting, " +
+            "checking or scoring many documents -- rather than reading each one yourself.\n" +
             "- When you are done, say in one or two sentences what you did, in the " +
             "operator's language.";
 
@@ -900,6 +902,7 @@ namespace NextScan.App
                 case "show_document": return "Bringing a document to the front";
                 case "close_document": return "Closing a document";
                 case "pdf_from_scanned_pages": return "Making a PDF of the scanned pages";
+                case "jev_ask": return "Asking Jev";
                 default: return call.Name;
             }
         }
@@ -1319,7 +1322,7 @@ namespace NextScan.App
         /// </summary>
         const int LongestEdge = 1568;
 
-        static byte[] Encode(RawImage page)
+        internal static byte[] Encode(RawImage page)
         {
             if (page == null || !page.IsValid) return null;
 

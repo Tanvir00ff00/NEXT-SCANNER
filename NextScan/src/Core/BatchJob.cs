@@ -277,6 +277,18 @@ namespace NextScan.Core
         public static List<string> WriteBatch(IList<RawImage> pages, BatchOptions batch,
                                               ExportPlan plan, out int documentCount)
         {
+            return WriteBatch(pages, batch, plan, null, out documentCount);
+        }
+
+        /// <summary>
+        /// Writes the batch, naming each document with the kind
+        /// <paramref name="kindOf"/> gives for its index ({kind} in the
+        /// pattern). The split is the same one <see cref="Split"/> makes, so a
+        /// caller that split first to decide the kinds gets the same indices.
+        /// </summary>
+        public static List<string> WriteBatch(IList<RawImage> pages, BatchOptions batch,
+                                              ExportPlan plan, Func<int, string> kindOf, out int documentCount)
+        {
             List<string> written = new List<string>();
             List<BatchDocument> docs = Split(pages, batch);
             documentCount = docs.Count;
@@ -293,7 +305,11 @@ namespace NextScan.Core
                     MultiPage = plan.MultiPage,
                     Context = plan.Context
                 };
-                if (p.Context != null) p.Context.Document = d.Index;
+                if (p.Context != null)
+                {
+                    p.Context.Document = d.Index;
+                    p.Context.Kind = kindOf != null ? (kindOf(d.Index) ?? "") : p.Context.Kind;
+                }
 
                 try { written.AddRange(PageWriter.Write(d.Pages, p)); }
                 catch (Exception ex) { PageWriter.Log("document " + d.Index + " failed: " + ex.Message); }

@@ -42,6 +42,8 @@
     <!-- DPAPI. On .NET Framework it lives in System.Security, which an
          SDK-style project does not reference unless told. -->
     <Reference Include="System.Security" />
+    <!-- Jev (JevClient) has no .NET SDK; it is plain HTTPS and JSON. -->
+    <Reference Include="System.Net.Http" />
   </ItemGroup>
 
   <ItemGroup>

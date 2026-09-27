@@ -38,6 +38,9 @@ namespace NextScan.Core
         public int Document = 1;        // document number within the batch
         public int Side;                // 0 = front, 1 = back
         public string BatchName = "";
+
+        /// <summary>What kind of document this is (a bill, a letter…), when something has said.</summary>
+        public string Kind = "";
     }
 
     public static class NameTemplate
@@ -56,7 +59,7 @@ namespace NextScan.Core
             "{date}", "{time}", "{yyyy}", "{yy}", "{MM}", "{dd}", "{HH}", "{mm}", "{ss}",
             "{n}", "{nnn}", "{nnnn}", "{nnnnnn}",
             "{p}", "{ppp}", "{doc}", "{side}",
-            "{device}", "{dpi}", "{mode}", "{source}", "{batch}", "{user}"
+            "{device}", "{dpi}", "{mode}", "{source}", "{batch}", "{user}", "{kind}"
         };
 
         /// <summary>
@@ -122,6 +125,10 @@ namespace NextScan.Core
                 case "source": return c.Source;
                 case "batch": return c.BatchName;
                 case "user": return Environment.UserName;
+
+                // Never empty: "{kind}\" at the front of a pattern is a folder,
+                // and an empty folder name would put the file at the root.
+                case "kind": return string.IsNullOrWhiteSpace(c.Kind) ? "Unsorted" : c.Kind.Trim();
 
                 // An unknown token stays visible rather than being silently
                 // dropped, so a typo shows up in the filename instead of quietly

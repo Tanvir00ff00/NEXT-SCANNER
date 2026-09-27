@@ -44,6 +44,33 @@ namespace NextScan.App
         // =====================================================================
         public List<AiTool> Tools()
         {
+            List<AiTool> tools = WorkspaceTools();
+
+            // Jev, when there is a key for it: typed judgements about text,
+            // fast and cheap, with probabilities (JevClient).
+            if (JevClient.Ready)
+                tools.Add(Tool("jev_ask",
+                    "Asks Jev (TypeSafe's System One model) typed questions about a text and returns typed answers " +
+                    "with probabilities and a confidence. Much faster and cheaper than thinking it through yourself, " +
+                    "and calibrated: use it to classify, check, route or score text -- for example which of these " +
+                    "documents are bills, whether a letter asks for payment, how urgent something is. Jev reads " +
+                    "text only. Give either text, or document to use an open document's content. Question types: " +
+                    "noul (yes/no; answer is noul, the probability of yes), choice (criteria maps each option to a " +
+                    "description; answer is choice, probabilities, confidence), score (criteria is a list of 2 to 10 " +
+                    "level descriptions, lowest first; answer is score, probabilities, confidence).",
+                    "{\"type\":\"object\",\"properties\":{" +
+                    "\"text\":{\"type\":\"string\",\"description\":\"The text to judge.\"}," +
+                    "\"document\":{\"type\":\"string\",\"description\":\"Instead of text: an open document's id, whose content is judged.\"}," +
+                    "\"questions\":{\"type\":\"string\",\"description\":\"The questions as a JSON object, exactly as Jev takes them, e.g. " +
+                    "{\\\"kind\\\": {\\\"type\\\": \\\"choice\\\", \\\"instructions\\\": \\\"What kind of document is this?\\\", " +
+                    "\\\"criteria\\\": {\\\"bill\\\": \\\"A bill or invoice\\\", \\\"letter\\\": \\\"A letter\\\"}}, " +
+                    "\\\"paid\\\": {\\\"type\\\": \\\"noul\\\", \\\"instructions\\\": \\\"Is it marked as paid?\\\"}}\"}}," +
+                    "\"required\":[\"questions\"]}"));
+            return tools;
+        }
+
+        List<AiTool> WorkspaceTools()
+        {
             const string doc = "\"document\":{\"type\":\"string\",\"description\":\"The document's id from list_documents, e.g. doc1. Leave out for the one in front.\"}";
             return new List<AiTool>
             {
@@ -123,6 +150,7 @@ namespace NextScan.App
                     case "show_document": Show(Pick(args), result); break;
                     case "close_document": Close(Pick(args), Bool(args, "discard_changes"), result); break;
                     case "pdf_from_scanned_pages": await FromScans(result); break;
+                    case "jev_ask": await JevAsk(args, result); break;
                     default: throw new ToolTrouble("There is no tool called " + call.Name + ".");
                 }
             }
@@ -322,6 +350,41 @@ namespace NextScan.App
             await Ready(tab);
             result.Content = Json(new Dictionary<string, object> { { "id", tab.Id }, { "file", path } });
             result.Display = "Made a PDF of the scanned pages";
+        }
+
+        async Task JevAsk(Dictionary<string, object> args, AiToolResult result)
+        {
+            if (!JevClient.Ready) throw new ToolTrouble("Jev has no key on this computer.");
+
+            string questions = Str(args, "questions");
+            object parsed;
+            try { parsed = new JavaScriptSerializer().DeserializeObject(questions); }
+            catch { throw new ToolTrouble("questions is not valid JSON."); }
+            var map = parsed as Dictionary<string, object>;
+            if (map == null || map.Count == 0) throw new ToolTrouble("questions must be a JSON object of named questions.");
+
+            // What is judged: the text given, or a document's content as this
+            // application reads it (Jev takes JSON as well as plain text).
+            string state;
+            string text = Str(args, "text");
+            string what;
+            if (text.Length > 0) { state = Json(text); what = "the text"; }
+            else
+            {
+                DocTab tab = Pick(args);
+                var inner = new AiToolResult();
+                await Read(tab, new Dictionary<string, object>(), inner);
+                string content = inner.Content ?? "";
+                state = content.TrimStart().StartsWith("{", StringComparison.Ordinal) ? content : Json(content);
+                what = tab.Title;
+            }
+            if (state.Length > 200000) throw new ToolTrouble("That is too much text for one question; pass a part of it as text.");
+
+            result.Display = "Asking Jev about " + what;
+            var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(60));
+            string answer = await Task.Run(() => JevClient.Ask(state, questions, cancel.Token));
+            result.Content = answer;
+            result.Display = "Jev answered " + map.Count + (map.Count == 1 ? " question" : " questions") + " about " + what;
         }
 
         // ---- helpers -------------------------------------------------------

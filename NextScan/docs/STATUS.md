@@ -9,6 +9,52 @@ as verified below, assume it does not work yet.
 
 ---
 
+## Jev (TypeSafe) — 2026-09-27
+
+Jev is TypeSafe's "System One" model (released 15 Sep 2026, early access). It
+is not a chat model: it takes text and typed questions -- yes/no ("noul"), one
+of several ("choice"), a score -- and answers with probabilities and a
+confidence. Text only. So it is not in the Assist panel's model list; it is
+used two ways, both built from TypeSafe's documented HTTP API
+(`POST api.typesafe.ai/v1/systemone`, `GET /v1/models`; there is no .NET SDK):
+
+- **The assistant's `jev_ask` tool**, offered when a Jev key is saved: the
+  model writes Jev's questions and gets its answers back, over given text or an
+  open document's content.
+- **Sorting scans by kind when saving** (off by default; AI providers → Jev).
+  Each document's first page is read by a fast model of the assistant's
+  provider (the newest Flash / Haiku / mini, not a Pro model), then Jev picks
+  one of the operator's kinds; below 0.5 confidence it is "Other". A folder per
+  kind, or `{kind}` anywhere in the name pattern. A document that cannot be
+  sorted is saved as "Unsorted", never not saved. Reading retries twice on
+  "high demand" / rate limits. The watched folder is not sorted.
+
+The Jev card holds the key (Save / Test / eye / remove / Get a key); Test lists
+the models, which costs nothing.
+
+**Jev through the operator's own servers.** "Where Jev runs" chooses TypeSafe's
+API or any added server, and then any of the models that server lists (the
+ones that look like Jev first, marked). A server offering Jev is pointed out
+("Use Jev from NaraRouter (jev)"). Found by probing: NaraRouter passes Jev's own
+`/systemone` call on at its address with model `jev`, and refuses Jev as a chat
+model, so it is that call that is routed, with the server's key. Checked for
+real through NaraRouter: Test answered, and Jev sorted a bill (Bill, 0.82), a
+letter (Letter, 1.00) and a prescription (Prescription, 1.00).
+
+**TLS.** One of the operator's servers (bluesminds) could not be reached at all:
+"Could not create SSL/TLS secure channel", because .NET Framework's defaults
+did not offer the TLS it requires. TLS 1.2 is now always allowed, and 1.3 on
+Windows builds that have it (AiNet); the server then listed its 19 models.
+
+Checked off-screen against a fake Jev server shaped like the documented API
+(`NEXTSCAN_JEV_BASE` points the client at it; no Jev key was available), with
+the real Gemini key reading two synthetic pages: the bill was read correctly,
+Jev was asked in the documented shape, and the file went to `Bill\`; the second
+page hit the free Gemini key's per-minute quota and was saved to `Unsorted\`
+with the reason in the status line. **Not yet run against the real Jev API.**
+
+---
+
 ## Any number of OpenAI-compatible servers — 2026-09-27
 
 The one "OpenAI-compatible" provider is now a list the operator adds to

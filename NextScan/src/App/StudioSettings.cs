@@ -58,6 +58,21 @@ namespace NextScan.App
         /// </summary>
         public string AiAllowedModels = "";
 
+        /// <summary>Ask Jev what kind each document is when the session is saved (JevSorter).</summary>
+        public bool JevSort = false;
+
+        /// <summary>The kinds Jev chooses between, separated by commas.</summary>
+        public string JevKinds = "Bill, Prescription, Receipt, Letter, ID card, Certificate, Form, Other";
+
+        /// <summary>Put each kind in its own folder, when the name pattern does not place {kind} itself.</summary>
+        public bool JevFolders = true;
+
+        /// <summary>Where Jev is reached: "" for TypeSafe's own API, or a server's provider id (AiServers).</summary>
+        public string JevVia = "";
+
+        /// <summary>The name that server gives Jev, e.g. "jev".</summary>
+        public string JevModel = "";
+
         public int Dpi = 300;
         public ColorMode Mode = ColorMode.Color24;
 
@@ -319,6 +334,11 @@ namespace NextScan.App
                         case "aimodel": s.AiModel = val; break;
                         case "aithinking": if (val.Length > 0) s.AiThinking = val; break;
                         case "aimodels": s.AiAllowedModels = val; break;
+                        case "jevsort": s.JevSort = IsOn(val); break;
+                        case "jevkinds": if (val.Length > 0) s.JevKinds = val; break;
+                        case "jevfolders": s.JevFolders = IsOn(val); break;
+                        case "jevvia": s.JevVia = val; break;
+                        case "jevmodel": s.JevModel = val; break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
                                 && !val.Equals("false", StringComparison.OrdinalIgnoreCase);
@@ -442,6 +462,11 @@ namespace NextScan.App
                 lines.Add("aimodel=" + AiModel);
                 lines.Add("aithinking=" + AiThinking);
                 lines.Add("aimodels=" + AiAllowedModels);
+                lines.Add("jevsort=" + (JevSort ? "on" : "off"));
+                lines.Add("jevkinds=" + JevKinds);
+                lines.Add("jevfolders=" + (JevFolders ? "on" : "off"));
+                lines.Add("jevvia=" + JevVia);
+                lines.Add("jevmodel=" + JevModel);
                 lines.Add("autotone=" + AutoTone);
                 lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));
                 lines.Add("vibrance=" + Vibrance.ToString(CultureInfo.InvariantCulture));
