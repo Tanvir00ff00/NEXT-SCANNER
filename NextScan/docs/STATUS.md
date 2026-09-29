@@ -9,6 +9,78 @@ as verified below, assume it does not work yet.
 
 ---
 
+## Seeing documents, and all of Word within reach — 2026-09-30
+
+The assistant could only read text: it could not tell a page that is right from
+one that is a mess, and it did not know Word's API well enough to reach most of
+what Word does. Now:
+
+**Documents are seen, not only read** (`StudioSight.cs`).
+- Anything attached that has pages arrives with its pages as pictures as well
+  as its text (`AttachReader`): Word/RTF/ODT (first 4 pages, drawn by the
+  document engine, so the page breaks fall where they print), PDF (a scan: 8
+  pages; one with text: 4), Excel (up to 3 pictures of 45 rows each, drawn from
+  the workbook's own XML: column widths, row heights, fills, borders, merged
+  cells, fonts, number formats, the column letters and row numbers), PowerPoint
+  (first 6 slides: shapes, text, pictures, tables, the layout's and master's
+  decoration). The text says exact words and numbers, the pictures say how it
+  looks; the instruction tells the model to reproduce both.
+- Excel and PowerPoint are drawn by `Sight`, not the converter: the converter
+  process dies (access violation inside its script engine, every time, on every
+  workbook and presentation, including the app's own "export to PDF" of one —
+  a bug that was there before, still open) whenever it is asked to draw a
+  spreadsheet or a slide. `Sight` says what it leaves out (charts and pictures
+  in a workbook, charts in slides show as grey boxes).
+- What the assistant makes is seen: `write_document`, `format_document` and
+  `edit_document` return the pages as they now look (two pictures, with the
+  page size in mm and how many pixels make a millimetre, so it can measure).
+  `look_at_document` now works for Word, PDF, Excel and PowerPoint, with `grid`
+  (a millimetre grid over the page) and `region` [x, y, w, h] mm (a close-up
+  drawn larger). `look:false` skips the picture for the early writes of a
+  series.
+
+**Every Word setting is within reach.**
+- `write_document` grew: page columns / header / footer / first-page and
+  odd-even headers / page numbers / watermark / start number, list, shape (any
+  outline), chart (column, bar, line, pie, doughnut, area, scatter, stacked),
+  equation (LaTeX or linear), contents page, section break (page setup and
+  columns for what follows), column break, styles, numbered headings, runs with
+  page-number fields, hyperlinks and footnotes. All tried in the running editor.
+- `format_document` (new): change what is there in place — a font, size,
+  colour, alignment, spacing, style — for everything, a range of blocks, one
+  style, the tables, or just some words; and replace text everywhere.
+- `word_api` (new): the recipes for every subject (tried), and the method
+  names of every class taken from the editor itself, searchable — so the model
+  does not guess names. `edit_document` still runs any script.
+- Things found by trying that the recipes now say: `paragraph.AddHyperlink`
+  replaces the paragraph's text (use `Api.CreateHyperlink` + `AddElement`);
+  equations are read in the linear form and LaTeX is converted by the kit;
+  a footnote goes where the cursor is (select, forward one, back one); a
+  section break settles what came BEFORE it; orientation alone turns the page
+  the section already has; a shape's own text is white unless told otherwise.
+
+**Judgement, not a routine.** The instruction now tells the model to look at
+what it made the way a person proofreads, compare with the scan or the attached
+file, notice its own mistakes, understand a failure before repeating it, and to
+stop when it is right; the step limit went from 40 to 70.
+
+Verified with the real panel and real models (NaraRouter, off-screen): a workbook
+attached and "recreate it in Word, same to same". Agnes 2.5 Flash built a table
+wider than the page in one go and called it done (it had the picture and
+missed the overflow), so the builder now says so itself: a table or picture
+wider than the text area, or a floating shape past the page edge, comes back
+as a `warnings` list in the result. Agnes 3 Flash read the attached picture, built the
+table (merged title bar, fills, borders, wrapped note, number formats), looked
+at it, noticed the numbers should be right-aligned as in the sheet and fixed
+that, in 144 s. Space Bunny Alpha answered nothing at all that day (not ours:
+it fails the same on a plain "say hello"). Not verified: Claude/GPT-class
+models (their credit); a chat-harness quirk means the editor cannot be opened
+from inside a tool call under Application.DoEvents (fine in the real app).
+
+Measured: sheet, slide and Word pages drawn in 30-700 ms; the number formats
+(decimals, thousands, per cent, dates, currency signs, leading zeros) checked
+against the codes a shop's sheets use.
+
 ## Attachments in the chat — 2026-09-30
 
 Anything can be attached to a message, as many as fit (12): by the paperclip

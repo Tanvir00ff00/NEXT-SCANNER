@@ -143,6 +143,9 @@ namespace NextScan.App
         /// <summary>Pages of a scanned PDF shown to the model.</summary>
         public const int PdfPages = 8;
 
+        /// <summary>Pages of a document shown as pictures beside its text: the look of it, without a page of tokens for every page.</summary>
+        public const int SeenPages = 4, SeenSheets = 3, SeenSlides = 6;
+
         /// <summary>The longest edge of a picture sent: what every provider shrinks anything larger to.</summary>
         public const int LongestEdge = 1568;
 
@@ -351,10 +354,43 @@ namespace NextScan.App
                 string fonts;
                 a.Text = Cut(a, ReadDocx(a.Path, out fonts));
                 a.Fonts = fonts;
+                LookAtPages(a);
                 return;
             }
             // .doc, .rtf, .odt: the document engine's converter reads them.
             a.Text = Cut(a, ConvertToText(a.Path, 0x45));
+            LookAtPages(a);
+        }
+
+        /// <summary>
+        /// The first pages, drawn by the document engine, as pictures: the text says what
+        /// a document contains, the pictures say what it looks like, and to rebuild it
+        /// the model needs both. Failing to draw them is not failing to read the file.
+        /// </summary>
+        static void LookAtPages(ChatAttachment a)
+        {
+            if (!NextScan.Docs.DocsEngine.IsInstalled || a.Size > 15L * 1024 * 1024) return;
+            try
+            {
+                int total;
+                List<PageShot> shots = Sight.EnginePages(a.Path, 1100, SeenPages, out total);
+                if (total > 0) a.Pages = total;
+                AddShots(a, shots);
+                if (shots.Count > 0)
+                    a.Note = Join(a.Note, shots.Count == total ? "Its pages are also shown as pictures." : "Its first " + shots.Count + " of " + total + " pages are also shown as pictures.");
+            }
+            catch (Exception ex) { a.Note = Join(a.Note, "Its pages could not be drawn (" + Plain(ex) + ")."); }
+        }
+
+        static string Join(string a, string b) { return string.IsNullOrEmpty(a) ? b : a + " " + b; }
+
+        /// <summary>Adds drawn pages to what the model is given, named for the file and the page.</summary>
+        static void AddShots(ChatAttachment a, List<PageShot> shots)
+        {
+            foreach (PageShot shot in shots)
+            {
+                using (shot) { if (shot.Image != null) AddPicture(a, shot.Image, a.Name + " â€” " + shot.Caption); }
+            }
         }
 
         /// <summary>The text of a .docx, in order: paragraphs, headings and list items marked, table cells with " | " between them.</summary>
@@ -445,6 +481,14 @@ namespace NextScan.App
             {
                 if (In(SheetOld, ext)) { temp = ConvertFile(path, 0x101, ".xlsx"); path = temp; }
                 a.Text = Cut(a, ReadXlsx(path, a));
+                try
+                {
+                    int sheets; string notes;
+                    List<PageShot> shots = Sight.Sheets(path, SeenSheets, 45, out sheets, out notes);
+                    AddShots(a, shots);
+                    if (shots.Count > 0) a.Note = Join(a.Note, "The sheets are also drawn as pictures (colours, borders, widths, merged cells). " + notes);
+                }
+                catch (Exception ex) { a.Note = Join(a.Note, "The sheets could not be drawn (" + Plain(ex) + ")."); }
             }
             finally { DeleteQuietly(temp); }
         }
@@ -587,6 +631,14 @@ namespace NextScan.App
             {
                 if (In(SlideOld, ext)) { temp = ConvertFile(path, 0x81, ".pptx"); path = temp; }
                 a.Text = Cut(a, ReadPptx(path, a));
+                try
+                {
+                    int count; string notes;
+                    List<PageShot> shots = Sight.Slides(path, 1100, SeenSlides, out count, out notes);
+                    AddShots(a, shots);
+                    if (shots.Count > 0) a.Note = Join(a.Note, (shots.Count < count ? "The first " + shots.Count + " slides are" : "The slides are") + " also drawn as pictures. " + notes);
+                }
+                catch (Exception ex) { a.Note = Join(a.Note, "The slides could not be drawn (" + Plain(ex) + ")."); }
             }
             finally { DeleteQuietly(temp); }
         }
@@ -638,47 +690,30 @@ namespace NextScan.App
             string text = "";
             try { text = ConvertToText(a.Path, 0x45); } catch (Exception ex) { a.Note = Plain(ex); }
             string trimmed = Regex.Replace(text ?? "", @"\s+", " ").Trim();
+            bool scan = trimmed.Length < 200;
+            if (!scan) { a.Text = Cut(a, Tidy(text)); a.Note = ""; }
 
-            if (trimmed.Length >= 200)
+            // Its pages as pictures: for a scan they are all there is; for one with text
+            // they show how it is laid out, which the text does not.
+            int wanted = scan ? PdfPages : SeenPages, total = 0;
+            List<PageShot> shots = null;
+            try { shots = Sight.EnginePages(a.Path, scan ? 1200 : 1100, wanted, out total); }
+            catch (Exception ex)
             {
-                a.Text = Cut(a, Tidy(text));
-                a.Note = "";
-                return;
+                if (scan) throw;
+                a.Note = Join(a.Note, "Its pages could not be drawn (" + Plain(ex) + ").");
             }
-
-            // Little or no text: it is a scan. The model reads it with its eyes.
-            string temp = System.IO.Path.Combine(TempFolder(), Guid.NewGuid().ToString("N") + ".zip");
-            try
+            if (shots == null) return;
+            if (total > 0) a.Pages = total;
+            AddShots(a, shots);
+            if (scan)
             {
-                string thumb = "<m_oThumbnail><format>4</format><aspect>1</aspect><first>false</first><width>1200</width><height>1700</height></m_oThumbnail>";
-                NextScan.Docs.DocsEngine.ConvertWith(a.Path, temp, 0x404, 0, null, thumb, 0);
-                var entries = new List<ZipArchiveEntry>();
-                using (var zipFile = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read))
-                using (var zip = new ZipArchive(zipFile, ZipArchiveMode.Read))
-                {
-                    var all = new List<ZipArchiveEntry>(zip.Entries);
-                    all.Sort((x, y) => Order(x.Name).CompareTo(Order(y.Name)));
-                    a.Pages = all.Count;
-                    int taken = 0;
-                    foreach (ZipArchiveEntry e in all)
-                    {
-                        if (e.Length == 0) continue;
-                        if (++taken > PdfPages) break;
-                        using (Stream s = e.Open())
-                        using (var ms = new MemoryStream())
-                        {
-                            s.CopyTo(ms);
-                            ms.Position = 0;
-                            using (var bmp = new Bitmap(ms))
-                                AddPicture(a, bmp, a.Name + " page " + taken);
-                        }
-                    }
-                }
                 if (a.Pictures.Count == 0) throw new InvalidDataException("No pages could be drawn from this PDF.");
                 a.Text = trimmed.Length > 0 ? Cut(a, Tidy(text)) : "";
-                a.Note = "A scan: " + (a.Pages > PdfPages ? "the first " + PdfPages + " of " + a.Pages + " pages are shown as pictures." : "its pages are shown as pictures.");
+                a.Note = "A scan: " + (total > shots.Count ? "the first " + shots.Count + " of " + total + " pages are shown as pictures." : "its pages are shown as pictures.");
             }
-            finally { DeleteQuietly(temp); }
+            else if (shots.Count > 0)
+                a.Note = Join(a.Note, total > shots.Count ? "Its first " + shots.Count + " of " + total + " pages are also shown as pictures." : "Its pages are also shown as pictures.");
         }
 
         static int Order(string name)

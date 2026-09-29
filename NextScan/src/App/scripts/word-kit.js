@@ -32,6 +32,22 @@ var NS = (function () {
         return [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)];
     }
 
+    // What the builder can tell at once, without a picture, that will look wrong: it says so in the
+    // result, so that a mistake of measurement is not left for the eye to find.
+    var WARNINGS = [];
+    function warn(text) { if (WARNINGS.indexOf(text) < 0) WARNINGS.push(text); }
+    function textArea() {
+        var sec = Api.GetDocument().GetFinalSection();
+        return { width: mmOf(sec.GetPageWidth() - sec.GetPageMarginLeft() - sec.GetPageMarginRight()), page: mmOf(sec.GetPageWidth()), pageHeight: mmOf(sec.GetPageHeight()) };
+    }
+    function check(what, width, indent) {
+        try {
+            var a = textArea();
+            if (width + (indent || 0) > a.width + 1)
+                warn(what + ' is ' + Math.round(width * 10) / 10 + ' mm wide but the text area is ' + a.width + ' mm (the ' + a.page + ' mm page less its side margins): it runs past the right margin and is cut off when printed. Make it narrower, or widen the text area (smaller margins, a wider or landscape page).');
+        } catch (e) { }
+    }
+
     var PAGES = { a4: [210, 297], a5: [148, 210], a3: [297, 420], letter: [215.9, 279.4], legal: [215.9, 355.6] };
 
     // ---- the page ----------------------------------------------------------
@@ -44,6 +60,10 @@ var NS = (function () {
         if (typeof size === 'string' && PAGES[size.toLowerCase()]) wh = PAGES[size.toLowerCase()].slice();
         else if (size && size.length === 2) wh = [+size[0], +size[1]];
         if (has(spec, 'width') && has(spec, 'height')) wh = [+spec.width, +spec.height];
+        if (!wh && (spec.orientation === 'landscape' || spec.orientation === 'portrait')) {
+            var cw = mmOf(sec.GetPageWidth()), ch = mmOf(sec.GetPageHeight());
+            if (cw && ch) wh = [cw, ch];
+        }
         if (wh) {
             // A named size is portrait unless told otherwise; given sizes are
             // taken as they are, unless an orientation says to turn them.
@@ -56,6 +76,54 @@ var NS = (function () {
             if (typeof m === 'number') m = [m, m, m, m];
             // [top, right, bottom, left], as CSS reads them.
             sec.SetPageMargins(tw(m[3]), tw(m[0]), tw(m[1]), tw(m[2]));
+        }
+        if (has(spec, 'columns')) columns(sec, spec.columns);
+        if (has(spec, 'headerDistance')) sec.SetHeaderDistance(tw(spec.headerDistance));
+        if (has(spec, 'footerDistance')) sec.SetFooterDistance(tw(spec.footerDistance));
+        if (has(spec, 'startNumber')) sec.SetStartPageNumber(+spec.startNumber);
+        if (spec.differentFirstPage || has(spec, 'firstHeader') || has(spec, 'firstFooter')) sec.SetTitlePage(true);
+        if (spec.differentFirstPage === false) sec.SetTitlePage(false);
+        if (has(spec, 'evenHeader') || has(spec, 'evenFooter')) doc.SetEvenAndOddHdrFtr(true);
+        var base = spec.text || null;
+        if (has(spec, 'header')) headerFooter(sec, true, 'default', spec.header, base);
+        if (has(spec, 'footer')) headerFooter(sec, false, 'default', spec.footer, base);
+        if (has(spec, 'firstHeader')) headerFooter(sec, true, 'first', spec.firstHeader, base);
+        if (has(spec, 'firstFooter')) headerFooter(sec, false, 'first', spec.firstFooter, base);
+        if (has(spec, 'evenHeader')) headerFooter(sec, true, 'even', spec.evenHeader, base);
+        if (has(spec, 'evenFooter')) headerFooter(sec, false, 'even', spec.evenFooter, base);
+        if (has(spec, 'watermark')) {
+            var w = spec.watermark;
+            if (w === false || w === 'none' || w === null) { try { doc.RemoveWatermark(); } catch (e) { } }
+            else doc.InsertWatermark(String(typeof w === 'object' ? w.text : w), !(typeof w === 'object' && w.diagonal === false));
+        }
+    }
+
+    // Columns: a number, {count, gap (mm)}, or {widths: [mm...], gaps: [mm...]}.
+    function columns(sec, c) {
+        if (c === undefined || c === null) return;
+        if (typeof c === 'number') c = { count: c };
+        var gap = has(c, 'gap') ? +c.gap : 12.5;
+        if (c.widths && c.widths.length) {
+            var gaps = [];
+            for (var i = 0; i < c.widths.length - 1; i++) gaps.push(tw(c.gaps && has(c.gaps, i) ? c.gaps[i] : gap));
+            sec.SetNotEqualColumns(c.widths.map(tw), gaps);
+        } else sec.SetEqualColumns(Math.max(1, +c.count || 1), tw(gap));
+    }
+
+    // The running text of a page: a string, a paragraph, a list of them, or {blocks: [...]}.
+    function headerFooter(sec, isHeader, which, spec, base) {
+        var content = isHeader ? sec.GetHeader(which, true) : sec.GetFooter(which, true);
+        var list = spec;
+        if (spec && !(spec instanceof Array) && typeof spec === 'object' && spec.blocks) list = spec.blocks;
+        if (!(list instanceof Array)) list = [list];
+        content.RemoveAllElements();
+        var first = true;
+        for (var i = 0; i < list.length; i++) {
+            var b = list[i];
+            if (typeof b === 'string') b = { text: b };
+            if (b.type === 'table') { content.Push(table(b, base)); first = false; continue; }
+            if (first) { fillParagraph(content.GetElement(0), b, base); first = false; }
+            else content.Push(paragraph(b, base));
         }
     }
 
@@ -70,22 +138,25 @@ var NS = (function () {
         return o;
     }
 
+    // Serves a run, a whole paragraph, a found range or a style's text properties:
+    // they all take the same calls, and a method one of them lacks is skipped.
     function styleRun(run, s) {
-        if (has(s, 'font')) run.SetFontFamily(String(s.font));
-        if (has(s, 'size')) run.SetFontSize(Math.round(+s.size * 2));
-        if (has(s, 'bold')) run.SetBold(!!s.bold);
-        if (has(s, 'italic')) run.SetItalic(!!s.italic);
-        if (has(s, 'underline')) run.SetUnderline(!!s.underline);
-        if (has(s, 'strike')) run.SetStrikeout(!!s.strike);
-        if (has(s, 'caps')) run.SetCaps(!!s.caps);
-        if (has(s, 'smallCaps')) run.SetSmallCaps(!!s.smallCaps);
-        if (has(s, 'spacing')) run.SetSpacing(ptw(s.spacing));
-        if (has(s, 'vertAlign')) run.SetVertAlign(s.vertAlign);
-        if (has(s, 'highlight')) run.SetHighlight(String(s.highlight));
+        function call(name, a, b, c, d) { if (run && typeof run[name] === 'function') run[name](a, b, c, d); }
+        if (has(s, 'font')) call('SetFontFamily', String(s.font));
+        if (has(s, 'size')) call('SetFontSize', Math.round(+s.size * 2));
+        if (has(s, 'bold')) call('SetBold', !!s.bold);
+        if (has(s, 'italic')) call('SetItalic', !!s.italic);
+        if (has(s, 'underline')) call('SetUnderline', !!s.underline);
+        if (has(s, 'strike')) call('SetStrikeout', !!s.strike);
+        if (has(s, 'caps')) call('SetCaps', !!s.caps);
+        if (has(s, 'smallCaps')) call('SetSmallCaps', !!s.smallCaps);
+        if (has(s, 'spacing')) call('SetSpacing', ptw(s.spacing));
+        if (has(s, 'vertAlign')) call('SetVertAlign', s.vertAlign);
+        if (has(s, 'highlight')) call('SetHighlight', String(s.highlight));
         var c = rgb(s.color);
-        if (c) run.SetColor(c[0], c[1], c[2], false);
+        if (c) call('SetColor', c[0], c[1], c[2], false);
         var sh = rgb(s.shade);
-        if (sh) run.SetShd('clear', sh[0], sh[1], sh[2]);
+        if (sh) call('SetShd', 'clear', sh[0], sh[1], sh[2]);
     }
 
     // Text goes in run by run: a tab and a line break are elements of their
@@ -172,13 +243,25 @@ var NS = (function () {
         s = s || {};
         var own = inherit(base, s);
         styleParagraph(p, s);
+        var fields = false;
         if (s.runs && s.runs.length) {
             for (var i = 0; i < s.runs.length; i++) {
                 var r = s.runs[i];
                 if (typeof r === 'string') r = { text: r };
-                addText(p, r.text, inherit(own, r));
+                if (r.page || r.field === 'page') { p.AddPageNumber(); fields = true; }
+                else if (r.pages || r.field === 'pages') { p.AddPagesCount(); fields = true; }
+                else if (has(r, 'link')) {
+                    // A link is an element of its own; AddHyperlink on the paragraph would replace what is there.
+                    var h = Api.CreateHyperlink(String(r.link), String(has(r, 'text') ? r.text : r.link), String(r.tip || ''));
+                    p.AddElement(h);
+                    try { styleRun(h.GetElement(0), inherit(own, r)); } catch (e) { }
+                }
+                else addText(p, r.text, inherit(own, r));
             }
         } else if (has(s, 'text')) addText(p, s.text, own);
+        // Fields are not runs: the paragraph's own setters reach them.
+        if (fields) styleRun(p, own);
+        if (has(s, 'footnote')) footnote(p, s.footnote);
         // An empty paragraph still has a height, set by its mark's font.
         if (has(own, 'size') || has(own, 'font')) {
             try { var mark = p.GetParagraphMarkTextPr(); if (has(own, 'size')) mark.SetFontSize(Math.round(+own.size * 2)); if (has(own, 'font')) mark.SetFontFamily(String(own.font)); } catch (e) { }
@@ -239,6 +322,7 @@ var NS = (function () {
 
         var total = 0;
         for (var k = 0; k < nCols; k++) total += +cols[k];
+        check('A table', total, +s.indent || 0);
         t.SetWidth('twips', tw(total));
         t.SetTableLayout('fixed');
         // The grid too, which the builder API has no call for. The editor
@@ -354,6 +438,11 @@ var NS = (function () {
     // ---- pictures and boxes ---------------------------------------------------
     function place(drawing, s) {
         if (has(s, 'x') || has(s, 'y')) {
+            try {
+                var a = textArea();
+                if ((+s.x || 0) + (+s.width || 0) > a.page + 0.5 || (+s.y || 0) + (+s.height || 0) > a.pageHeight + 0.5)
+                    warn('A floating shape or picture at x ' + (+s.x || 0) + ', y ' + (+s.y || 0) + ' mm with size ' + (+s.width || 0) + ' x ' + (+s.height || 0) + ' mm goes past the edge of the ' + a.page + ' x ' + a.pageHeight + ' mm page.');
+            } catch (e) { }
             drawing.SetWrappingStyle(s.wrap || 'inFront');
             drawing.SetHorPosition('page', emu(s.x || 0));
             drawing.SetVerPosition('page', emu(s.y || 0));
@@ -362,33 +451,233 @@ var NS = (function () {
 
     function image(s) {
         if (!s.src) throw new Error('An image needs src.');
+        if (!has(s, 'x') && !has(s, 'y')) check('A picture', +s.width || 30, 0);
         var img = Api.CreateImage(String(s.src), emu(s.width || 30), emu(s.height || 30));
         place(img, s);
         return img;
     }
 
+    // A text box is a rectangle with text in it; any other outline (ellipse, arrow, star,
+    // line, ...) is a shape: `shape` names the outline, `line` (or `border`) its edge.
     function textbox(s, base) {
         var fill = rgb(s.fill);
-        var stroke = s.border === undefined || s.border === 'none' || s.border === false ? null : (typeof s.border === 'object' ? s.border : {});
+        var edge = has(s, 'line') ? s.line : s.border;
+        var stroke = edge === undefined || edge === 'none' || edge === false ? null : (typeof edge === 'object' ? edge : (typeof edge === 'number' ? { size: edge } : {}));
         var sc = stroke ? rgb(stroke.color) || [0, 0, 0] : null;
-        var shape = Api.CreateShape('rect', emu(s.width || 40), emu(s.height || 10),
+        var shape = Api.CreateShape(String(s.shape || s.geometry || 'rect'), emu(s.width || 40), emu(has(s, 'height') ? s.height : 10),
             fill ? Api.CreateSolidFill(Api.CreateRGBColor(fill[0], fill[1], fill[2])) : Api.CreateNoFill(),
             sc ? Api.CreateStroke(Math.round((stroke.size || 0.5) * 12700), Api.CreateSolidFill(Api.CreateRGBColor(sc[0], sc[1], sc[2]))) : Api.CreateStroke(0, Api.CreateNoFill()));
+        if (has(s, 'rotation')) try { shape.SetRotation(+s.rotation); } catch (e) { }
         var pad = s.padding === undefined ? 1 : s.padding;
         if (typeof pad === 'number') pad = [pad, pad, pad, pad];
         try { shape.SetPaddings(emu(pad[3]), emu(pad[0]), emu(pad[1]), emu(pad[2])); } catch (e) { }
         if (s.valign && VALIGN[s.valign]) try { shape.SetVerticalTextAlign(VALIGN[s.valign]); } catch (e) { }
-        var content = shape.GetDocContent();
-        var paras = s.paragraphs || [s];
         var own = inherit(base, s);
-        content.RemoveAllElements();
-        for (var i = 0; i < paras.length; i++) {
-            var ps = typeof paras[i] === 'string' ? { text: paras[i] } : paras[i];
-            if (ps === s) ps = { text: s.text, runs: s.runs, align: s.align };
-            content.Push(paragraph(ps, own));
+        if (!has(own, 'color')) own.color = '#000000';      // a shape's own default text is white
+        if (has(s, 'text') || s.runs || s.paragraphs) {
+            var content = shape.GetDocContent();
+            var paras = s.paragraphs || [s];
+            content.RemoveAllElements();
+            for (var i = 0; i < paras.length; i++) {
+                var ps = typeof paras[i] === 'string' ? { text: paras[i] } : paras[i];
+                if (ps === s) ps = { text: s.text, runs: s.runs, align: s.align };
+                content.Push(paragraph(ps, own));
+            }
         }
         place(shape, s);
         return shape;
+    }
+
+    // ---- charts --------------------------------------------------------------
+    var CHARTS = {
+        bar: 'bar', column: 'bar', columns: 'bar', barstacked: 'barStacked', columnstacked: 'barStacked', stackedbar: 'barStacked', stackedcolumn: 'barStacked',
+        barpercent: 'barStackedPercent', columnpercent: 'barStackedPercent', barstackedpercent: 'barStackedPercent',
+        hbar: 'horizontalBar', horizontalbar: 'horizontalBar', barh: 'horizontalBar', hbarstacked: 'horizontalBarStacked', horizontalbarstacked: 'horizontalBarStacked',
+        line: 'lineNormal', linenormal: 'lineNormal', linestacked: 'lineStacked', pie: 'pie', pie3d: 'pie3D', doughnut: 'doughnut', donut: 'doughnut',
+        area: 'area', areastacked: 'areaStacked', scatter: 'scatter', xy: 'scatter', stock: 'stock', bar3d: 'bar3D', column3d: 'bar3D', line3d: 'line3D'
+    };
+
+    // {type: 'chart', chart: 'bar', title, categories: ['Q1', 'Q2'], series: [{name, values: [..]}], width, height (mm),
+    //  legend: 'bottom' | 'right' | 'top' | 'left' | false, colors: ['#RRGGBB', ...], dataLabels: true, xTitle, yTitle}
+    function chart(s) {
+        var key = String(s.chart || s.kind || 'bar').toLowerCase().replace(/[^a-z0-9]/g, '');
+        var type = CHARTS[key] || String(s.chart || 'bar');
+        var series = s.series || [];
+        if (!series.length) throw new Error('A chart needs series: [{name, values: [numbers]}], and categories: [labels].');
+        var values = [], names = [];
+        for (var i = 0; i < series.length; i++) { values.push((series[i].values || []).map(Number)); names.push(String(series[i].name || ('Series ' + (i + 1)))); }
+        var c = Api.CreateChart(type, values, names, (s.categories || []).map(String), emu(s.width || 120), emu(s.height || 70), +s.style || 24);
+        if (s.title) c.SetTitle(String(s.title), +s.titleSize || 14);
+        if (s.legend === false || s.legend === 'none') c.SetLegendPos('none');
+        else c.SetLegendPos(String(s.legend || 'bottom'));
+        if (s.xTitle) c.SetHorAxisTitle(String(s.xTitle), 11);
+        if (s.yTitle) c.SetVerAxisTitle(String(s.yTitle), 11);
+        if (s.dataLabels) c.SetShowDataLabels(false, false, true, false);
+        if (s.colors) for (var k = 0; k < s.colors.length; k++) {
+            var col = rgb(s.colors[k]);
+            if (col) c.SetSeriesFill(Api.CreateSolidFill(Api.CreateRGBColor(col[0], col[1], col[2])), k, false);
+        }
+        place(c, s);
+        return c;
+    }
+
+    // ---- lists -----------------------------------------------------------------
+    var NUMBER_FORMS = { number: '1.', decimal: '1.', numbers: '1.', paren: '1)', 'upper-roman': 'I.', roman: 'I.', 'lower-roman': 'i.', 'upper-alpha': 'A.', 'upper-letter': 'A.', 'lower-alpha': 'a)', 'lower-letter': 'a)', alpha: 'a)', letter: 'a)' };
+
+    // {type: 'list', kind: 'bullet' | 'number' | 'lower-alpha' | 'upper-roman' ..., bullet: '-', start: 1,
+    //  items: ['text' | {text, level: 0-8, ...paragraph}], indent: {left, hanging} (mm)}
+    function makeList(s, base, doc) {
+        var kind = String(s.kind || s.style || 'bullet').toLowerCase();
+        var bullet = kind === 'bullet' || kind === 'bullets';
+        var numbering = doc.CreateNumbering(bullet ? 'bullet' : 'numbered');
+        var used = {};
+        var items = s.items || [];
+        var out = [];
+        for (var i = 0; i < items.length; i++) {
+            var it = typeof items[i] === 'string' ? { text: items[i] } : items[i];
+            var lvl = Math.max(0, Math.min(8, +it.level || 0));
+            var level = numbering.GetLevel(lvl);
+            if (!used[lvl]) {
+                used[lvl] = true;
+                if (bullet) { if (has(s, 'bullet') && lvl === 0) try { level.SetTemplateType('bullet', String(s.bullet)); } catch (e) { } }
+                else {
+                    var form = lvl === 0 ? (NUMBER_FORMS[kind] || '1.') : lvl === 1 ? 'a)' : 'i.';
+                    try { level.SetTemplateType(form, ''); } catch (e) { }
+                    if (lvl === 0 && has(s, 'start')) try { level.SetStart(+s.start); } catch (e) { }
+                }
+                if (s.indent) {
+                    var pr = level.GetParaPr();
+                    if (has(s.indent, 'left')) pr.SetIndLeft(tw((+s.indent.left) + lvl * 6));
+                    if (has(s.indent, 'hanging')) pr.SetIndFirstLine(-tw(s.indent.hanging));
+                }
+            }
+            var spec = {};
+            for (var k in it) if (k !== 'level') spec[k] = it[k];
+            var p = paragraph(spec, base);
+            p.SetNumbering(level);
+            out.push(p);
+        }
+        return out;
+    }
+
+    // ---- maths ---------------------------------------------------------------------
+    // The editor reads an equation in the linear (UnicodeMath) form: a/b for a fraction,
+    // x^2, x_i, sqrt written as the sign followed by (...), and symbols as themselves.
+    // LaTeX, which every model knows, is turned into that here.
+    var GREEK = {
+        alpha: '\u03B1', beta: '\u03B2', gamma: '\u03B3', delta: '\u03B4', epsilon: '\u03B5', zeta: '\u03B6',
+        eta: '\u03B7', theta: '\u03B8', iota: '\u03B9', kappa: '\u03BA', lambda: '\u03BB', mu: '\u03BC',
+        nu: '\u03BD', xi: '\u03BE', pi: '\u03C0', rho: '\u03C1', sigma: '\u03C3', tau: '\u03C4',
+        upsilon: '\u03C5', phi: '\u03C6', chi: '\u03C7', psi: '\u03C8', omega: '\u03C9', Gamma: '\u0393',
+        Delta: '\u0394', Theta: '\u0398', Lambda: '\u039B', Xi: '\u039E', Pi: '\u03A0', Sigma: '\u03A3',
+        Phi: '\u03A6', Psi: '\u03A8', Omega: '\u03A9'
+    };
+    var SYMBOLS = {
+        cdot: '\u00B7', times: '\u00D7', div: '\u00F7', pm: '\u00B1', mp: '\u2213', leq: '\u2264',
+        le: '\u2264', geq: '\u2265', ge: '\u2265', neq: '\u2260', ne: '\u2260', approx: '\u2248',
+        equiv: '\u2261', infty: '\u221E', to: '\u2192', rightarrow: '\u2192', leftarrow: '\u2190', Rightarrow: '\u21D2',
+        Leftrightarrow: '\u21D4', sum: '\u2211', prod: '\u220F', int: '\u222B', partial: '\u2202', nabla: '\u2207',
+        degree: '\u00B0', circ: '\u00B0', ldots: '\u2026', cdots: '\u22EF', in: '\u2208', notin: '\u2209',
+        subset: '\u2282', cup: '\u222A', cap: '\u2229', forall: '\u2200', exists: '\u2203', sqrt: '\u221A',
+        angle: '\u2220', propto: '\u221D', sim: '\u223C'
+    };
+
+    function latexToLinear(src) {
+        var s = String(src);
+        if (s.indexOf('\\') < 0 && s.indexOf('{') < 0) return s;
+        s = s.replace(/\\left|\\right|\\displaystyle|\\,|\\;|\\!|\\quad/g, ' ').replace(/^\$+|\$+$/g, '');
+        function group(str, i) {                     // the {...} starting at str[i]; returns [inner, next]
+            var depth = 0, j = i;
+            for (; j < str.length; j++) {
+                if (str[j] === '{') depth++;
+                else if (str[j] === '}') { depth--; if (depth === 0) break; }
+            }
+            return [str.slice(i + 1, j), j + 1];
+        }
+        function arg(str, i) {                       // one argument: {group} or a single token
+            while (str[i] === ' ') i++;
+            if (str[i] === '{') return group(str, i);
+            if (str[i] === '\\') { var m = /^\\[a-zA-Z]+/.exec(str.slice(i)); if (m) return [m[0], i + m[0].length]; }
+            return [str[i] || '', i + 1];
+        }
+        function conv(str) {
+            var out = '', i = 0;
+            while (i < str.length) {
+                var ch = str[i];
+                if (ch === '\\') {
+                    var m = /^\\([a-zA-Z]+)/.exec(str.slice(i));
+                    if (!m) { out += str[i + 1] || ''; i += 2; continue; }
+                    var name = m[1];
+                    i += m[0].length;
+                    if (name === 'frac' || name === 'dfrac' || name === 'tfrac') {
+                        var a = arg(str, i); i = a[1]; var b = arg(str, i); i = b[1];
+                        out += '(' + conv(a[0]) + ')/(' + conv(b[0]) + ')';
+                    } else if (name === 'sqrt') {
+                        var root = null;
+                        if (str[i] === '[') { var e = str.indexOf(']', i); root = str.slice(i + 1, e); i = e + 1; }
+                        var r = arg(str, i); i = r[1];
+                        out += root ? '\u221A' + '(' + conv(root) + '&' + conv(r[0]) + ')' : '\u221A' + '(' + conv(r[0]) + ')';
+                    } else if (name === 'text' || name === 'mathrm' || name === 'textbf' || name === 'mathbf') {
+                        var t = arg(str, i); i = t[1];
+                        out += (name === 'text' || name === 'mathrm' ? '"' + t[0] + '"' : conv(t[0]));
+                    } else if (name === 'overline' || name === 'bar') { var o = arg(str, i); i = o[1]; out += conv(o[0]) + '\u0305'; }
+                    else if (GREEK[name]) out += GREEK[name];
+                    else if (SYMBOLS[name]) out += SYMBOLS[name];
+                    else out += name;
+                    continue;
+                }
+                if (ch === '^' || ch === '_') {
+                    var g = arg(str, i + 1); i = g[1];
+                    var inner = conv(g[0]);
+                    out += ch + (inner.length > 1 ? '(' + inner + ')' : inner);
+                    continue;
+                }
+                if (ch === '{' || ch === '}') { i++; continue; }
+                out += ch; i++;
+            }
+            return out;
+        }
+        return conv(s).replace(/\s+/g, ' ').trim();
+    }
+
+    // ---- what has to wait until the blocks are in the document ------------------------------
+    // An equation, a table of contents and a footnote are put in at the cursor, and a
+    // section break is made from a paragraph that is already there.
+    var LATER = [];
+    function later(fn) { LATER.push(fn); }
+
+    function footnote(p, text) {
+        later(function () {
+            var doc = Api.GetDocument();
+            // The cursor goes to the end of the paragraph: selecting it leaves the cursor
+            // at the start of the next one, so step forward and back one character --
+            // except in the last paragraph of the document, which has no next one.
+            p.Select();
+            var n = doc.GetElementsCount(), last = doc.GetElement(n - 1), isLast = false;
+            try { isLast = last.GetInternalId() === p.GetInternalId(); } catch (e) { }
+            if (isLast) doc.MoveCursorToEnd();
+            else { doc.MoveCursorRight(1, false, false); doc.MoveCursorLeft(1, false, false); }
+            var note = doc.AddFootnote();
+            if (note) {
+                var first = note.GetElement(0);
+                if (first) first.AddText(' ' + String(text));
+            }
+        });
+    }
+
+    // ---- styles: change what Normal, Heading 1, Title ... look like ---------------------------
+    // {'Heading 1': {font, size, bold, color, before, after, align, ...}, 'Normal': {...}}
+    function styles(map, doc) {
+        if (!map) return;
+        for (var name in map) {
+            var st = null;
+            try { st = doc.GetStyle(name); } catch (e) { }
+            if (!st) { try { st = doc.CreateStyle(name); } catch (e) { } }
+            if (!st) throw new Error('There is no style called ' + name + ' and one could not be made.');
+            var spec = map[name];
+            styleRun(st.GetTextPr(), spec);
+            try { styleParagraph(st.GetParaPr(), spec); } catch (e) { }
+        }
     }
 
     // ---- a whole spec ------------------------------------------------------
@@ -417,8 +706,58 @@ var NS = (function () {
                 sp.SetSpacingLine(Math.max(20, tw(b.height || 5)), 'exact');
                 out.push(sp);
                 lastParagraph = sp;
-            } else if (type === 'image' || type === 'textbox') {
-                var drawing = type === 'image' ? image(b) : textbox(b, base);
+            } else if (type === 'list') {
+                var items = makeList(b, base, doc);
+                for (var li = 0; li < items.length; li++) out.push(items[li]);
+                lastParagraph = items.length ? items[items.length - 1] : lastParagraph;
+            } else if (type === 'column_break') {
+                var cb = Api.CreateParagraph();
+                cb.AddColumnBreak();
+                out.push(cb);
+                lastParagraph = cb;
+            } else if (type === 'equation' || type === 'math') {
+                var eq = Api.CreateParagraph();
+                eq.AddText('=');
+                out.push(eq);
+                lastParagraph = eq;
+                (function (par, text) {
+                    later(function () { par.Select(); doc.AddMathEquation(latexToLinear(text), 'unicode'); });
+                })(eq, b.text || b.latex || b.equation || '');
+            } else if (type === 'toc') {
+                var tc = Api.CreateParagraph();
+                tc.AddText('Table of contents');
+                out.push(tc);
+                lastParagraph = tc;
+                (function (par, spec) {
+                    later(function () {
+                        par.Select();
+                        doc.AddTableOfContents({
+                            ShowPageNums: spec.pageNumbers !== false, RightAlgn: spec.pageNumbers !== false, LeaderType: spec.dots === false ? 'none' : 'dot',
+                            FormatAsLinks: spec.links !== false, BuildFrom: { OutlineLvls: +spec.levels || 3 }, TocStyle: 'standard'
+                        });
+                    });
+                })(tc, b);
+            } else if (type === 'section_break' || type === 'section') {
+                // The paragraph the section ends with: the one before, or a small empty one.
+                var holder = lastParagraph;
+                if (!holder) {
+                    holder = Api.CreateParagraph();
+                    holder.SetSpacingBefore(0); holder.SetSpacingAfter(0); holder.SetSpacingLine(20, 'exact');
+                    out.push(holder);
+                }
+                lastParagraph = null;
+                (function (par, spec) {
+                    later(function () {
+                        var ended = doc.CreateSection(par);         // what came before keeps the settings it had
+                        var now = doc.GetFinalSection();            // what follows takes the new ones
+                        var kind = { next: 'nextPage', nextpage: 'nextPage', page: 'nextPage', continuous: 'continuous', odd: 'oddPage', oddpage: 'oddPage', even: 'evenPage', evenpage: 'evenPage' }[String(spec.kind || 'nextPage').toLowerCase()];
+                        if (kind) now.SetType(kind);
+                        if (spec.page) page(spec.page, doc);
+                        if (has(spec, 'columns')) columns(now, spec.columns);
+                    });
+                })(holder, b);
+            } else if (type === 'image' || type === 'textbox' || type === 'shape' || type === 'chart') {
+                var drawing = type === 'image' ? image(b) : type === 'chart' ? chart(b) : textbox(b, base);
                 var floating = has(b, 'x') || has(b, 'y');
                 // A floating one hangs on the paragraph before it; an inline
                 // one sits in a paragraph of its own, aligned as asked.
@@ -430,7 +769,7 @@ var NS = (function () {
                     out.push(holder);
                     lastParagraph = holder;
                 }
-            } else throw new Error('Unknown block type ' + type + ' (use paragraph, heading, table, image, textbox, spacer, page_break).');
+            } else throw new Error('Unknown block type ' + type + ' (use paragraph, heading, list, table, image, textbox, shape, chart, equation, toc, section_break, column_break, spacer, page_break).');
         }
         return out;
     }
@@ -463,8 +802,12 @@ var NS = (function () {
         if (mode === 'replace') {
             doc.RemoveAllElements();
         }
+        LATER = [];
+        WARNINGS = [];
         page(spec.page, doc);
         defaults(spec.defaults, doc);
+        styles(spec.styles, doc);
+        headingNumbers(spec.headingNumbers, doc);
         var made = blocksOf(spec.blocks || [], spec.defaults || null, doc);
         var at = null;
         if (mode === 'insert' || mode === 'replace_range') {
@@ -477,6 +820,13 @@ var NS = (function () {
         } else {
             for (var j = 0; j < made.length; j++) doc.Push(made[j]);
         }
+        var pending = LATER;
+        LATER = [];
+        for (var q = 0; q < pending.length; q++) pending[q]();
+        var hadToc = false;
+        for (var z = 0; z < (spec.blocks || []).length; z++) if ((spec.blocks[z] || {}).type === 'toc') hadToc = true;
+        if (hadToc) { try { doc.UpdateAllTOC(); } catch (e) { } }
+
         // The editor puts an empty paragraph after every table it is given,
         // and clearing a document leaves one behind: gaps nobody asked for,
         // which on a copied form move everything below them down a line.
@@ -501,13 +851,105 @@ var NS = (function () {
             try { doc.RemoveElement(x); removed++; } catch (e) { }
         }
         var first = at === null ? (mode === 'replace' ? 0 : Math.max(0, before - (removed > 0 && before > 0 ? 1 : 0))) : at;
-        return { ok: true, mode: mode, written: made.length, first_index: first, blocks_now: doc.GetElementsCount() };
+        var answer = { ok: true, mode: mode, written: made.length, first_index: first, blocks_now: doc.GetElementsCount() };
+        if (WARNINGS.length) answer.warnings = WARNINGS;
+        return answer;
+    }
+
+    // ---- numbered headings: 1. / 1.1. / 1.1.1. ------------------------------------------------------
+    // headingNumbers: true | {levels: 1-6 (default 3), indent: mm (default 10)}
+    function headingNumbers(o, doc) {
+        if (!o) return;
+        if (o === true) o = {};
+        var levels = Math.max(1, Math.min(6, +o.levels || 3));
+        var gap = has(o, 'indent') ? +o.indent : 10;
+        var numbering = doc.CreateNumbering('numbered');
+        for (var i = 0; i < levels; i++) {
+            var level = numbering.GetLevel(i);
+            var text = '';
+            for (var k = 1; k <= i + 1; k++) text += '%' + k + '.';
+            level.SetCustomType('decimal', text, 'left');
+            var pr = level.GetParaPr();
+            pr.SetIndLeft(tw(gap + i * 2));
+            pr.SetIndFirstLine(-tw(gap + i * 2));
+            var style = doc.GetStyle('Heading ' + (i + 1));
+            if (style) level.LinkWithStyle(style);
+        }
+    }
+
+    // ---- change what is already there ---------------------------------------------------------
+    function paragraphsOfTable(t, out) {
+        for (var r = 0; r < t.GetRowsCount(); r++) {
+            var row = t.GetRow(r);
+            for (var c = 0; c < row.GetCellsCount(); c++) {
+                var content = row.GetCell(c).GetContent();
+                for (var k = 0; k < content.GetElementsCount(); k++) {
+                    var el = content.GetElement(k), type = el.GetClassType();
+                    if (type === 'paragraph') out.push(el);
+                    else if (type === 'table') paragraphsOfTable(el, out);
+                }
+            }
+        }
+    }
+
+    function paragraphsIn(doc, from, to) {
+        var out = [];
+        var n = doc.GetElementsCount();
+        for (var i = Math.max(0, from); i <= Math.min(n - 1, to); i++) {
+            var el = doc.GetElement(i), type = el.GetClassType();
+            if (type === 'paragraph') out.push(el);
+            else if (type === 'table') paragraphsOfTable(el, out);
+        }
+        return out;
+    }
+
+    // {target: {all: true} | {blocks: [from, to]} | {style: 'Heading 1'} | {tables: true} | {text: 'find', matchCase},
+    //  set: {font, size, bold, italic, underline, color, highlight, align, before, after, line, indent, style, fill, ...},
+    //  replace: {find, with, matchCase}, page, defaults, styles}
+    function format(spec) {
+        var doc = Api.GetDocument();
+        var result = { ok: true };
+        page(spec.page, doc);
+        defaults(spec.defaults, doc);
+        styles(spec.styles, doc);
+        headingNumbers(spec.headingNumbers, doc);
+
+        if (spec.replace) {
+            var rep = spec.replace;
+            var found = doc.Search(String(rep.find), !!rep.matchCase);
+            result.replaced = found ? found.length : 0;
+            if (result.replaced) doc.SearchAndReplace({ searchString: String(rep.find), replaceString: String(has(rep, 'with') ? rep['with'] : ''), matchCase: !!rep.matchCase });
+        }
+
+        var set = spec.set;
+        if (set) {
+            var t = spec.target || { all: true };
+            if (has(t, 'text')) {
+                var ranges = doc.Search(String(t.text), !!t.matchCase) || [];
+                for (var i = 0; i < ranges.length; i++) styleRun(ranges[i], set);
+                result.matches = ranges.length;
+            } else {
+                var paras;
+                var last = doc.GetElementsCount() - 1;
+                if (t.blocks && t.blocks.length) paras = paragraphsIn(doc, +t.blocks[0], has(t.blocks, 1) ? +t.blocks[1] : +t.blocks[0]);
+                else if (t.tables) { paras = []; var tables = doc.GetAllTables() || []; for (var k = 0; k < tables.length; k++) paragraphsOfTable(tables[k], paras); }
+                else paras = paragraphsIn(doc, 0, last);
+                if (t.style) {
+                    var wanted = String(t.style).toLowerCase();
+                    paras = paras.filter(function (p) { try { var st = p.GetStyle(); return st && String(st.GetName()).toLowerCase() === wanted; } catch (e) { return false; } });
+                }
+                for (var j = 0; j < paras.length; j++) { styleParagraph(paras[j], set); styleRun(paras[j], set); }
+                result.paragraphs = paras.length;
+            }
+        }
+        return result;
     }
 
     return {
         tw: tw, ptw: ptw, emu: emu, mmOf: mmOf, rgb: rgb,
-        page: page, defaults: defaults,
-        paragraph: paragraph, fillParagraph: fillParagraph, table: table, image: image, textbox: textbox,
-        blocks: blocksOf, write: write
+        page: page, defaults: defaults, columns: columns, styles: styles,
+        paragraph: paragraph, fillParagraph: fillParagraph, table: table, image: image, textbox: textbox, shape: textbox, chart: chart, list: makeList,
+        latex: latexToLinear,
+        blocks: blocksOf, write: write, format: format
     };
 })();

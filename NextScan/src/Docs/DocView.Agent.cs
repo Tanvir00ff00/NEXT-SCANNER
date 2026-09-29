@@ -24,6 +24,9 @@ namespace NextScan.Docs
         readonly Dictionary<string, TaskCompletionSource<string>> _pending = new Dictionary<string, TaskCompletionSource<string>>();
         int _requests;
 
+        /// <summary>A PDF tab's file as it was opened, for the converter to draw; empty for anything else.</summary>
+        public string SourcePdf { get { return _ext == "pdf" ? Path.Combine(_work, "source.pdf") : ""; } }
+
         /// <summary>The name the tab shows: the file name, or "Document 1.docx" for a new one.</summary>
         public string Title { get { return _title; } }
 

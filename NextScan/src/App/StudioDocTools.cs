@@ -101,15 +101,32 @@ namespace NextScan.App
                      "\"properties\":{\"type\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"runs\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":true}}," +
                      "\"columns\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"rows\":{\"type\":\"array\",\"items\":{}}}}}," +
                      "\"spec\":{\"type\":\"string\",\"description\":\"Instead of the fields above: the whole description as one JSON string {mode, at, to, page, defaults, blocks}. Use this if your blocks would otherwise lose fields.\"}," +
-                     "\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this writes, in their language.\"}},\"required\":[\"summary\"]}"),
+                     "\"look\":{\"type\":\"boolean\",\"description\":\"The pages are shown to you after the write (default true). Set false only for the first of several writes in a row, and look at the end.\"},\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this writes, in their language.\"}},\"required\":[\"summary\"]}"),
+
+                Tool("format_document",
+                     "Changes the look of what is already in a Word document, in place, without rewriting it -- the way to change a font, a size, a colour, an alignment, spacing, a style, or to replace a word everywhere. target says what: {all:true} (default), {blocks:[from,to]} (block indexes as read_document gives them), {style:'Heading 1'} (every paragraph in that style), {tables:true} (everything in tables), or {text:'find', matchCase} (just those words). set says how: font, size (pt), bold, italic, underline, strike, color, highlight, caps, spacing, vertAlign, align, before, after, line, indent, style, fill, border, keepNext, pageBreakBefore. replace: {find, with, matchCase} replaces text everywhere. page, defaults, styles and headingNumbers are the same as in write_document (page setup, columns, headers and footers, watermark; the body text; the definition of Normal, Heading 1...; numbered headings). Everything else in Word -- shapes, charts, equations, sections, footnotes -- is in write_document's blocks, and anything beyond that is edit_document with the API (ask word_api). Shows you the pages afterwards.",
+                     "{\"type\":\"object\",\"properties\":{" + doc + "," +
+                     "\"target\":{\"type\":\"object\",\"additionalProperties\":true,\"description\":\"What to change: {all:true} | {blocks:[from,to]} | {style:'Heading 1'} | {tables:true} | {text:'find', matchCase:true}.\"}," +
+                     "\"set\":{\"type\":\"object\",\"additionalProperties\":true,\"description\":\"The formatting: {font, size, bold, italic, underline, color, highlight, align, before, after, line, indent, style, fill, ...}.\"}," +
+                     "\"replace\":{\"type\":\"object\",\"additionalProperties\":true,\"description\":\"{find, with, matchCase}: replace this text everywhere.\"}," +
+                     "\"page\":{\"type\":\"object\",\"additionalProperties\":true,\"description\":\"Page setup, as in write_document.\"}," +
+                     "\"defaults\":{\"type\":\"object\",\"additionalProperties\":true,\"description\":\"Body text defaults, as in write_document.\"}," +
+                     "\"styles\":{\"type\":\"object\",\"additionalProperties\":true,\"description\":\"{'Heading 1': {font, size, bold, color, before, after, ...}, 'Normal': {...}}.\"}," +
+                     "\"headingNumbers\":{\"description\":\"true, or {levels: 3}: number the headings 1. / 1.1. / 1.1.1.\"}," +
+                     "\"look\":{\"type\":\"boolean\",\"description\":\"Show the pages afterwards (default true).\"}," +
+                     "\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this changes, in their language.\"}},\"required\":[\"summary\"]}"),
+
+                Tool("word_api",
+                     "What to know about Word's document API, when write_document and format_document do not reach what you need and you are going to write a script for edit_document. topic: 'overview' (units and how the API works), 'write' (everything write_document and format_document can describe), or a subject -- fonts, page, columns, sections, headers_footers, headings, styles, lists, shapes, charts, math, footnotes, links, watermark, images, find, tables, tabs, comments, forms, direction -- each a tested recipe; or a class name (Document, Section, Paragraph, Run, Range, Table, Cell, Row, Style, Shape, Chart, Image, Hyperlink, Numbering, NumberingLevel, DocumentContent, TextPr, ParaPr, Api...) for that class's method names taken from this very editor; or any word (column, border, footnote) to find the methods with it in their name. Leave topic out for the list. Method names are case sensitive and are the only reliable way to know a call exists.",
+                     "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"description\":\"A subject, a class name, or a word to search the method names for.\"}}}"),
 
                 Tool("look_at_document",
-                     "Shows you a Word document's pages as pictures, laid out exactly as they will print. Use it to check a document you made or changed looks right -- especially one copied from a scan, side by side with look_at_scan -- and fix what differs. Returns the page count; the pictures follow.",
-                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"page\":{\"type\":\"integer\",\"description\":\"Which page, from 1. Leave out for the first two.\"}}}"),
+                     "Shows you a document as pictures: a Word document or PDF laid out exactly as it will print, an Excel workbook as its sheets (colours, borders, column widths, merged cells, cell addresses), a PowerPoint as its slides. This is how you see what you made: reading text tells you what is in a document, only looking tells you whether it is right -- alignment, spacing, sizes, what runs onto a second page, what overlaps. Look at what you wrote as a person would, judge it against what you were asked for (or against the scan or the file you are copying, side by side with look_at_scan or the attached pictures) and fix what differs, then look again. The picture says how large the page is and how many pixels a millimetre is, so you can measure positions and gaps in it. With grid: true a blue grid is drawn over a Word page or slide (a line every 10 mm from the top-left corner, numbered every 50) to read positions straight off it. With region: [x, y, width, height] in mm you get a close-up of that part of the page, drawn larger -- use it to check small things: a dotted line, a border, the exact size of a letter. Returns the page count; the pictures follow.",
+                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"page\":{\"type\":\"integer\",\"description\":\"Which page (or sheet picture, or slide), from 1. Leave out for the first two.\"},\"grid\":{\"type\":\"boolean\",\"description\":\"Draw a millimetre grid over the page.\"},\"region\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"[x, y, width, height] in mm from the page's top-left corner: a close-up of that part. Give page with it.\"}}}"),
 
                 Tool("edit_document",
                      "Changes a document by running a script for ONLYOFFICE's document API (the Office JavaScript API of ONLYOFFICE Document Builder and plugins). The script is the body of a function given Api; whatever it returns comes back to you. The change is shown at once and can be undone by the operator. Not available for PDF. In Word scripts the helpers NS are there too: NS.paragraph(spec), NS.table(spec) and NS.textbox(spec) make blocks from the same specs write_document takes, NS.fillParagraph(existingParagraph, spec), NS.page({...}), and NS.tw(mm) / NS.ptw(pt) convert to twips. Prefer write_document for new content and for layout; use scripts for targeted changes (find and replace text, format one run, delete a block).",
-                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"script\":{\"type\":\"string\",\"description\":\"JavaScript using Api, e.g. var d = Api.GetDocument(); var p = Api.CreateParagraph(); p.AddText('Hello'); d.Push(p); return d.GetElementsCount();\"},\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this changes, in their language.\"}},\"required\":[\"script\",\"summary\"]}"),
+                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"script\":{\"type\":\"string\",\"description\":\"JavaScript using Api, e.g. var d = Api.GetDocument(); var p = Api.CreateParagraph(); p.AddText('Hello'); d.Push(p); return d.GetElementsCount();\"},\"look\":{\"type\":\"boolean\",\"description\":\"The document is shown to you after the change (default true). Set false only for the first of several changes in a row.\"},\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this changes, in their language.\"}},\"required\":[\"script\",\"summary\"]}"),
 
                 Tool("get_selection",
                      "Returns the text the operator has selected in a document, for requests like 'rewrite this' or 'translate the selected part'.",
@@ -136,7 +153,7 @@ namespace NextScan.App
                      "{\"type\":\"object\",\"properties\":{}}"),
 
                 Tool("look_at_scan",
-                     "Shows you a scanned page as a picture: one of the pages scanned in this session (page, from 1), or with no page the one the operator has selected or, failing that, the preview on the scanner glass. Use it to read or copy a scanned document -- to type out handwriting, or to rebuild a form as a Word document -- and to compare your document with it. Says how many pages there are; the picture follows.",
+                     "Shows you a page scanned on the scanner as a picture (not a file the operator attached: those pictures are already in their message): one of the pages scanned in this session (page, from 1), or with no page the one the operator has selected or, failing that, the preview on the scanner glass. Use it to read or copy a scanned document -- to type out handwriting, or to rebuild a form as a Word document -- and to compare your document with it. Says how many pages there are; the picture follows.",
                      "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, from 1. Leave out for the selected page or the preview.\"}}}"),
             };
         }
@@ -189,7 +206,12 @@ namespace NextScan.App
             "page: {size:'A4' | [width, height] (mm), orientation, margins: [top, right, bottom, left] (mm)}; defaults: " +
             "{font, size, after, line} for the body text. A new document is Letter with 10 pt after every paragraph " +
             "until you say otherwise: give page and defaults when you make one.\n" +
-            "Returns the index of the first block written and how many blocks the document now has.";
+            "More (all in the same units): page: {columns, header, footer, firstHeader, firstFooter, differentFirstPage, watermark, startNumber}; " +
+            "runs {page:true} (page number), {pages:true}, {text, link:'https://..'} (hyperlink); paragraph footnote:'text'; blocks list {kind:'bullet'|'number'|'lower-alpha'|'upper-roman', items}, " +
+            "shape {shape:'ellipse'|'roundRect'|'star5'|'rightArrow'|'line'..., width, height, fill, line, text, x, y, rotation}, chart {chart:'column'|'line'|'pie'..., title, categories, series:[{name, values}]}, " +
+            "equation {text: LaTeX}, toc, section_break {kind, page, columns}, column_break; styles {'Heading 1': {...}}; headingNumbers:true. " +
+            "word_api topic 'write' says all of it; word_api can also tell you how to do anything the editor can do beyond that, by script.\n" +
+            "Returns the index of the first block written and how many blocks the document now has, and shows you the pages as they now look: look at them.";
 
         static AiTool Tool(string name, string description, string schema)
         {
@@ -213,11 +235,13 @@ namespace NextScan.App
                     case "list_documents": await List(result); break;
                     case "write_document": await Write(Pick(args), args, result); break;
                     case "look_at_document": await LookAtDocument(Pick(args), args, result); break;
+                    case "format_document": await Format(Pick(args), args, result); break;
+                    case "word_api": WordApi(Str(args, "topic"), result); break;
                     case "look_at_scan": LookAtScan(args, result); break;
                     case "open_document": await Open(Str(args, "path"), result); break;
                     case "create_document": await Create(Str(args, "kind"), result); break;
                     case "read_document": await Read(Pick(args), args, result); break;
-                    case "edit_document": await Edit(Pick(args), Str(args, "script"), Str(args, "summary"), result); break;
+                    case "edit_document": await Edit(Pick(args), Str(args, "script"), Str(args, "summary"), args, result); break;
                     case "get_selection": await Selection(Pick(args), result); break;
                     case "save_document": await Save(Pick(args), Str(args, "path"), result); break;
                     case "export_document": await Export(Pick(args), Str(args, "path"), Bool(args, "overwrite"), result); break;
@@ -343,7 +367,7 @@ namespace NextScan.App
             result.Content = json;
         }
 
-        async Task Edit(DocTab tab, string script, string summary, AiToolResult result)
+        async Task Edit(DocTab tab, string script, string summary, Dictionary<string, object> args, AiToolResult result)
         {
             if (string.IsNullOrWhiteSpace(script)) throw new ToolTrouble("The script is empty.");
             if (tab.Kind == DocKind.Pdf) throw new ToolTrouble("A PDF cannot be changed by script. Export it to docx and open that instead.");
@@ -365,6 +389,45 @@ namespace NextScan.App
                                       "(the operator can undo it): read the document before trying again.");
             }
             result.Content = Json(new Dictionary<string, object> { { "ok", true }, { "returned", answer } });
+            await AutoLook(tab, args, result, false);
+        }
+
+        void WordApi(string topic, AiToolResult result)
+        {
+            result.Content = StudioWordApi.Answer(topic);
+            result.Display = "Looked up Word's API" + (topic.Trim().Length > 0 ? ": " + topic.Trim() : "");
+        }
+
+        async Task Format(DocTab tab, Dictionary<string, object> args, AiToolResult result)
+        {
+            if (tab.Kind != DocKind.Word) throw new ToolTrouble("format_document changes Word documents. Use edit_document for " + KindName(tab.Kind) + "s.");
+            var picked = new Dictionary<string, object>();
+            foreach (string key in new[] { "target", "set", "replace", "page", "defaults", "styles", "headingNumbers" })
+            {
+                object v;
+                if (args.TryGetValue(key, out v) && v != null)
+                {
+                    // Some models send an object as a string of JSON.
+                    if (v is string && ((string)v).TrimStart().StartsWith("{", StringComparison.Ordinal)) v = ParseLoose((string)v, key);
+                    picked[key] = v;
+                }
+            }
+            if (picked.Count == 0) throw new ToolTrouble("Nothing to change: give set (with target), replace, page, defaults, styles or headingNumbers.");
+            if (picked.ContainsKey("set") && !picked.ContainsKey("target")) picked["target"] = new Dictionary<string, object> { { "all", true } };
+
+            Docs.DocView view = await Ready(tab);
+            string summary = Str(args, "summary");
+            result.Display = (summary.Trim().Length > 0 ? summary.Trim() : "Changed the formatting") + " " + (char)8212 + " " + tab.Title;
+            _space.Select(tab);
+            string answer;
+            try { answer = await view.RunScriptAsync(Script("word-kit.js") + "\nreturn NS.format(" + Json(picked) + ");", true); }
+            catch (Docs.DocsTrouble ex)
+            {
+                string why = ex.Message.Split('\n')[0].Trim();
+                throw new ToolTrouble(why + ". " + ApiHint(why) + "What was done before the problem is in the document (the operator can undo): read it before trying again.");
+            }
+            result.Content = answer;
+            await AutoLook(tab, args, result, false);
         }
 
         async Task Write(DocTab tab, Dictionary<string, object> args, AiToolResult result)
@@ -382,7 +445,7 @@ namespace NextScan.App
             else
             {
                 var picked = new Dictionary<string, object>();
-                foreach (string key in new[] { "mode", "at", "to", "page", "defaults", "blocks" })
+                foreach (string key in new[] { "mode", "at", "to", "page", "defaults", "styles", "blocks" })
                 {
                     object v;
                     if (args.TryGetValue(key, out v) && v != null) picked[key] = v;
@@ -400,8 +463,8 @@ namespace NextScan.App
             object blocks;
             if (!spec.TryGetValue("blocks", out blocks) || !(blocks is object[]) || ((object[])blocks).Length == 0)
             {
-                if (!spec.ContainsKey("page") && !spec.ContainsKey("defaults"))
-                    throw new ToolTrouble("There is nothing to write: give blocks (or page / defaults to change only the page setup).");
+                if (!spec.ContainsKey("page") && !spec.ContainsKey("defaults") && !spec.ContainsKey("styles"))
+                    throw new ToolTrouble("There is nothing to write: give blocks (or page, defaults or styles to change only those).");
                 spec["blocks"] = new object[0];
             }
             if (!spec.ContainsKey("mode")) spec["mode"] = "append";
@@ -423,6 +486,7 @@ namespace NextScan.App
                                       "read it before trying again.");
             }
             result.Content = answer;
+            await AutoLook(tab, args, result, SpecMode(spec) == "append");
         }
 
         /// <summary>
@@ -554,32 +618,199 @@ namespace NextScan.App
             }
         }
 
+        // ---- seeing a document -------------------------------------------------
+
+        /// <summary>What was drawn of a document: some of its pages (or sheets, or slides) and what to tell the model.</summary>
+        class Look
+        {
+            public List<PageShot> Shots = new List<PageShot>();
+            public int Total;
+            public string Notes = "";
+            public double PageWidthMm, PageHeightMm;
+            public string Unit = "page";
+        }
+
+        /// <summary>
+        /// Draws a document as it is now: Word and PDF by the document engine (how they will
+        /// print), Excel and PowerPoint from a copy of the file the editor writes (drawn by
+        /// Sight). Up to <paramref name="need"/> pictures from the first; the caller picks.
+        /// </summary>
+        async Task<Look> Draw(DocTab tab, int width, int need)
+        {
+            Docs.DocView view = await Ready(tab);
+            var look = new Look();
+            switch (tab.Kind)
+            {
+                case DocKind.Word:
+                    {
+                        List<string> pages = await view.RenderPagesAsync(width);
+                        look.Total = pages.Count;
+                        for (int i = 0; i < pages.Count && i < need; i++)
+                            using (var raw = new System.Drawing.Bitmap(pages[i]))
+                                look.Shots.Add(new PageShot { Image = new System.Drawing.Bitmap(raw), Caption = "page " + (i + 1) + " of " + pages.Count });
+                        try
+                        {
+                            var seen = new JavaScriptSerializer().DeserializeObject(await view.RunScriptAsync(Glance, false)) as Dictionary<string, object>;
+                            object mm;
+                            if (seen != null && seen.TryGetValue("page_mm", out mm) && mm is object[] && ((object[])mm).Length == 2)
+                            {
+                                look.PageWidthMm = Convert.ToDouble(((object[])mm)[0], CultureInfo.InvariantCulture);
+                                look.PageHeightMm = Convert.ToDouble(((object[])mm)[1], CultureInfo.InvariantCulture);
+                            }
+                        }
+                        catch { }
+                        if (look.PageWidthMm > 0) foreach (PageShot s in look.Shots) s.PxPerMm = s.Image.Width / look.PageWidthMm;
+                        break;
+                    }
+                case DocKind.Pdf:
+                    {
+                        string source = view.SourcePdf;
+                        var drawn = await Task.Run(() => { int t; List<PageShot> s = Sight.EnginePages(source, width, need, out t); return new Tuple<List<PageShot>, int>(s, t); });
+                        look.Shots = drawn.Item1;
+                        look.Total = drawn.Item2;
+                        break;
+                    }
+                case DocKind.Sheet:
+                case DocKind.Slides:
+                    {
+                        bool sheet = tab.Kind == DocKind.Sheet;
+                        string temp = Path.Combine(Path.GetTempPath(), "NextScan", "sight");
+                        Directory.CreateDirectory(temp);
+                        temp = Path.Combine(temp, Guid.NewGuid().ToString("N") + (sheet ? ".xlsx" : ".pptx"));
+                        try
+                        {
+                            await view.ExportAsync(temp);
+                            var drawn = await Task.Run(() =>
+                            {
+                                int count; string notes;
+                                List<PageShot> s = sheet ? Sight.Sheets(temp, need, 45, out count, out notes) : Sight.Slides(temp, width, need, out count, out notes);
+                                return new Tuple<List<PageShot>, int, string>(s, count, notes);
+                            });
+                            look.Shots = drawn.Item1;
+                            look.Total = sheet ? Math.Max(drawn.Item2, drawn.Item1.Count) : drawn.Item2;
+                            look.Notes = drawn.Item3;
+                        }
+                        finally { try { File.Delete(temp); } catch { } }
+                        look.Unit = sheet ? "sheet picture" : "slide";
+                        break;
+                    }
+            }
+            return look;
+        }
+
+        /// <summary>The picture, and the note that goes with it: which page, how big the page is, what a millimetre is in pixels.</summary>
+        static void Give(AiToolResult result, DocTab tab, Look look, PageShot shot, bool grid)
+        {
+            var note = new StringBuilder();
+            note.Append(tab.Title).Append(", ").Append(shot.Caption);
+            if (tab.Kind == DocKind.Word) note.Append(", as it will print");
+            if (look.PageWidthMm > 0) note.Append(" — page ").Append(Math.Round(look.PageWidthMm)).Append(" × ").Append(Math.Round(look.PageHeightMm)).Append(" mm");
+            if (shot.PxPerMm > 0) note.Append("; 1 mm = ").Append(Math.Round(shot.PxPerMm, 2).ToString(CultureInfo.InvariantCulture)).Append(" px");
+            if (grid) note.Append(" (blue grid over the page: a line every 10 mm from its top-left corner, numbered every 50)");
+            result.Images.Add(Sight.Png(shot.Image));
+            result.ImageNotes.Add(note.ToString());
+        }
+
+        /// <summary>
+        /// What a change looks like: the document's pages, drawn again and handed to the
+        /// model with the result of the change. A model that has only the text of what it
+        /// did cannot tell a page that is right from one that is a mess; looking is how it
+        /// notices. Never fails the change: a page that cannot be drawn is said so.
+        /// </summary>
+        async Task AutoLook(DocTab tab, Dictionary<string, object> args, AiToolResult result, bool fromEnd)
+        {
+            object wants;
+            if (args.TryGetValue("look", out wants) && wants is bool && !(bool)wants) return;
+            try
+            {
+                Look drawn = await Draw(tab, 1100, fromEnd ? 12 : 2);
+                if (drawn.Shots.Count == 0) return;
+                int take = Math.Min(2, drawn.Shots.Count);
+                int start = fromEnd && drawn.Total > take ? Math.Min(drawn.Shots.Count, drawn.Total) - take : 0;
+                for (int i = start; i < start + take && i < drawn.Shots.Count; i++) Give(result, tab, drawn, drawn.Shots[i], false);
+                foreach (PageShot s in drawn.Shots) s.Dispose();
+                string what = tab.Kind == DocKind.Sheet ? "the sheet as it looks" : tab.Kind == DocKind.Slides ? "the slides as they look" : "the pages as they look";
+                result.Content = (result.Content ?? "") + "\n[Attached: " + what + " now (" + take + " of " + Math.Max(drawn.Total, drawn.Shots.Count) +
+                                 "). Look at them before you go on: is it what you meant? If something is off, fix it, then look again. " +
+                                 "look_at_document shows other pages, a mm grid, or a close-up of a region.]";
+            }
+            catch (Exception ex)
+            {
+                result.Content = (result.Content ?? "") + "\n[The pages could not be drawn to check them: " + ex.Message.Split('\n')[0] + "]";
+            }
+        }
+
         async Task LookAtDocument(DocTab tab, Dictionary<string, object> args, AiToolResult result)
         {
-            if (tab.Kind != DocKind.Word) throw new ToolTrouble("Only Word documents can be looked at this way; read_document reads the others.");
-            Docs.DocView view = await Ready(tab);
             result.Display = "Looking at " + tab.Title;
-            List<string> pages = await view.RenderPagesAsync(1100);
-            if (pages.Count == 0) throw new ToolTrouble("The pages could not be drawn.");
 
             int wanted = 0;
             object p;
             if (args.TryGetValue("page", out p) && p != null) wanted = Convert.ToInt32(p, CultureInfo.InvariantCulture);
+            bool grid = Bool(args, "grid");
+
+            // A close-up: a rectangle of the page in millimetres, drawn larger.
+            double[] region = null;
+            object r;
+            if (args.TryGetValue("region", out r) && r is System.Collections.IList && ((System.Collections.IList)r).Count == 4)
+            {
+                region = new double[4];
+                for (int i = 0; i < 4; i++) region[i] = Convert.ToDouble(((System.Collections.IList)r)[i], CultureInfo.InvariantCulture);
+                if (region[2] <= 2 || region[3] <= 2) throw new ToolTrouble("region is [x, y, width, height] in mm from the page's top-left corner, at least a few mm wide.");
+            }
+
+            int width = 1100;
+            if (region != null)
+            {
+                // Big enough that the rectangle fills a picture a model reads well.
+                double pageW = 210;
+                if (tab.Kind == DocKind.Word)
+                {
+                    Look probe = await Draw(tab, 300, 1);
+                    if (probe.PageWidthMm > 0) pageW = probe.PageWidthMm;
+                    foreach (PageShot s in probe.Shots) s.Dispose();
+                }
+                width = (int)Math.Max(1100, Math.Min(3600, pageW * 1400 / region[2]));
+            }
+
+            Look look = await Draw(tab, width, Math.Max(wanted, 2));
+            if (look.Shots.Count == 0) throw new ToolTrouble("Nothing could be drawn of " + tab.Title + (tab.Kind == DocKind.Word ? " (it may be empty)." : "."));
+
             var shown = new List<int>();
             if (wanted > 0)
             {
-                if (wanted > pages.Count) throw new ToolTrouble(tab.Title + " has " + pages.Count + (pages.Count == 1 ? " page." : " pages."));
+                if (wanted > Math.Max(look.Total, look.Shots.Count)) throw new ToolTrouble(tab.Title + " has " + look.Total + " " + look.Unit + (look.Total == 1 ? "." : "s."));
+                if (wanted > look.Shots.Count) throw new ToolTrouble("That " + look.Unit + " could not be drawn.");
                 shown.Add(wanted);
             }
-            else for (int i = 1; i <= Math.Min(2, pages.Count); i++) shown.Add(i);
+            else for (int i = 1; i <= Math.Min(2, look.Shots.Count); i++) shown.Add(i);
 
             foreach (int n in shown)
             {
-                result.Images.Add(File.ReadAllBytes(pages[n - 1]));
-                result.ImageNotes.Add(tab.Title + ", page " + n + " of " + pages.Count + ", as it will print");
+                PageShot shot = look.Shots[n - 1];
+                bool gridDrawn = false;
+                if (grid && shot.PxPerMm > 0) { Sight.Grid(shot.Image, shot.PxPerMm); gridDrawn = true; }
+                if (region != null)
+                {
+                    if (shot.PxPerMm <= 0) throw new ToolTrouble("A region can only be given for a Word page or a slide.");
+                    System.Drawing.Bitmap cut;
+                    try { cut = Sight.Cut(shot.Image, shot.PxPerMm, region[0], region[1], region[2], region[3]); }
+                    catch (ArgumentException ex) { throw new ToolTrouble(ex.Message); }
+                    shot.Image.Dispose();
+                    shot.Image = cut;
+                    shot.Caption += ", close-up of x " + region[0] + ", y " + region[1] + ", " + region[2] + " × " + region[3] + " mm";
+                }
+                Give(result, tab, look, shot, gridDrawn);
             }
-            result.Content = Json(new Dictionary<string, object> { { "pages", pages.Count }, { "shown", shown } });
-            result.Display = "Looked at " + tab.Title + (shown.Count == 1 ? ", page " + shown[0] : "");
+            foreach (PageShot s in look.Shots) s.Dispose();
+
+            result.Content = Json(new Dictionary<string, object>
+            {
+                { look.Unit.Replace(" picture", "") + "s", look.Total }, { "shown", shown },
+                { "page_mm", look.PageWidthMm > 0 ? new object[] { Math.Round(look.PageWidthMm), Math.Round(look.PageHeightMm) } : null },
+                { "note", look.Notes },
+            });
+            result.Display = "Looked at " + tab.Title + (shown.Count == 1 ? ", " + look.Unit + " " + shown[0] : "");
         }
 
         void LookAtScan(Dictionary<string, object> args, AiToolResult result)
@@ -791,6 +1022,12 @@ namespace NextScan.App
         {
             object v;
             return args.TryGetValue(key, out v) && v != null ? Convert.ToString(v, CultureInfo.InvariantCulture) : "";
+        }
+
+        static string SpecMode(Dictionary<string, object> spec)
+        {
+            object v;
+            return spec.TryGetValue("mode", out v) && v != null ? Convert.ToString(v, CultureInfo.InvariantCulture) : "";
         }
 
         static bool Bool(Dictionary<string, object> args, string key)
