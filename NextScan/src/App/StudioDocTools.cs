@@ -361,7 +361,7 @@ namespace NextScan.App
                 // The error, not the editor's call stack: the stack is the same
                 // few frames of NextScan's own plumbing every time.
                 string why = ex.Message.Split('\n')[0].Trim();
-                throw new ToolTrouble(why + ". Whatever the script did before this line is still in the document " +
+                throw new ToolTrouble(why + ". " + ApiHint(why) + "Whatever the script did before this line is still in the document " +
                                       "(the operator can undo it): read the document before trying again.");
             }
             result.Content = Json(new Dictionary<string, object> { { "ok", true }, { "returned", answer } });
@@ -376,8 +376,7 @@ namespace NextScan.App
             string packed = Str(args, "spec");
             if (packed.Trim().Length > 0)
             {
-                try { spec = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(packed) as Dictionary<string, object>; }
-                catch (Exception ex) { throw new ToolTrouble("spec is not valid JSON: " + ex.Message); }
+                spec = ParseLoose(packed, "spec") as Dictionary<string, object>;
                 if (spec == null) throw new ToolTrouble("spec must be a JSON object {mode, page, defaults, blocks}.");
             }
             else
@@ -395,8 +394,7 @@ namespace NextScan.App
                 object listed;
                 if (spec.TryGetValue("blocks", out listed) && listed is string)
                 {
-                    try { spec["blocks"] = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject((string)listed); }
-                    catch (Exception ex) { throw new ToolTrouble("blocks is a string that is not valid JSON: " + ex.Message); }
+                    spec["blocks"] = ParseLoose((string)listed, "blocks");
                 }
             }
             object blocks;
@@ -427,6 +425,104 @@ namespace NextScan.App
             result.Content = answer;
         }
 
+        /// <summary>
+        /// Reads JSON a model wrote, forgivingly. A model writing seven kilobytes
+        /// of it in one go slips: a trailing comma, a raw line break inside a
+        /// string, a closing bracket lost where its output was cut. Those are
+        /// mended, and read again. What still cannot be read is reported with
+        /// the text around the fault, since "expected ':'" and a position
+        /// number tell a model nothing about where in seven kilobytes to look.
+        /// </summary>
+        static object ParseLoose(string text, string what)
+        {
+            var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue, RecursionLimit = 200 };
+            try { return serializer.DeserializeObject(text); }
+            catch (Exception first)
+            {
+                try { return serializer.DeserializeObject(RepairJson(text)); }
+                catch
+                {
+                    string why = first.Message;
+                    int paren = why.IndexOf(" (", StringComparison.Ordinal);
+                    if (paren > 0) why = why.Substring(0, paren);
+                    var at = System.Text.RegularExpressions.Regex.Match(first.Message, @"\((\d+)\)");
+                    int pos;
+                    string near = "";
+                    if (at.Success && int.TryParse(at.Groups[1].Value, out pos) && pos >= 0 && pos <= text.Length)
+                    {
+                        int from = Math.Max(0, pos - 70), to = Math.Min(text.Length, pos + 40);
+                        near = " Near character " + pos + " of " + text.Length + ": ..." + text.Substring(from, pos - from) + " <<HERE>> " + text.Substring(pos, to - pos) + "...";
+                    }
+                    throw new ToolTrouble(what + " is not valid JSON (" + why.TrimEnd('.') + ")." + near.Replace("\r", " ").Replace("\n", " ") +
+                                          " Send the description again with that fixed; keep each string on one line.");
+                }
+            }
+        }
+
+        static string RepairJson(string s)
+        {
+            // An empty table cell written as {""} or {"""}: braces round nothing.
+            // A cell is a string, and an empty one is "".
+            s = System.Text.RegularExpressions.Regex.Replace(s, "\\{\\s*\"{1,3}\\s*\\}", "\"\"");
+            var o = new StringBuilder(s.Length + 16);
+            var closers = new Stack<char>();
+            bool inString = false, escaped = false;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (inString)
+                {
+                    if (escaped) { o.Append(c); escaped = false; continue; }
+                    if (c == '\\') { o.Append(c); escaped = true; continue; }
+                    if (c == '"') { inString = false; o.Append(c); continue; }
+                    if (c == '\n') { o.Append("\\n"); continue; }
+                    if (c == '\r') continue;
+                    if (c == '\t') { o.Append("\\t"); continue; }
+                    o.Append(c);
+                    continue;
+                }
+                if (c == '"') { inString = true; o.Append(c); continue; }
+                if (c == '{') closers.Push('}');
+                else if (c == '[') closers.Push(']');
+                else if ((c == '}' || c == ']') && closers.Count > 0) closers.Pop();
+                else if (c == ',')
+                {
+                    int j = i + 1;
+                    while (j < s.Length && char.IsWhiteSpace(s[j])) j++;
+                    if (j >= s.Length || s[j] == '}' || s[j] == ']') continue;    // a trailing comma
+                }
+                o.Append(c);
+            }
+            if (inString) o.Append('"');
+            string mended = o.ToString().TrimEnd();
+            if (mended.EndsWith(",", StringComparison.Ordinal)) mended = mended.Substring(0, mended.Length - 1);
+            while (closers.Count > 0) mended += closers.Pop();
+            return mended;
+        }
+        /// <summary>
+        /// What to say when a script calls a method that is not there. The
+        /// commonest slips are names from other APIs, and "x is not a function"
+        /// does not tell a model which name is the right one here.
+        /// </summary>
+        static string ApiHint(string why)
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(why ?? "", @"\.?(\w+) is not a function");
+            if (!m.Success) return "";
+            string name = m.Groups[1].Value;
+            string fix;
+            switch (name)
+            {
+                case "GetType": case "getType": case "GetKind": case "GetTypeName": fix = "GetClassType() (returns 'paragraph', 'table', 'run'...)"; break;
+                case "GetChildCount": case "GetCount": case "GetLength": case "GetBlocksCount": fix = "GetElementsCount()"; break;
+                case "GetChildren": case "GetBlocks": case "GetParagraphs": fix = "GetElement(i) with GetElementsCount(), or GetAllParagraphs() / GetAllTables()"; break;
+                case "GetContents": case "GetInnerText": case "GetTextContent": fix = "GetText()"; break;
+                case "AppendChild": case "Append": case "Add": fix = "Push(element) on the document, or AddElement(element) on a paragraph or cell"; break;
+                case "GetRowCount": fix = "GetRowsCount()"; break;
+                case "GetCellCount": fix = "GetCellsCount() on a row"; break;
+                default: fix = "another name (they are case-sensitive: GetClassType, GetElementsCount, GetElement, GetText, Push, AddElement, GetRowsCount, GetCellsCount)"; break;
+            }
+            return name + " does not exist in this editor's API; use " + fix + ". ";
+        }
         static void Inline(object[] blocks)
         {
             if (blocks == null) return;

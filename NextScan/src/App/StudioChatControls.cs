@@ -122,6 +122,94 @@ namespace NextScan.App
             _recalling = true;
         }
 
+        // =====================================================================
+        // What is attached, above the words
+        // =====================================================================
+        readonly List<ChatAttachment> _attachments = new List<ChatAttachment>();
+        AttachTiles.Layout _tray = new AttachTiles.Layout();
+        int _hotTile = -1;
+
+        /// <summary>Most rows of tiles shown; more than fit are folded into a last "+N" tile.</summary>
+        const int TrayRows = 3;
+
+        /// <summary>What is waiting to be sent with the message.</summary>
+        public List<ChatAttachment> Attachments { get { return _attachments; } }
+
+        /// <summary>The cross on a tile was pressed.</summary>
+        public event Action<ChatAttachment> AttachmentRemoved;
+
+        /// <summary>A tile was pressed: open it larger, or in the workspace.</summary>
+        public event Action<ChatAttachment> AttachmentOpened;
+
+        /// <summary>Said under the pointer over a tile: what it is. "" when it leaves.</summary>
+        public event Action<string> AttachmentHint;
+
+        /// <summary>
+        /// Pasting: the caller looks at the clipboard and takes what it can
+        /// attach -- a picture, files copied in Explorer -- and says so by
+        /// returning true. False leaves the paste to the text box.
+        /// </summary>
+        public Func<bool> TryPaste;
+
+        /// <summary>Where the note in the strip starts: to the right of anything the caller has put at its left.</summary>
+        public int FootLeft = 13;
+
+        /// <summary>The tiles have changed (one added, one read, one gone): the plate grows or shrinks to fit them.</summary>
+        public void RefreshTray()
+        {
+            RecomputeTray();
+            Layout_();
+            if (HeightWanted != null) HeightWanted(this, EventArgs.Empty);
+            Invalidate();
+        }
+
+        /// <summary>Anything still being read, which the caller's clock keeps repainting.</summary>
+        public bool AnyReading
+        {
+            get { foreach (ChatAttachment a in _attachments) if (a.State == AttachState.Reading) return true; return false; }
+        }
+
+        int TrayHeight { get { return _attachments.Count == 0 ? 0 : _tray.Height + 8; } }
+
+        void RecomputeTray()
+        {
+            _tray = AttachTiles.Flow(_attachments, 13, Math.Max(AttachTiles.Tile, Width - 26), TrayRows);
+        }
+
+        int TileAt(Point p)
+        {
+            for (int i = 0; i < _tray.Rects.Count; i++)
+            {
+                Rectangle r = _tray.Rects[i];
+                if (!r.IsEmpty && new Rectangle(r.X, r.Y + 8, r.Width, r.Height).Contains(p)) return i;
+            }
+            return -1;
+        }
+
+        Rectangle TileRect(int i) { Rectangle r = _tray.Rects[i]; return new Rectangle(r.X, r.Y + 8, r.Width, r.Height); }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            int i = TileAt(e.Location);
+            if (i != _hotTile)
+            {
+                _hotTile = i;
+                bool live = i >= 0 && i != _tray.MoreIndex;
+                Cursor = i >= 0 ? Cursors.Hand : Cursors.Default;
+                if (AttachmentHint != null)
+                    AttachmentHint(live ? _attachments[i].Name + " — " + (_attachments[i].State == AttachState.Failed ? _attachments[i].Note : _attachments[i].Summary) +
+                                          (_attachments[i].State == AttachState.Ready && _attachments[i].Note.Length > 0 ? ". " + _attachments[i].Note : "") : "");
+                Invalidate();
+            }
+            base.OnMouseMove(e);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (_hotTile != -1) { _hotTile = -1; Invalidate(); if (AttachmentHint != null) AttachmentHint(""); }
+            base.OnMouseLeave(e);
+        }
+
         public NsComposer()
         {
             Size = new Size(260, 96);
@@ -162,6 +250,11 @@ namespace NextScan.App
             _box.KeyDown += delegate (object sender, KeyEventArgs e)
             {
                 if (e.KeyCode == Keys.Escape && Escape != null) { Escape(this, EventArgs.Empty); return; }
+                if (((e.Control && e.KeyCode == Keys.V) || (e.Shift && e.KeyCode == Keys.Insert)) && TryPaste != null && TryPaste())
+                {
+                    e.Handled = true; e.SuppressKeyPress = true;
+                    return;
+                }
                 if (e.KeyCode == Keys.Up && !e.Shift && !e.Control && Recall != null && (_box.TextLength == 0 || _ghost || _recalling))
                 {
                     e.Handled = true; e.SuppressKeyPress = true;
@@ -233,7 +326,7 @@ namespace NextScan.App
             {
                 int line = _box.Font.Height;
                 int lines = _ghost ? 1 : Math.Max(1, Math.Min(5, CountLines()));
-                return lines * line + FootHeight + 20;
+                return lines * line + FootHeight + 20 + TrayHeight;
             }
         }
 
@@ -259,6 +352,7 @@ namespace NextScan.App
         protected override void OnSizeChanged(EventArgs e)
         {
             base.OnSizeChanged(e);
+            RecomputeTray();
             Layout_();
             // The caller owns the strip's contents, so it has to be told. The
             // alternative is the caller remembering to re-place them after every
@@ -278,12 +372,26 @@ namespace NextScan.App
         void Layout_()
         {
             if (_box == null) return;
-            int h = Math.Max(_box.Font.Height, FootTop - 16);
-            _box.SetBounds(13, 11, Math.Max(20, Width - 26), h);
+            int tray = TrayHeight;
+            int h = Math.Max(_box.Font.Height, FootTop - 16 - tray);
+            _box.SetBounds(13, 11 + tray, Math.Max(20, Width - 26), h);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            int tile = TileAt(e.Location);
+            if (tile >= 0)
+            {
+                if (tile == _tray.MoreIndex) { base.OnMouseDown(e); return; }
+                ChatAttachment a = _attachments[tile];
+                if (!a.Restored && AttachTiles.RemoveMark(TileRect(tile)).Contains(e.Location) && (tile == _hotTile || a.State == AttachState.Failed))
+                {
+                    if (AttachmentRemoved != null) AttachmentRemoved(a);
+                }
+                else if (AttachmentOpened != null) AttachmentOpened(a);
+                return;
+            }
+
             // Clicking the plate anywhere that is not a button is clicking the
             // box. Every one of these behaves that way and it is invisible
             // until it is missing.
@@ -318,22 +426,32 @@ namespace NextScan.App
                 using (Pen p = new Pen(edge, _busy ? 1.4f : 1f)) g.DrawPath(p, path);
             }
 
+            // What is attached, in a tray along the top of the plate.
+            for (int i = 0; i < _attachments.Count && i < _tray.Rects.Count; i++)
+            {
+                if (_tray.Rects[i].IsEmpty) continue;
+                Rectangle tile = TileRect(i);
+                if (i == _tray.MoreIndex) AttachTiles.PaintMore(g, tile, Theme.Field, _tray.MoreCount, i == _hotTile);
+                else AttachTiles.Paint(g, tile, Theme.Field, _attachments[i], i == _hotTile, !_attachments[i].Restored);
+            }
+
             if (_footNote.Length == 0) return;
 
-            // Up to whatever the caller put in the strip, and no further.
+            // Up to whatever the caller put in the strip to the right of the
+            // note, and no further.
             int until = Width - 10;
             foreach (Control child in Controls)
             {
-                if (child == _box || !child.Visible) continue;
+                if (child == _box || !child.Visible || child.Left <= FootLeft) continue;
                 if (child.Left < until) until = child.Left;
             }
 
-            int room = until - 22;
+            int room = until - FootLeft - 9;
             if (room < 74) return;
 
             using (Font f = Theme.Ui(7.75f))
                 TextRenderer.DrawText(g, _footNote, f,
-                    new Rectangle(13, FootTop, room, FootHeight), Theme.TextFaint,
+                    new Rectangle(FootLeft, FootTop, room, FootHeight), Theme.TextFaint,
                     TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
         }
     }

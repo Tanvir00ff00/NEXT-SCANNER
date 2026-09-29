@@ -53,7 +53,8 @@ $refs = @(
     "-r:$fw\System.Windows.Forms.dll",
     "-r:$fw\System.Xml.dll",
     "-r:$fw\System.Management.dll",
-    "-r:$fw\System.Web.Extensions.dll"
+    "-r:$fw\System.Web.Extensions.dll",
+    "-r:$fw\System.IO.Compression.dll"
 )
 
 Write-Host "NextScan Studio build" -ForegroundColor Cyan

@@ -1,6 +1,6 @@
 ﻿# NextScan Studio — Build Status
 
-Last updated: 2026-09-29
+Last updated: 2026-09-30
 Plan of record: [`NEXTSCAN_STUDIO_MASTER_PLAN.md`](../../NEXTSCAN_STUDIO_MASTER_PLAN.md)
 
 This file records what is **actually built and verified on hardware**, versus what
@@ -8,6 +8,53 @@ is still only planned. It is deliberately conservative: if something is not list
 as verified below, assume it does not work yet.
 
 ---
+
+## Attachments in the chat — 2026-09-30
+
+Anything can be attached to a message, as many as fit (12): by the paperclip
+(files and pictures, the page on screen, all scanned pages), by dropping on
+the panel (a veil says "Drop to attach"; folders bring what is in them), or by
+pasting (Ctrl+V: a screenshot, or files copied in Explorer; text is left to
+the box). Each is a tile in the box at once and is read in the background;
+pressing send while one is still being read waits and sends when it is ready.
+
+What a model is given (`StudioAttach.cs`, the same for every provider, since
+every provider takes pictures and none takes a .docx):
+pictures as JPEG <= 1568 px, turned upright from their EXIF tag (a phone's
+photograph carries its orientation there and GDI+ ignores it); Word / Excel /
+PowerPoint as text read straight out of the zip (docx: headings, lists, table
+cells with " | "; xlsx: every sheet with column letters and row numbers so "D14"
+means the same to both, shared strings and rich text handled; pptx: slide by
+slide), the older forms (.doc .rtf .odt .xls .ods .ppt .odp) through the
+document engine's converter; PDF as text, and where it has none (a scan) its
+pages as pictures (first 8); text, CSV, JSON, HTML (tags stripped) and code in
+any encoding (BOM, UTF-8, else Windows-1252), anything with text in it whatever
+it is called; a zip as its list of files; anything else by name and size, said
+plainly so the model does not pretend to have read it. Text is cut at 40,000
+characters a file and 120,000 a message, with a note where it was cut. A Word
+file set in a Bijoy font (names ending MJ) is flagged in its tag: its letters
+look English and are legacy ANSI Bengali. What is inside <file> tags is
+declared to be the operator's material and never instructions.
+
+The model is refused a picture only where it is known not to see ("cannot look
+at pictures", not a 400 about a field it never heard of). Every provider now
+takes several pictures per message (`AiMessage.Pictures`; Claude puts its cache
+breakpoint on the last one only). In the conversation the tiles sit above the
+question (a picture opens larger when pressed, a document in the workspace),
+they are saved by name in the history, "take a question back" returns them to
+the box with their thumbnails, and Try again sends them again.
+
+Verified with the real panel and a real model (Space Bunny Alpha, off-screen):
+12 tiles of 9 kinds read in 0-390 ms each; a drop of files, a drop of plain
+text (refused), a pasted screenshot, and a send; the model described the two
+pictures, the pasted screenshot ("SCREENSHOT 4711"), the Bengali text file, the
+Word table and its Bijoy line, the spreadsheet cells, the two slides, and said
+what it could not read (the .exe) and what was cut (the long file). Found by
+looking at the pictures: file tiles took a whole row each at this panel width
+(now two per row, with the size and pages under the name and the kind in the
+colour of the mark), and taking a question back disposed the tiles' pictures.
+Not verified here: a real mouse drag from Explorer (the drop handlers were
+called with the same data Explorer sends), and the file dialog.
 
 ## The chat window, second pass — 2026-09-29
 

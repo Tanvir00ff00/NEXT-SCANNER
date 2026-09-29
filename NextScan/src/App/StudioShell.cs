@@ -986,6 +986,7 @@ namespace NextScan.App
                     finally { _assistantSpeaking = false; }
                 };
                 _aiPanel.AppState = AssistantState;
+                _aiPanel.SessionPages = delegate { return _film == null ? null : _film.AllImages(); };
                 _aiPanel.ChoiceChanged += delegate
                 {
                     _settings.AiProvider = _aiPanel.ProviderId;
@@ -4683,6 +4684,9 @@ namespace NextScan.App
             };
             _aiPanel.ToolsSource = tools.Tools;
             _aiPanel.ToolRunner = tools.Run;
+
+            // A document attached to a message opens in the workspace when its tile is pressed.
+            _aiPanel.OpenDocument = delegate (string path) { if (_workspace != null) _workspace.Open(path); };
         }
 
         /// <summary>

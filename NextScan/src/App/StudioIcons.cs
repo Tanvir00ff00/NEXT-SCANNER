@@ -90,6 +90,7 @@ namespace NextScan.App
         public const string Layers = "layers";
         public const string Trash = "trash";
         public const string Sparkle = "sparkle";
+        public const string Attach = "attach";
         public const string Retry = "retry";
         public const string Edit = "edit";
         public const string ArrowDown = "arrowdown";
@@ -600,6 +601,23 @@ namespace NextScan.App
                                                   new PointF(17f, 20.5f), new PointF(18f, 6.5f) });
                     g.DrawLine(p, 10.5f, 10f, 10.5f, 17f);
                     g.DrawLine(p, 13.5f, 10f, 13.5f, 17f);
+                    break;
+
+                case Attach:
+                    {
+                        // A paperclip: long straight runs joined by three half-circles.
+                        using (var clip = new GraphicsPath())
+                        {
+                            clip.AddLine(21.44f, 11.05f, 12.25f, 20.24f);
+                            clip.AddArc(2.0f, 9.99f, 12.0f, 12.0f, 45f, 180f);
+                            clip.AddLine(3.76f, 11.75f, 12.95f, 2.56f);
+                            clip.AddArc(11.78f, 3.39f, 8.0f, 8.0f, 225f, 180f);
+                            clip.AddLine(18.61f, 8.22f, 9.41f, 17.41f);
+                            clip.AddArc(6.0f, 14.0f, 4.0f, 4.0f, 45f, 180f);
+                            clip.AddLine(6.58f, 14.58f, 15.07f, 6.1f);
+                            g.DrawPath(p, clip);
+                        }
+                    }
                     break;
 
                 case Retry:

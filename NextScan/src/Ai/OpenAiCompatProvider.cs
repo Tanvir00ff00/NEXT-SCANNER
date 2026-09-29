@@ -338,16 +338,15 @@ namespace NextScan.Ai
                     continue;
                 }
 
-                if (m.Image == null) { messages.Add(ChatMessage.CreateUserMessage(m.Text ?? "")); continue; }
+                List<AiPicture> pictures = m.AllPictures();
+                if (pictures.Count == 0) { messages.Add(ChatMessage.CreateUserMessage(m.Text ?? "")); continue; }
 
-                // Sent as the API specifies. Many of these servers accept
-                // images and many do not; a server that cannot says so with an
-                // error naming the field, which is a better answer than
-                // quietly sending text and pretending the page was read.
-                messages.Add(ChatMessage.CreateUserMessage(
-                    ChatMessageContentPart.CreateImagePart(
-                        BinaryData.FromBytes(m.Image), m.ImageMediaType ?? "image/jpeg", null),
-                    ChatMessageContentPart.CreateTextPart(m.Text ?? "")));
+                // Every picture, in order, then the words about them.
+                var parts = new List<ChatMessageContentPart>();
+                foreach (AiPicture p in pictures)
+                    parts.Add(ChatMessageContentPart.CreateImagePart(BinaryData.FromBytes(p.Bytes), p.MediaType ?? "image/jpeg", null));
+                parts.Add(ChatMessageContentPart.CreateTextPart(m.Text ?? ""));
+                messages.Add(ChatMessage.CreateUserMessage(parts));
             }
 
             var options = new ChatCompletionOptions { ReasoningEffortLevel = EffortFor(request.Thinking) };

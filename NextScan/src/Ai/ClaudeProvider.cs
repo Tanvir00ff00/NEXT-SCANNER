@@ -270,23 +270,26 @@ namespace NextScan.Ai
                     if (r.IsError) w.WriteBoolean("is_error", true);
                 }))));
 
-            if (m.Image != null)
+            List<AiPicture> pictures = m.AllPictures();
+            for (int at = 0; at < pictures.Count; at++)
             {
+                AiPicture given = pictures[at];
                 // Image first, then the question. Not a style choice: the page
                 // is the stable part of the prefix and the question is not, and
                 // a cache breakpoint can only be placed after everything it
                 // covers.
                 var picture = new ImageBlockParam(new Base64ImageSource
                 {
-                    Data = Convert.ToBase64String(m.Image),
-                    MediaType = MediaFor(m.ImageMediaType),
+                    Data = Convert.ToBase64String(given.Bytes),
+                    MediaType = MediaFor(given.MediaType),
                 });
                 // The whole point of sending the page once. Without this the
                 // same scan is re-read at full price on every turn of the
                 // conversation, and the only sign is an input count that never
-                // drops. Not on pictures a tool showed: a request may carry
-                // four breakpoints, and a rebuild looks at many pages.
-                if (!m.Attachment) picture = picture with { CacheControl = new CacheControlEphemeral() };
+                // drops. On the last picture of the turn only, which covers the
+                // ones before it, and not on pictures a tool showed: a request
+                // may carry four breakpoints, and a rebuild looks at many pages.
+                if (!m.Attachment && at == pictures.Count - 1) picture = picture with { CacheControl = new CacheControlEphemeral() };
                 blocks.Add(new ContentBlockParam(picture, null));
             }
 

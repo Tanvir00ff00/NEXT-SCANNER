@@ -1341,8 +1341,10 @@ namespace NextScan.App
             }
 
             Color colour = _state == StepState.Failed ? Theme.Danger : _state == StepState.Running ? Theme.Text : Theme.TextDim;
+            // One line, always: without SingleLine a long label wrapped, and its
+            // second line was drawn over the reason underneath it.
             TextRenderer.DrawText(g, _label, Font, new Rectangle(24, 0, Math.Max(10, Width - 26 - right), 22), colour,
-                                  TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                                  TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
             if (_detail.Length > 0)
                 TextRenderer.DrawText(g, _detail, Font, new Rectangle(24, 22, Width - 28, Height - 22), Theme.TextFaint,
                                       TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);

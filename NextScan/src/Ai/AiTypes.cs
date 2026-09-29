@@ -24,6 +24,14 @@ namespace NextScan.Ai
     /// </summary>
     public enum ThinkingLevel { Low, Medium, High, Max }
 
+    /// <summary>One picture sent to a model: its bytes (JPEG or PNG) and what kind they are.</summary>
+    public class AiPicture
+    {
+        public byte[] Bytes;
+        public string MediaType = "image/jpeg";
+        public string Name = "";
+    }
+
     public class AiMessage
     {
         public AiRole Role;
@@ -32,6 +40,22 @@ namespace NextScan.Ai
         /// <summary>A page to look at, as PNG or JPEG bytes. Null for text-only turns.</summary>
         public byte[] Image;
         public string ImageMediaType = "image/png";
+
+        /// <summary>
+        /// More pictures on the same turn: what the operator attached -- a
+        /// screenshot, photographs, the pages of a scanned PDF. They go after
+        /// <see cref="Image"/>, in this order, ahead of the text.
+        /// </summary>
+        public List<AiPicture> Pictures = new List<AiPicture>();
+
+        /// <summary>Every picture on this turn, <see cref="Image"/> first.</summary>
+        public List<AiPicture> AllPictures()
+        {
+            var all = new List<AiPicture>();
+            if (Image != null) all.Add(new AiPicture { Bytes = Image, MediaType = ImageMediaType ?? "image/jpeg" });
+            all.AddRange(Pictures);
+            return all;
+        }
 
         /// <summary>What the model asked the application to do, on an assistant turn.</summary>
         public List<AiToolCall> ToolCalls = new List<AiToolCall>();

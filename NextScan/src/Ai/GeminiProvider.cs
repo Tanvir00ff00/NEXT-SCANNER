@@ -148,13 +148,13 @@ namespace NextScan.Ai
                         },
                     });
 
-                if (m.Image != null)
+                foreach (AiPicture given in m.AllPictures())
                     parts.Add(new Google.GenAI.Types.Part
                     {
                         InlineData = new Google.GenAI.Types.Blob
                         {
-                            Data = m.Image,
-                            MimeType = m.ImageMediaType ?? "image/jpeg",
+                            Data = given.Bytes,
+                            MimeType = given.MediaType ?? "image/jpeg",
                         },
                     });
                 if (!string.IsNullOrEmpty(m.Text) || parts.Count == 0)
