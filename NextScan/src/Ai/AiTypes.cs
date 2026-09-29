@@ -49,6 +49,12 @@ namespace NextScan.Ai
         public object Raw;
         public string RawProvider = "";
 
+        /// <summary>
+        /// Made by the application rather than said by anyone -- pictures a
+        /// tool showed the model. Sent, but never shown or kept as a turn.
+        /// </summary>
+        public bool Attachment;
+
         public static AiMessage FromUser(string text) { return new AiMessage { Role = AiRole.User, Text = text }; }
         public static AiMessage FromAssistant(string text) { return new AiMessage { Role = AiRole.Assistant, Text = text }; }
     }
@@ -84,6 +90,15 @@ namespace NextScan.Ai
 
         /// <summary>What the operator is shown in the transcript. Never sent to the model.</summary>
         public string Display = "";
+
+        /// <summary>
+        /// Pictures the tool is showing the model (a page as it will print, a
+        /// scan), JPEG or PNG bytes with <see cref="ImageNotes"/> naming each.
+        /// A tool result is text in two of the three APIs, so these go to the
+        /// model as a message of their own right after the results.
+        /// </summary>
+        public List<byte[]> Images = new List<byte[]>();
+        public List<string> ImageNotes = new List<string>();
     }
 
     /// <summary>
@@ -117,6 +132,9 @@ namespace NextScan.Ai
         /// <summary>The turn as the provider sent it; see <see cref="AiMessage.Raw"/>.</summary>
         public object Raw;
         public string RawProvider = "";
+
+        /// <summary>What the model thought before answering, where the provider shows it. "" otherwise.</summary>
+        public string Thinking = "";
 
         /// <summary>Set when the turn ended badly. Null on success.</summary>
         public string Trouble;
@@ -264,6 +282,23 @@ namespace NextScan.Ai
 
         /// <summary>What the model may ask the application to do. Empty for a plain conversation.</summary>
         public List<AiTool> Tools = new List<AiTool>();
+
+        /// <summary>
+        /// Raised with each piece of the model's thinking as it streams, where
+        /// the provider shows it (Claude's summarised thinking, Gemini's thought
+        /// summaries, a compatible server's reasoning_content). On a worker
+        /// thread, like the text. Null when nobody is watching.
+        /// </summary>
+        public AiTextArrived OnThinking;
+
+        /// <summary>
+        /// Raised as a tool call's arguments stream in: the tool's name and how
+        /// many characters of arguments have come so far. A whole document
+        /// described in one call takes the model half a minute to write, and
+        /// without this the panel sits silent through it. Worker thread; may
+        /// be null.
+        /// </summary>
+        public Action<string, int> OnToolProgress;
     }
 
     /// <summary>

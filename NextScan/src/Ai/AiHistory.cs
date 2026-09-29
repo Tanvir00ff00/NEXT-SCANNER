@@ -12,6 +12,11 @@
 // machine than a folder of text about them. A conversation reopened therefore
 // carries what was said and not what was looked at, and the panel says so.
 //
+// Version 2 keeps what the transcript showed as well as what was said: the
+// thinking before an answer (and how long it took) and each step taken, so a
+// conversation reopened looks the way it did. Only what was said goes back to
+// the model; the rest is for the operator's eyes.
+//
 // The format is length-prefixed rather than delimited. A model's reply contains
 // blank lines, dashes and anything else that would otherwise have to be escaped,
 // and a separator that appears inside a message is a file that reads back as a
@@ -25,6 +30,19 @@ using System.Text;
 
 namespace NextScan.Ai
 {
+    /// <summary>One thing the transcript showed.</summary>
+    public class AiChatItem
+    {
+        /// <summary>user, assistant, thought, step, failed (a step that failed), note.</summary>
+        public string Kind = "";
+        public string Text = "";
+
+        /// <summary>How long a thought took, in seconds. 0 otherwise.</summary>
+        public double Seconds;
+
+        public bool Said { get { return Kind == "user" || Kind == "assistant"; } }
+    }
+
     public class AiChat
     {
         public string Id = "";
@@ -38,12 +56,20 @@ namespace NextScan.Ai
         /// <summary>The first thing the operator asked, for the menu.</summary>
         public string Title = "";
 
+        /// <summary>How many turns the operator took.</summary>
+        public int Turns;
+
+        /// <summary>What was said, for the model: the user and assistant turns.</summary>
         public List<AiMessage> Messages = new List<AiMessage>();
+
+        /// <summary>Everything the transcript showed, in order.</summary>
+        public List<AiChatItem> Items = new List<AiChatItem>();
     }
 
     public static class AiHistory
     {
-        const string Mark = "nextscan-chat 1";
+        const string Mark1 = "nextscan-chat 1";
+        const string Mark2 = "nextscan-chat 2";
 
         public static string Folder
         {
@@ -73,6 +99,16 @@ namespace NextScan.Ai
             return Path.Combine(Folder, id + ".chat");
         }
 
+        /// <summary>The old form: only what was said.</summary>
+        public static void Save(string id, IList<AiMessage> messages, string provider, string model, string page)
+        {
+            var items = new List<AiChatItem>();
+            if (messages != null)
+                foreach (AiMessage m in messages)
+                    items.Add(new AiChatItem { Kind = m.Role == AiRole.User ? "user" : "assistant", Text = m.Text ?? "" });
+            Save(id, items, provider, model, page, "");
+        }
+
         /// <summary>
         /// Writes the conversation, replacing whatever was there.
         ///
@@ -81,25 +117,28 @@ namespace NextScan.Ai
         /// the machine does, and a history written at the end is a history that
         /// is never written.
         /// </summary>
-        public static void Save(string id, IList<AiMessage> messages, string provider, string model, string page)
+        public static void Save(string id, IList<AiChatItem> items, string provider, string model, string page, string title)
         {
-            if (string.IsNullOrEmpty(id) || messages == null || messages.Count == 0) return;
+            if (string.IsNullOrEmpty(id) || items == null || items.Count == 0) return;
 
             try
             {
                 Directory.CreateDirectory(Folder);
 
                 var text = new StringBuilder();
-                text.Append(Mark).Append('\n');
+                text.Append(Mark2).Append('\n');
                 text.Append("when=").Append(DateTime.Now.ToString("o", CultureInfo.InvariantCulture)).Append('\n');
                 text.Append("provider=").Append(One(provider)).Append('\n');
                 text.Append("model=").Append(One(model)).Append('\n');
                 text.Append("page=").Append(One(page)).Append('\n');
+                if (!string.IsNullOrEmpty(title)) text.Append("title=").Append(One(title)).Append('\n');
 
-                foreach (AiMessage message in messages)
+                foreach (AiChatItem item in items)
                 {
-                    string body = message.Text ?? "";
-                    text.Append(message.Role == AiRole.User ? "user " : "assistant ");
+                    string body = item.Text ?? "";
+                    string kind = item.Kind;
+                    if (kind == "thought") kind += ":" + item.Seconds.ToString("0.#", CultureInfo.InvariantCulture);
+                    text.Append(kind).Append(' ');
                     text.Append(body.Length.ToString(CultureInfo.InvariantCulture)).Append('\n');
                     text.Append(body).Append('\n');
                 }
@@ -117,7 +156,7 @@ namespace NextScan.Ai
 
         /// <summary>
         /// The most recent conversations, newest first, without their messages.
-        /// The menu needs a title and a date and nothing else.
+        /// The list needs a title, a date and the model, and nothing else.
         /// </summary>
         public static IList<AiChat> Recent(int most)
         {
@@ -148,6 +187,16 @@ namespace NextScan.Ai
             catch { return null; }
         }
 
+        /// <summary>Gives a conversation a name of the operator's choosing.</summary>
+        public static void Rename(string id, string title)
+        {
+            AiChat chat = Load(id);
+            if (chat == null) return;
+            DateTime when = chat.When;
+            Save(id, chat.Items, chat.Provider, chat.Model, chat.Page, title);
+            try { if (when != default(DateTime)) File.SetLastWriteTime(PathFor(id), when); } catch { }
+        }
+
         public static void Forget(string id)
         {
             try { File.Delete(PathFor(id)); } catch { }
@@ -175,11 +224,14 @@ namespace NextScan.Ai
             try { text = File.ReadAllText(file, Encoding.UTF8); }
             catch { return null; }
 
-            if (!text.StartsWith(Mark, StringComparison.Ordinal)) return null;
+            string mark = text.StartsWith(Mark2, StringComparison.Ordinal) ? Mark2
+                        : text.StartsWith(Mark1, StringComparison.Ordinal) ? Mark1 : null;
+            if (mark == null) return null;
 
             var chat = new AiChat { Id = Path.GetFileNameWithoutExtension(file) };
-            int at = Mark.Length;
+            int at = mark.Length;
             if (at < text.Length && text[at] == '\n') at++;
+            string title = "";
 
             // ---- headers ----
             while (at < text.Length)
@@ -207,10 +259,11 @@ namespace NextScan.Ai
                     case "provider": chat.Provider = value; break;
                     case "model": chat.Model = value; break;
                     case "page": chat.Page = value; break;
+                    case "title": title = value; break;
                 }
             }
 
-            // ---- messages ----
+            // ---- items ----
             while (at < text.Length)
             {
                 int line = text.IndexOf('\n', at);
@@ -231,25 +284,40 @@ namespace NextScan.Ai
                 at += length;
                 if (at < text.Length && text[at] == '\n') at++;
 
-                bool mine = row.Substring(0, space) == "user";
-                if (chat.Title.Length == 0 && mine) chat.Title = Line(body);
+                string kind = row.Substring(0, space);
+                var item = new AiChatItem { Kind = kind, Text = body };
+                int colon = kind.IndexOf(':');
+                if (colon > 0)
+                {
+                    item.Kind = kind.Substring(0, colon);
+                    double.TryParse(kind.Substring(colon + 1), NumberStyles.Float, CultureInfo.InvariantCulture, out item.Seconds);
+                }
+
+                if (item.Kind == "user")
+                {
+                    chat.Turns++;
+                    if (chat.Title.Length == 0) chat.Title = Line(body);
+                }
 
                 if (withMessages)
-                    chat.Messages.Add(mine ? AiMessage.FromUser(body) : AiMessage.FromAssistant(body));
-                else if (chat.Title.Length > 0)
-                    break;                           // the menu has what it needs
+                {
+                    chat.Items.Add(item);
+                    if (item.Kind == "user") chat.Messages.Add(AiMessage.FromUser(body));
+                    else if (item.Kind == "assistant") chat.Messages.Add(AiMessage.FromAssistant(body));
+                }
             }
 
+            if (title.Length > 0) chat.Title = title;
             if (chat.Title.Length == 0) chat.Title = "(no question)";
             return chat;
         }
 
-        /// <summary>The first line of a message, short enough for a menu row.</summary>
+        /// <summary>The first line of a message, short enough for a list row.</summary>
         static string Line(string text)
         {
             string one = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
             while (one.IndexOf("  ", StringComparison.Ordinal) >= 0) one = one.Replace("  ", " ");
-            return one.Length <= 52 ? one : one.Substring(0, 51).TrimEnd() + "…";
+            return one.Length <= 60 ? one : one.Substring(0, 59).TrimEnd() + "…";
         }
     }
 }

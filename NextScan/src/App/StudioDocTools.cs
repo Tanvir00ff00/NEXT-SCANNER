@@ -87,11 +87,28 @@ namespace NextScan.App
                      "{\"type\":\"object\",\"properties\":{\"kind\":{\"type\":\"string\",\"enum\":[\"document\",\"workbook\",\"presentation\"],\"description\":\"document = Word, workbook = Excel, presentation = PowerPoint.\"}},\"required\":[\"kind\"]}"),
 
                 Tool("read_document",
-                     "Reads a document's content. Word: each block in order (paragraphs with style, fonts and text; tables as rows of cells), optionally only blocks from..to. Excel: each sheet's used cells with values and formulas, optionally one sheet and range. PowerPoint: each slide's text. PDF: the text of the file. Read before you change anything, and again afterwards to check.",
-                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"from\":{\"type\":\"integer\",\"description\":\"Word: first block index.\"},\"to\":{\"type\":\"integer\",\"description\":\"Word: last block index.\"},\"sheet\":{\"type\":\"string\",\"description\":\"Excel: sheet name.\"},\"range\":{\"type\":\"string\",\"description\":\"Excel: an address such as A1:F30.\"}}}"),
+                     "Reads a document's content. Word: each block in order with its index (paragraphs with style, fonts and text; tables as rows of cells), optionally only blocks from..to, and whether the document is empty. With detail='layout' a Word document is read with its formatting in exactly the form write_document takes (page size and margins in mm, alignment, spacing in pt, indents and tab stops in mm, runs with font, size, bold, colour; tables with column widths in mm, spans, merged cells, borders, fills) -- use that before changing the look of anything, and to check your work. Excel: each sheet's used cells with values and formulas, optionally one sheet and range. PowerPoint: each slide's text. PDF: the text of the file. Read before you change anything, and again afterwards to check.",
+                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"detail\":{\"type\":\"string\",\"enum\":[\"text\",\"layout\"],\"description\":\"Word: text (default) or layout.\"},\"from\":{\"type\":\"integer\",\"description\":\"Word: first block index.\"},\"to\":{\"type\":\"integer\",\"description\":\"Word: last block index.\"},\"sheet\":{\"type\":\"string\",\"description\":\"Excel: sheet name.\"},\"range\":{\"type\":\"string\",\"description\":\"Excel: an address such as A1:F30.\"}}}"),
+
+                Tool("write_document", WriteHelp,
+                     "{\"type\":\"object\",\"properties\":{" + doc + "," +
+                     "\"mode\":{\"type\":\"string\",\"enum\":[\"replace\",\"append\",\"insert\",\"replace_range\"],\"description\":\"replace: the whole document becomes these blocks. append: after the last block. insert: before block index at. replace_range: blocks at..to are replaced.\"}," +
+                     "\"at\":{\"type\":\"integer\",\"description\":\"insert / replace_range: the first block index.\"}," +
+                     "\"to\":{\"type\":\"integer\",\"description\":\"replace_range: the last block index replaced.\"}," +
+                     "\"page\":{\"type\":\"object\",\"description\":\"Optional page setup: {size: 'A4'|'Letter'|'Legal'|'A5'|[width_mm, height_mm], orientation: 'portrait'|'landscape', margins: [top, right, bottom, left] mm}.\",\"properties\":{\"size\":{\"type\":\"string\"},\"orientation\":{\"type\":\"string\"},\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"},\"margins\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}}}}," +
+                     "\"defaults\":{\"type\":\"object\",\"description\":\"Optional body text for the whole document: {font, size (pt), after (pt), line (multiple)}.\",\"properties\":{\"font\":{\"type\":\"string\"},\"size\":{\"type\":\"number\"},\"after\":{\"type\":\"number\"},\"before\":{\"type\":\"number\"},\"line\":{\"type\":\"number\"}}}," +
+                     "\"blocks\":{\"type\":\"array\",\"description\":\"The blocks, in order, as described above.\",\"items\":{\"type\":\"object\",\"additionalProperties\":true," +
+                     "\"properties\":{\"type\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"},\"runs\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":true}}," +
+                     "\"columns\":{\"type\":\"array\",\"items\":{\"type\":\"number\"}},\"rows\":{\"type\":\"array\",\"items\":{}}}}}," +
+                     "\"spec\":{\"type\":\"string\",\"description\":\"Instead of the fields above: the whole description as one JSON string {mode, at, to, page, defaults, blocks}. Use this if your blocks would otherwise lose fields.\"}," +
+                     "\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this writes, in their language.\"}},\"required\":[\"summary\"]}"),
+
+                Tool("look_at_document",
+                     "Shows you a Word document's pages as pictures, laid out exactly as they will print. Use it to check a document you made or changed looks right -- especially one copied from a scan, side by side with look_at_scan -- and fix what differs. Returns the page count; the pictures follow.",
+                     "{\"type\":\"object\",\"properties\":{" + doc + ",\"page\":{\"type\":\"integer\",\"description\":\"Which page, from 1. Leave out for the first two.\"}}}"),
 
                 Tool("edit_document",
-                     "Changes a document by running a script for ONLYOFFICE's document API (the Office JavaScript API of ONLYOFFICE Document Builder and plugins). The script is the body of a function given Api; whatever it returns comes back to you. The change is shown at once and can be undone by the operator. Not available for PDF.",
+                     "Changes a document by running a script for ONLYOFFICE's document API (the Office JavaScript API of ONLYOFFICE Document Builder and plugins). The script is the body of a function given Api; whatever it returns comes back to you. The change is shown at once and can be undone by the operator. Not available for PDF. In Word scripts the helpers NS are there too: NS.paragraph(spec), NS.table(spec) and NS.textbox(spec) make blocks from the same specs write_document takes, NS.fillParagraph(existingParagraph, spec), NS.page({...}), and NS.tw(mm) / NS.ptw(pt) convert to twips. Prefer write_document for new content and for layout; use scripts for targeted changes (find and replace text, format one run, delete a block).",
                      "{\"type\":\"object\",\"properties\":{" + doc + ",\"script\":{\"type\":\"string\",\"description\":\"JavaScript using Api, e.g. var d = Api.GetDocument(); var p = Api.CreateParagraph(); p.AddText('Hello'); d.Push(p); return d.GetElementsCount();\"},\"summary\":{\"type\":\"string\",\"description\":\"A few words for the operator saying what this changes, in their language.\"}},\"required\":[\"script\",\"summary\"]}"),
 
                 Tool("get_selection",
@@ -117,8 +134,62 @@ namespace NextScan.App
                 Tool("pdf_from_scanned_pages",
                      "Makes a PDF of the pages scanned in this session, saves it in the output folder and opens it in a new tab. Returns its id and path.",
                      "{\"type\":\"object\",\"properties\":{}}"),
+
+                Tool("look_at_scan",
+                     "Shows you a scanned page as a picture: one of the pages scanned in this session (page, from 1), or with no page the one the operator has selected or, failing that, the preview on the scanner glass. Use it to read or copy a scanned document -- to type out handwriting, or to rebuild a form as a Word document -- and to compare your document with it. Says how many pages there are; the picture follows.",
+                     "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, from 1. Leave out for the selected page or the preview.\"}}}"),
             };
         }
+
+        // ---- what the shell hands over about scans ---------------------------
+
+        /// <summary>How many pages this session has scanned.</summary>
+        public Func<int> ScanCount;
+
+        /// <summary>A scanned page by index from 0.</summary>
+        public Func<int, NextScan.Core.RawImage> ScanPage;
+
+        /// <summary>The page the operator is looking at (selected, or the preview), with a name for it; null when there is none.</summary>
+        public Func<Tuple<NextScan.Core.RawImage, string>> CurrentScan;
+
+        /// <summary>
+        /// The whole vocabulary of write_document, in the tool's own
+        /// description so every provider sees it the same way. Kept in step
+        /// with scripts\word-kit.js, which is what reads it.
+        /// </summary>
+        const string WriteHelp =
+            "Writes Word content from a description of it: the way to make a new document, rebuild a scanned one, or " +
+            "replace part of one. Exact and repeatable -- measurements are in the units on a ruler, and the editor's " +
+            "own units are worked out for you. Lengths in mm, font sizes and spacing in pt, colours '#RRGGBB'.\n" +
+            "Blocks (a plain string is a paragraph):\n" +
+            "- paragraph: {type:'paragraph', text, align:'left'|'center'|'right'|'justify', before, after (pt), " +
+            "line: 1.0 (multiple) | {exact: pt} | {atLeast: pt}, indent: {left, right, first, hanging} (mm), " +
+            "tabs: [{pos (mm), align:'left'|'right'|'center'|'decimal'}], border: {top|bottom|left|right: size_pt | " +
+            "{size, style:'single'|'dotted'|'dashed'|'double', color}}, fill, style:'Heading 1', keepNext, pageBreakBefore, " +
+            "plus text formatting for the whole paragraph: font, size, bold, italic, underline, strike, caps, smallCaps, " +
+            "spacing (pt between letters), color, highlight. Mixed formatting: runs: [{text, bold, size, font, color, ...}] " +
+            "instead of text. '\\t' in text is a tab, '\\n' a line break.\n" +
+            "- heading: {type:'heading', level: 1-3, text}.\n" +
+            "- table: {type:'table', columns: [mm, mm, ...] (the exact width of each column), rows: [{cells: [...], " +
+            "height (mm, at least), exact: true (height fixed), fill, align, valign} or just [cell, ...]], borders: " +
+            "'all' (default) | 'none' | 'outer' | 'inner' | 'horizontal' | {top, bottom, left, right, insideH, insideV: " +
+            "true|false|size_pt}, border: {size (pt, default 0.5), style, color} for the lines, padding: mm | [top, right, " +
+            "bottom, left], align:'left'|'center'|'right', indent (mm), cellAlign, valign, and text formatting for the " +
+            "whole table (font, size, bold...)}. A cell is a string, or {text | runs | paragraphs: [paragraph, ...], " +
+            "span (columns it covers), rowspan (rows it covers), align, valign:'top'|'center'|'bottom', fill, border: " +
+            "size_pt | {top, bottom, left, right: size_pt | 'none' | {size, style, color}}, and text formatting}. A cell " +
+            "covered by a rowspan from above is left out of its row. Tables are the way to put things side by side: a " +
+            "form's label and its dotted line, a heading at the left and a number at the right, a row of boxes to write " +
+            "digits in (narrow columns, each cell border: 0.5).\n" +
+            "- image: {type:'image', src: a file path or data: URL, width, height (mm), align, or x, y (mm from the " +
+            "page's top-left corner) to float it}.\n" +
+            "- textbox: {type:'textbox', x, y, width, height (mm), text | runs | paragraphs, border: size_pt | 'none', " +
+            "fill, padding (mm), valign} -- floats at that place on the page; only for things that truly sit apart.\n" +
+            "- spacer: {type:'spacer', height (mm)} -- an exact gap. page_break: {type:'page_break'}.\n" +
+            "page: {size:'A4' | [width, height] (mm), orientation, margins: [top, right, bottom, left] (mm)}; defaults: " +
+            "{font, size, after, line} for the body text. A new document is Letter with 10 pt after every paragraph " +
+            "until you say otherwise: give page and defaults when you make one.\n" +
+            "Returns the index of the first block written and how many blocks the document now has.";
 
         static AiTool Tool(string name, string description, string schema)
         {
@@ -139,7 +210,10 @@ namespace NextScan.App
             {
                 switch (call.Name)
                 {
-                    case "list_documents": List(result); break;
+                    case "list_documents": await List(result); break;
+                    case "write_document": await Write(Pick(args), args, result); break;
+                    case "look_at_document": await LookAtDocument(Pick(args), args, result); break;
+                    case "look_at_scan": LookAtScan(args, result); break;
                     case "open_document": await Open(Str(args, "path"), result); break;
                     case "create_document": await Create(Str(args, "kind"), result); break;
                     case "read_document": await Read(Pick(args), args, result); break;
@@ -170,19 +244,32 @@ namespace NextScan.App
 
         // ---- the documents -------------------------------------------------
 
-        void List(AiToolResult result)
+        async Task List(AiToolResult result)
         {
             var open = new List<object>();
             foreach (DocTab tab in _space.Tabs)
             {
                 var view = tab.Surface as Docs.DocView;
-                open.Add(new Dictionary<string, object>
+                var row = new Dictionary<string, object>
                 {
                     { "id", tab.Id }, { "name", tab.Title }, { "kind", KindName(tab.Kind) },
                     { "file", tab.Path.Length > 0 ? tab.Path : null },
                     { "unsaved", tab.Dirty }, { "in_front", tab == _space.Current },
                     { "ready", view != null && view.Ready },
-                });
+                };
+                if (view != null && view.Ready && tab.Kind == DocKind.Word)
+                {
+                    // Enough to know whether there is anything in it without
+                    // reading it: an empty document is a different request.
+                    try
+                    {
+                        string glance = await view.RunScriptAsync(Glance, false);
+                        var seen = new JavaScriptSerializer().DeserializeObject(glance) as Dictionary<string, object>;
+                        if (seen != null) foreach (var kv in seen) row[kv.Key] = kv.Value;
+                    }
+                    catch { }
+                }
+                open.Add(row);
             }
             var recent = new List<string>();
             foreach (string path in DocRecent.Read()) { if (recent.Count >= 12) break; recent.Add(path); }
@@ -194,6 +281,15 @@ namespace NextScan.App
             result.Display = open.Count == 0 ? "Looked at the workspace: nothing open"
                            : "Looked at the open documents (" + open.Count + ")";
         }
+
+        /// <summary>A Word document at a glance: how many blocks and pages, whether it is empty, how it starts.</summary>
+        internal const string Glance =
+            "var d = Api.GetDocument(), n = d.GetElementsCount(), text = '';" +
+            "for (var i = 0; i < n && text.length < 80; i++) { var e = d.GetElement(i); if (e.GetText) text += e.GetText().replace(/\\s+/g, ' '); }" +
+            "var pages = 0; try { pages = d.GetPageCount(); } catch (x) { }" +
+            "var s = d.GetFinalSection();" +
+            "return { blocks: n, pages: pages, empty: text.replace(/\\s/g, '').length === 0, starts_with: text.slice(0, 80).trim()," +
+            " page_mm: [Math.round(s.GetPageWidth() * 25.4 / 1440), Math.round(s.GetPageHeight() * 25.4 / 1440)] };";
 
         async Task Open(string path, AiToolResult result)
         {
@@ -236,7 +332,7 @@ namespace NextScan.App
                           : tab.Kind == DocKind.Slides ? Script("read-slides.js")
                           : Script("read-word.js");
             var passed = new Dictionary<string, object>();
-            foreach (string key in new[] { "from", "to", "sheet", "range" })
+            foreach (string key in new[] { "from", "to", "sheet", "range", "detail" })
             {
                 object v;
                 if (args.TryGetValue(key, out v) && v != null) passed[key] = v;
@@ -254,6 +350,10 @@ namespace NextScan.App
             Docs.DocView view = await Ready(tab);
             result.Display = (string.IsNullOrWhiteSpace(summary) ? "Changed" : summary.Trim()) + " — " + tab.Title;
             _space.Select(tab);
+            // The kit rides along in Word, as NS: the same builder write_document
+            // uses, for a script that wants one table or one paragraph made
+            // the way the rest were.
+            if (tab.Kind == DocKind.Word) script = Script("word-kit.js") + "\n" + script;
             string answer;
             try { answer = await view.RunScriptAsync(script, true); }
             catch (Docs.DocsTrouble ex)
@@ -265,6 +365,162 @@ namespace NextScan.App
                                       "(the operator can undo it): read the document before trying again.");
             }
             result.Content = Json(new Dictionary<string, object> { { "ok", true }, { "returned", answer } });
+        }
+
+        async Task Write(DocTab tab, Dictionary<string, object> args, AiToolResult result)
+        {
+            if (tab.Kind != DocKind.Word) throw new ToolTrouble("write_document writes Word documents. Use edit_document for " + KindName(tab.Kind) + "s.");
+
+            // One spec, however it came: as fields, or as one JSON string.
+            Dictionary<string, object> spec;
+            string packed = Str(args, "spec");
+            if (packed.Trim().Length > 0)
+            {
+                try { spec = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(packed) as Dictionary<string, object>; }
+                catch (Exception ex) { throw new ToolTrouble("spec is not valid JSON: " + ex.Message); }
+                if (spec == null) throw new ToolTrouble("spec must be a JSON object {mode, page, defaults, blocks}.");
+            }
+            else
+            {
+                var picked = new Dictionary<string, object>();
+                foreach (string key in new[] { "mode", "at", "to", "page", "defaults", "blocks" })
+                {
+                    object v;
+                    if (args.TryGetValue(key, out v) && v != null) picked[key] = v;
+                }
+                // Through JSON once more: the arguments were read into
+                // ArrayLists, and everything below works on object[].
+                spec = (Dictionary<string, object>)new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(Json(picked));
+                // Some models send the list itself as a string of JSON.
+                object listed;
+                if (spec.TryGetValue("blocks", out listed) && listed is string)
+                {
+                    try { spec["blocks"] = new JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject((string)listed); }
+                    catch (Exception ex) { throw new ToolTrouble("blocks is a string that is not valid JSON: " + ex.Message); }
+                }
+            }
+            object blocks;
+            if (!spec.TryGetValue("blocks", out blocks) || !(blocks is object[]) || ((object[])blocks).Length == 0)
+            {
+                if (!spec.ContainsKey("page") && !spec.ContainsKey("defaults"))
+                    throw new ToolTrouble("There is nothing to write: give blocks (or page / defaults to change only the page setup).");
+                spec["blocks"] = new object[0];
+            }
+            if (!spec.ContainsKey("mode")) spec["mode"] = "append";
+
+            // Pictures named by a file become data: URLs here, since the
+            // editor cannot read the disk.
+            Inline((object[])spec["blocks"]);
+
+            Docs.DocView view = await Ready(tab);
+            string summary = Str(args, "summary");
+            result.Display = (summary.Trim().Length > 0 ? summary.Trim() : "Wrote") + " — " + tab.Title;
+            _space.Select(tab);
+            string answer;
+            try { answer = await view.RunScriptAsync(Script("word-kit.js") + "\nreturn NS.write(" + Json(spec) + ");", true); }
+            catch (Docs.DocsTrouble ex)
+            {
+                string why = ex.Message.Split('\n')[0].Trim();
+                throw new ToolTrouble(why + ". Blocks written before the problem may be in the document (the operator can undo): " +
+                                      "read it before trying again.");
+            }
+            result.Content = answer;
+        }
+
+        static void Inline(object[] blocks)
+        {
+            if (blocks == null) return;
+            foreach (object b in blocks)
+            {
+                var block = b as Dictionary<string, object>;
+                if (block == null) continue;
+                object src;
+                if (block.TryGetValue("src", out src) && src is string)
+                {
+                    string path = (string)src;
+                    if (!path.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && !path.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!File.Exists(path)) throw new ToolTrouble("There is no picture at " + path + ".");
+                        string ext = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+                        string mime = ext == "png" ? "image/png" : ext == "gif" ? "image/gif" : ext == "bmp" ? "image/bmp" : "image/jpeg";
+                        block["src"] = "data:" + mime + ";base64," + Convert.ToBase64String(File.ReadAllBytes(path));
+                    }
+                }
+                object rows;
+                if (block.TryGetValue("rows", out rows) && rows is object[])
+                    foreach (object row in (object[])rows)
+                    {
+                        var r = row as Dictionary<string, object>;
+                        object cells;
+                        if (r != null && r.TryGetValue("cells", out cells)) Inline(cells as object[]);
+                        else Inline(row as object[]);
+                    }
+            }
+        }
+
+        async Task LookAtDocument(DocTab tab, Dictionary<string, object> args, AiToolResult result)
+        {
+            if (tab.Kind != DocKind.Word) throw new ToolTrouble("Only Word documents can be looked at this way; read_document reads the others.");
+            Docs.DocView view = await Ready(tab);
+            result.Display = "Looking at " + tab.Title;
+            List<string> pages = await view.RenderPagesAsync(1100);
+            if (pages.Count == 0) throw new ToolTrouble("The pages could not be drawn.");
+
+            int wanted = 0;
+            object p;
+            if (args.TryGetValue("page", out p) && p != null) wanted = Convert.ToInt32(p, CultureInfo.InvariantCulture);
+            var shown = new List<int>();
+            if (wanted > 0)
+            {
+                if (wanted > pages.Count) throw new ToolTrouble(tab.Title + " has " + pages.Count + (pages.Count == 1 ? " page." : " pages."));
+                shown.Add(wanted);
+            }
+            else for (int i = 1; i <= Math.Min(2, pages.Count); i++) shown.Add(i);
+
+            foreach (int n in shown)
+            {
+                result.Images.Add(File.ReadAllBytes(pages[n - 1]));
+                result.ImageNotes.Add(tab.Title + ", page " + n + " of " + pages.Count + ", as it will print");
+            }
+            result.Content = Json(new Dictionary<string, object> { { "pages", pages.Count }, { "shown", shown } });
+            result.Display = "Looked at " + tab.Title + (shown.Count == 1 ? ", page " + shown[0] : "");
+        }
+
+        void LookAtScan(Dictionary<string, object> args, AiToolResult result)
+        {
+            if (ScanPage == null || ScanCount == null) throw new ToolTrouble("Scanned pages are not available here.");
+            int count = ScanCount();
+            object p;
+            NextScan.Core.RawImage page;
+            string name;
+            if (args.TryGetValue("page", out p) && p != null)
+            {
+                int n = Convert.ToInt32(p, CultureInfo.InvariantCulture);
+                if (n < 1 || n > count)
+                    throw new ToolTrouble(count == 0 ? "Nothing has been scanned in this session." : "There are " + count + " scanned pages; ask for 1 to " + count + ".");
+                page = ScanPage(n - 1);
+                name = "Scanned page " + n + " of " + count;
+            }
+            else
+            {
+                var current = CurrentScan == null ? null : CurrentScan();
+                if (current == null || current.Item1 == null)
+                    throw new ToolTrouble("Nothing has been scanned or previewed yet. Ask the operator to scan the page.");
+                page = current.Item1;
+                name = current.Item2;
+            }
+            byte[] jpeg = StudioAiPanel.Encode(page);
+            if (jpeg == null) throw new ToolTrouble("That page could not be prepared.");
+            result.Images.Add(jpeg);
+            double wmm = page.XDpi > 1 ? page.Width / page.XDpi * 25.4 : 0, hmm = page.YDpi > 1 ? page.Height / page.YDpi * 25.4 : 0;
+            result.ImageNotes.Add(name);
+            result.Content = Json(new Dictionary<string, object>
+            {
+                { "shown", name }, { "scanned_pages", count },
+                { "size_mm", wmm > 0 ? new object[] { Math.Round(wmm, 1), Math.Round(hmm, 1) } : null },
+                { "dpi", Math.Round(page.XDpi) },
+            });
+            result.Display = "Looked at " + name.ToLowerInvariant();
         }
 
         async Task Selection(DocTab tab, AiToolResult result)

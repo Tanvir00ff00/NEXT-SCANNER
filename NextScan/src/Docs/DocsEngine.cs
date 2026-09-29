@@ -52,6 +52,10 @@ namespace NextScan.Docs
         {
             get
             {
+                // A second copy for tests, so it never shares a browser profile
+                // with the one the operator has open.
+                string forced = Environment.GetEnvironmentVariable("NEXTSCAN_DOCS_DATA");
+                if (!string.IsNullOrEmpty(forced)) return forced;
                 return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                                     "NextScan", "docs");
             }

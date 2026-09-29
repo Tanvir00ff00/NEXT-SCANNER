@@ -1,6 +1,6 @@
 ﻿# NextScan Studio — Build Status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-29
 Plan of record: [`NEXTSCAN_STUDIO_MASTER_PLAN.md`](../../NEXTSCAN_STUDIO_MASTER_PLAN.md)
 
 This file records what is **actually built and verified on hardware**, versus what
@@ -8,6 +8,104 @@ is still only planned. It is deliberately conservative: if something is not list
 as verified below, assume it does not work yet.
 
 ---
+
+## The chat window, second pass — 2026-09-29
+
+Two complaints, both right: nothing moved while it answered, and the transcript
+could not be copied whole (every turn is its own control, and a text box selects
+inside its own edges).
+
+**Motion while it answers** (all from one 30 fps clock that stops when nothing
+moves; measured off-screen, 39 of 39 frames differ from the one before):
+a band of light runs along the foot of the panel's bar; the box's edge breathes
+in the accent colour; the status line shimmers ("Thinking · 8 s", "Preparing:
+writing the document · 12 kB"); the thinking title shimmers and its rule
+pulses; a small dot breathes at the end of the last word being written; a step
+is a spinner with its time, then a tick that draws itself; new things (your
+turn, steps, the row under an answer) grow into place over 200 ms, easing out;
+following the newest text is a smooth scroll that decelerates onto the end.
+Reading further up lets go of the newest text, and a "Newest" pill takes you
+back; a reply streaming in no longer drags you away from what you were reading.
+
+**Selecting and copying** (`ChatItemBase`, panel "selection"): drag from
+anywhere -- a word, a gap between turns -- to anywhere, across as many turns as
+there are, with auto-scroll at the edges; Ctrl+A selects the whole conversation
+(steps and thinking tinted); Ctrl+C copies it. The whole thing is also one
+button in the panel's bar: copy the conversation, copy the last answer (Ctrl+
+Shift+C), copy as Markdown, save as .md / .txt / .rtf (opens in Word). What goes
+on the clipboard is plain text and RTF together, in fixed dark colours, so it
+pastes into Word formatted and into a text box as text. Right-click on any turn
+has Copy / Copy this message / Copy the whole conversation / Select everything.
+Verified by driving real mouse messages at the text boxes off-screen (a drag
+from the first question to the last answer selected 4 turns whole and 2 in
+part; copy gave 2006 characters), and Ctrl+A copy (RTF present).
+
+**More in the chat**: a row under the newest answer (who answered, how long;
+copy, try again, save); "Try again" re-asks the same question with the same
+page; the pencil on your newest question takes it back into the box to change;
+what you type while it is answering waits above the box and is sent when it
+finishes (or comes back to the box if it fails); Up/Down in the box walks back
+through what you sent; follow-up chips under the answer (Put it in Word, Translate
+it, Shorter, Explain more); Ctrl+wheel and Ctrl +/-/0 change the text size; links
+open in the browser (http/https only); Esc stops. **Stop is immediate**: it
+took about 5 s to take effect before (it waited for the network); the request is
+dropped in the background and whatever still arrives for it is ignored -- a
+tool that is changing a document finishes its step first, on purpose.
+
+Bugs found by looking at the pictures rather than the numbers: the status line
+painted as a red error cross (`WrapMode.Clamp` is not allowed on a gradient
+brush; it now also falls back to plain text rather than ever throw in
+OnPaint); the pencil was covered by the bubble's own text box (the height
+measurement used a wider box than the paint did).
+
+## The assistant works Word precisely, and the chat grew up — 2026-09-28
+
+**Word.** A model is good at saying what a page looks like and poor at forty
+editor calls in a row in four different units, so a page is now described as
+data and built by one tested script (`scripts\word-kit.js`):
+
+- `write_document`: page size and margins, body defaults, paragraphs (runs,
+  tabs, spacing, indents, borders), tables with exact column widths in mm,
+  spans, row spans, per-cell borders and fills, text boxes and pictures placed
+  on the page, spacers; modes replace / append / insert / replace_range.
+- `read_document` with `detail: "layout"` reads a document back in exactly
+  that form (mm, pt, #RRGGBB), so read → change → write needs no translating.
+- `look_at_document` renders the pages as they will print (x2t's thumbnail
+  task, PNG per page) and shows them to the model; `look_at_scan` shows it a
+  scanned page with its size in mm. Together they are the check loop for
+  copying a scan into Word.
+- Found on the way and fixed: the editor adds an empty paragraph after every
+  table it is given (gaps nobody asked for — now removed); a new table's grid
+  stayed at 20 mm per column, which the editor ignores but Word obeys — the
+  grid is now set, verified in the saved .docx; a cell's border was also drawn
+  round its paragraph.
+- Every turn carries an `<app>` block: the screen, the scanner, pages scanned,
+  what is on screen (with its size), each open document (empty or not, pages,
+  unsaved) and the last few things the status line said.
+
+Measured with the free Space Bunny Alpha on NaraRouter, rebuilding the Islami
+Bank deposit slip from a picture: the first run took 526 s and 590k tokens
+(blocks lost their rows on the way; every look at a page stayed in the
+history); after keeping only the newest picture of each page and a schema
+that lets blocks through, 226 s and 167k tokens, with the header, box rows,
+the denomination table, dotted fields and signature lines all in place. How
+close it gets is now the model's part: a stronger model will do better with
+the same tools. Mimo v2.6 (free) answers 403 "plan does not include the
+requested model" on this key; paid Mimo answers 402 (no credit).
+
+**Chat.** Answers are formatted (Markdown drawn as RTF on msftedit: headings,
+bold, lists, code, tables as cards; Bengali set in Nirmala UI, which the rich
+edit control does not fall back to by itself). Thinking streams into a block
+that says "Thinking · 4 s" and closes to "Thought for 12 s" (Claude's
+summarised thinking, Gemini's thought summaries, a server's reasoning_content
+or `<think>`). Each step is a line with a spinner, then a tick or a cross with
+the reason; a status line says what it is doing, including "Preparing: writing
+the document · 12 kB" while a tool call streams. Conversations are titled,
+searchable (title and text), grouped by day, deletable one by one, and reopen
+with their thinking and steps (history format 2; format 1 still reads).
+Memory (`AiMemory`, memory.txt): the assistant keeps short facts about the
+shop through remember / forget, never anything from a customer's papers; the
+bookmark button lists them, adds one, deletes any.
 
 ## AI crop: a vision model tells the engine where the items are — 2026-09-27
 

@@ -89,6 +89,39 @@ namespace NextScan.App
         /// <summary>The box wants to be this tall now. Raised as the text grows.</summary>
         public event EventHandler HeightWanted;
 
+        /// <summary>Up or Down in an empty box (or one being walked back through what was sent): -1 for older, +1 for newer.</summary>
+        public event Action<int> Recall;
+
+        /// <summary>Esc, in the box.</summary>
+        public event EventHandler Escape;
+
+        bool _busy;
+        bool _recalling;
+        bool _keepRecall;
+
+        /// <summary>
+        /// Being answered: the plate's edge breathes in the accent colour, the
+        /// way the send button says "working" at the other end of it.
+        /// </summary>
+        public bool Busy
+        {
+            get { return _busy; }
+            set { if (_busy == value) return; _busy = value; Invalidate(); }
+        }
+
+        /// <summary>Puts an earlier message in the box, with the caret at its end, and keeps walking back through them.</summary>
+        public void Recalled(string text)
+        {
+            _keepRecall = true;
+            try
+            {
+                Text = text ?? "";
+                _box.SelectionStart = _box.TextLength;
+            }
+            finally { _keepRecall = false; }
+            _recalling = true;
+        }
+
         public NsComposer()
         {
             Size = new Size(260, 96);
@@ -122,11 +155,25 @@ namespace NextScan.App
             _box.TextChanged += delegate
             {
                 if (_ghost) return;
+                if (!_keepRecall) _recalling = false;
                 if (Typed != null) Typed(this, EventArgs.Empty);
                 if (HeightWanted != null) HeightWanted(this, EventArgs.Empty);
             };
             _box.KeyDown += delegate (object sender, KeyEventArgs e)
             {
+                if (e.KeyCode == Keys.Escape && Escape != null) { Escape(this, EventArgs.Empty); return; }
+                if (e.KeyCode == Keys.Up && !e.Shift && !e.Control && Recall != null && (_box.TextLength == 0 || _ghost || _recalling))
+                {
+                    e.Handled = true; e.SuppressKeyPress = true;
+                    Recall(-1);
+                    return;
+                }
+                if (e.KeyCode == Keys.Down && !e.Shift && !e.Control && Recall != null && _recalling)
+                {
+                    e.Handled = true; e.SuppressKeyPress = true;
+                    Recall(1);
+                    return;
+                }
                 if (e.KeyCode != Keys.Enter || e.Shift) return;
                 e.Handled = true;
                 e.SuppressKeyPress = true;
@@ -264,7 +311,11 @@ namespace NextScan.App
             using (GraphicsPath path = Theme.Round(r, 12))
             {
                 using (SolidBrush b = new SolidBrush(Theme.Field)) g.FillPath(b, path);
-                using (Pen p = new Pen(_box.Focused ? Theme.Accent : Theme.Line, 1f)) g.DrawPath(p, path);
+                Color edge = _box.Focused ? Theme.Accent : Theme.Line;
+                // While it is being answered the edge breathes, slowly, between
+                // its own colour and the accent.
+                if (_busy) edge = Theme.Mix(edge, Theme.Accent, 0.25 + 0.75 * ChatFx.Pulse(1100));
+                using (Pen p = new Pen(edge, _busy ? 1.4f : 1f)) g.DrawPath(p, path);
             }
 
             if (_footNote.Length == 0) return;

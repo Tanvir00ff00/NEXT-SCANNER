@@ -376,16 +376,38 @@ namespace NextScan.Ai
             var ids = new SortedDictionary<int, string>();
             var names = new Dictionary<int, string>();
             var args = new Dictionary<int, System.Text.StringBuilder>();
+            var thought = new System.Text.StringBuilder();
+            var split = new ThinkSplitter();
+            Action<string> think = piece =>
+            {
+                if (string.IsNullOrEmpty(piece)) return;
+                thought.Append(piece);
+                if (request.OnThinking != null) request.OnThinking(piece);
+            };
+            Action<string> say = piece =>
+            {
+                if (string.IsNullOrEmpty(piece)) return;
+                text.Append(piece);
+                if (onText != null) onText(piece);
+            };
 
             await foreach (StreamingChatCompletionUpdate update in
                            client.CompleteChatStreamingAsync(messages, options, cancel))
             {
+                bool any = false;
                 foreach (ChatMessageContentPart part in update.ContentUpdate)
                 {
                     if (string.IsNullOrEmpty(part.Text)) continue;
-                    text.Append(part.Text);
-                    if (onText != null) onText(part.Text);
+                    any = true;
+                    split.Feed(part.Text, say, think);
                 }
+
+                // Reasoning is not part of the protocol, so the SDK has no field
+                // for it -- but it keeps what it does not know, and the update
+                // written back out carries the server's own reasoning_content
+                // (DeepSeek, Qwen, NaraRouter) or reasoning (OpenRouter).
+                if (!any && update.ToolCallUpdates.Count == 0 && update.Usage == null)
+                    think(Reasoning(update));
 
                 foreach (StreamingChatToolCallUpdate call in update.ToolCallUpdates)
                 {
@@ -397,6 +419,7 @@ namespace NextScan.Ai
                     if (!string.IsNullOrEmpty(call.ToolCallId)) ids[call.Index] = call.ToolCallId;
                     if (!string.IsNullOrEmpty(call.FunctionName)) names[call.Index] = call.FunctionName;
                     if (call.FunctionArgumentsUpdate != null) args[call.Index].Append(call.FunctionArgumentsUpdate.ToString());
+                    if (request.OnToolProgress != null) request.OnToolProgress(names[call.Index], args[call.Index].Length);
                 }
 
                 // Usage arrives on the last update and is null on the others.
@@ -415,8 +438,83 @@ namespace NextScan.Ai
                     ArgumentsJson = args[kv.Key].Length > 0 ? args[kv.Key].ToString() : "{}",
                 });
 
+            split.Flush(say, think);
             reply.Text = text.ToString();
+            reply.Thinking = thought.ToString();
             return reply;
+        }
+
+        /// <summary>The reasoning in one streamed update, or "".</summary>
+        static string Reasoning(StreamingChatCompletionUpdate update)
+        {
+            try
+            {
+                string json = System.ClientModel.Primitives.ModelReaderWriter.Write(update).ToString();
+                if (json.IndexOf("reasoning", StringComparison.Ordinal) < 0) return "";
+                using (JsonDocument doc = JsonDocument.Parse(json))
+                {
+                    JsonElement choices, first, delta, v;
+                    if (!doc.RootElement.TryGetProperty("choices", out choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0) return "";
+                    first = choices[0];
+                    if (!first.TryGetProperty("delta", out delta) || delta.ValueKind != JsonValueKind.Object) return "";
+                    foreach (string name in new[] { "reasoning_content", "reasoning", "reasoning_text" })
+                        if (delta.TryGetProperty(name, out v) && v.ValueKind == JsonValueKind.String) return v.GetString();
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>
+        /// Takes a reply's thinking out of its text where a server sends both
+        /// in the text, as "&lt;think&gt;...&lt;/think&gt;" at the start (DeepSeek
+        /// R1, QwQ and others served raw). Only at the start: the same letters
+        /// anywhere else are just letters.
+        /// </summary>
+        internal class ThinkSplitter
+        {
+            const string Open = "<think>", Close = "</think>";
+            int _state;                     // 0 = not yet known, 1 = inside, 2 = text
+            readonly System.Text.StringBuilder _held = new System.Text.StringBuilder();
+
+            public void Feed(string piece, Action<string> say, Action<string> think)
+            {
+                if (_state == 2) { say(piece); return; }
+                _held.Append(piece);
+                string s = _held.ToString();
+                if (_state == 0)
+                {
+                    string lead = s.TrimStart();
+                    if (lead.Length < Open.Length && Open.StartsWith(lead, StringComparison.Ordinal)) return;
+                    if (!lead.StartsWith(Open, StringComparison.Ordinal)) { _state = 2; _held.Length = 0; say(s); return; }
+                    _state = 1;
+                    s = lead.Substring(Open.Length);
+                    _held.Length = 0;
+                    _held.Append(s);
+                }
+                int end = s.IndexOf(Close, StringComparison.Ordinal);
+                if (end >= 0)
+                {
+                    think(s.Substring(0, end));
+                    _state = 2;
+                    _held.Length = 0;
+                    string rest = s.Substring(end + Close.Length).TrimStart('\r', '\n');
+                    if (rest.Length > 0) say(rest);
+                    return;
+                }
+                // Keep back what could be the start of the closing tag.
+                int keep = Math.Min(s.Length, Close.Length - 1);
+                think(s.Substring(0, s.Length - keep));
+                _held.Length = 0;
+                _held.Append(s.Substring(s.Length - keep));
+            }
+
+            public void Flush(Action<string> say, Action<string> think)
+            {
+                if (_held.Length == 0) return;
+                if (_state == 1) think(_held.ToString()); else say(_held.ToString());
+                _held.Length = 0;
+            }
         }
     }
 }

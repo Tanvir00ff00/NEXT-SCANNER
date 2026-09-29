@@ -89,6 +89,14 @@ namespace NextScan.App
         public const string Palette = "palette";
         public const string Layers = "layers";
         public const string Trash = "trash";
+        public const string Sparkle = "sparkle";
+        public const string Retry = "retry";
+        public const string Edit = "edit";
+        public const string ArrowDown = "arrowdown";
+        public const string Save = "save";
+        public const string SelectAll = "selectall";
+        public const string Memory = "memory";
+        public const string Tool = "tool";
 
         /// <summary>
         /// Draws one icon centred in <paramref name="box"/>.
@@ -592,6 +600,64 @@ namespace NextScan.App
                                                   new PointF(17f, 20.5f), new PointF(18f, 6.5f) });
                     g.DrawLine(p, 10.5f, 10f, 10.5f, 17f);
                     g.DrawLine(p, 13.5f, 10f, 13.5f, 17f);
+                    break;
+
+                case Retry:
+                    // An arc almost all the way round, with its head.
+                    g.DrawArc(p, 5f, 5f, 14f, 14f, 40f, 280f);
+                    g.FillPolygon(b, new PointF[] { new PointF(20.6f, 9.4f), new PointF(19.4f, 4.8f), new PointF(14.9f, 8.6f) });
+                    break;
+
+                case Edit:
+                    g.DrawLines(p, new PointF[] { new PointF(4.5f, 19.5f), new PointF(5.5f, 14.5f), new PointF(15.5f, 4.5f),
+                                                  new PointF(19.5f, 8.5f), new PointF(9.5f, 18.5f), new PointF(4.5f, 19.5f) });
+                    g.DrawLine(p, 13f, 7f, 17f, 11f);
+                    break;
+
+                case ArrowDown:
+                    g.DrawLine(p, 12f, 5f, 12f, 18.5f);
+                    g.DrawLines(p, new PointF[] { new PointF(6f, 12.5f), new PointF(12f, 18.5f), new PointF(18f, 12.5f) });
+                    break;
+
+                case Save:
+                    g.DrawLine(p, 12f, 4f, 12f, 14f);
+                    g.DrawLines(p, new PointF[] { new PointF(7.5f, 10f), new PointF(12f, 14.5f), new PointF(16.5f, 10f) });
+                    g.DrawLines(p, new PointF[] { new PointF(5f, 15f), new PointF(5f, 19.5f), new PointF(19f, 19.5f), new PointF(19f, 15f) });
+                    break;
+
+                case SelectAll:
+                    // A dashed box with a tick: everything, chosen.
+                    using (Pen dashed = new Pen(p.Color, p.Width) { DashStyle = DashStyle.Dash })
+                        g.DrawRectangle(dashed, 4f, 4f, 16f, 16f);
+                    g.DrawLines(p, new PointF[] { new PointF(8.5f, 12f), new PointF(11f, 14.5f), new PointF(15.5f, 9.5f) });
+                    break;
+
+                case Sparkle:
+                    {
+                        // A four-pointed star with a small one beside it:
+                        // what every assistant uses for "thinking".
+                        var big = new PointF[] { new PointF(10f, 3f), new PointF(12f, 9f), new PointF(18f, 11f), new PointF(12f, 13f),
+                                                 new PointF(10f, 19f), new PointF(8f, 13f), new PointF(2f, 11f), new PointF(8f, 9f) };
+                        g.FillPolygon(b, big);
+                        var small = new PointF[] { new PointF(18f, 14f), new PointF(19f, 17f), new PointF(22f, 18f), new PointF(19f, 19f),
+                                                   new PointF(18f, 22f), new PointF(17f, 19f), new PointF(14f, 18f), new PointF(17f, 17f) };
+                        g.FillPolygon(b, small);
+                    }
+                    break;
+
+                case Memory:
+                    // A bookmark: what is kept.
+                    g.DrawLines(p, new PointF[] { new PointF(6.5f, 20.5f), new PointF(6.5f, 5.5f), new PointF(8.5f, 3.5f),
+                                                  new PointF(15.5f, 3.5f), new PointF(17.5f, 5.5f), new PointF(17.5f, 20.5f),
+                                                  new PointF(12f, 16f), new PointF(6.5f, 20.5f) });
+                    g.DrawLine(p, 10f, 8.5f, 14f, 8.5f);
+                    break;
+
+                case Tool:
+                    // A spanner.
+                    g.DrawLines(p, new PointF[] { new PointF(14.5f, 3.8f), new PointF(12.5f, 6.5f), new PointF(13.5f, 10.5f),
+                                                  new PointF(17.5f, 11.5f), new PointF(20.2f, 9.5f) });
+                    g.DrawLine(p, 13.2f, 10.8f, 4.5f, 19.5f);
                     break;
 
                 default:

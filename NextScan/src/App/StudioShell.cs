@@ -31,7 +31,7 @@ using Docs = NextScan.Docs;
 
 namespace NextScan.App
 {
-    public class StudioShell : Form
+    public partial class StudioShell : Form
     {
         // ---- engine ----------------------------------------------------------
         readonly DeviceBroker _broker = new DeviceBroker();
@@ -979,7 +979,13 @@ namespace NextScan.App
                 _aiPanel.PageNote = delegate { return AssistantPageNote(); };
                 // An empty message means the panel's last one is over. Ignored,
                 // "Asking Gemini…" stayed in the status bar after the reply.
-                _aiPanel.Status = delegate (string text) { SetStatus(text.Length > 0 ? text : "Ready."); };
+                _aiPanel.Status = delegate (string text)
+                {
+                    _assistantSpeaking = true;
+                    try { SetStatus(text.Length > 0 ? text : "Ready."); }
+                    finally { _assistantSpeaking = false; }
+                };
+                _aiPanel.AppState = AssistantState;
                 _aiPanel.ChoiceChanged += delegate
                 {
                     _settings.AiProvider = _aiPanel.ProviderId;
@@ -4671,6 +4677,9 @@ namespace NextScan.App
             {
                 PdfFromPages = PdfOfSessionPages,
                 OutputFolder = delegate { return _settings.OutputDirectory; },
+                ScanCount = delegate { return _film == null ? 0 : _film.Count; },
+                ScanPage = delegate (int i) { var all = _film == null ? null : _film.AllImages(); return all != null && i >= 0 && i < all.Count ? all[i] : null; },
+                CurrentScan = CurrentScanForAssistant,
             };
             _aiPanel.ToolsSource = tools.Tools;
             _aiPanel.ToolRunner = tools.Run;
@@ -8920,6 +8929,7 @@ namespace NextScan.App
         {
             if (_statusText == null) return;
             _statusText.Text = text ?? "";
+            NoteActivity(text);
         }
 
         /// <summary>

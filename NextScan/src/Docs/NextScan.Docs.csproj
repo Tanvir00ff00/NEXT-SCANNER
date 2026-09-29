@@ -25,6 +25,9 @@
     <!-- JavaScriptSerializer, for the editor's download requests. Part of
          .NET Framework itself, not a package. -->
     <Reference Include="System.Web.Extensions" />
+    <!-- The converter hands pictures of pages back in a zip. -->
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
   </ItemGroup>
 
   <ItemGroup>

@@ -168,6 +168,64 @@ namespace NextScan.Docs
             return target;
         }
 
+        /// <summary>
+        /// Pictures of the document's pages as it is now, one PNG per page,
+        /// <paramref name="width"/> pixels wide, written into a fresh folder.
+        /// The converter lays the pages out the way it lays them out for a PDF,
+        /// so this is what the page will look like printed -- which is what the
+        /// assistant compares against a scan when it rebuilds one.
+        /// </summary>
+        public async Task<List<string>> RenderPagesAsync(int width)
+        {
+            if (_ext == "pdf") throw new DocsTrouble("A PDF is shown as it is; there is nothing to lay out.");
+            string binary = await BinaryAsync().ConfigureAwait(true);
+            string work = _work;
+            int n = ++_renders;
+            return await Task.Run(() =>
+            {
+                string dir = Path.Combine(work, "pages", n.ToString(CultureInfo.InvariantCulture));
+                if (Directory.Exists(dir)) Directory.Delete(dir, true);
+                Directory.CreateDirectory(dir);
+                string bin = Path.Combine(work, "Editor.bin");
+                File.WriteAllBytes(bin, Convert.FromBase64String(binary));
+
+                // x2t's thumbnail task: format 4 is PNG; with "first" off it
+                // writes every page into a zip, in order.
+                string zip = Path.Combine(dir, "pages.zip");
+                int height = (int)Math.Round(width * 1.5);
+                string thumbnail = "<m_oThumbnail><format>4</format><aspect>1</aspect><first>false</first>" +
+                                   "<width>" + width + "</width><height>" + height + "</height></m_oThumbnail>";
+                DocsEngine.ConvertWith(bin, zip, 0x404, 0, null, thumbnail, 0);
+
+                var pages = new List<string>();
+                using (var archive = System.IO.Compression.ZipFile.OpenRead(zip))
+                {
+                    var entries = new List<System.IO.Compression.ZipArchiveEntry>(archive.Entries);
+                    entries.Sort((a, b) => Order(a.Name).CompareTo(Order(b.Name)));
+                    foreach (var entry in entries)
+                    {
+                        if (entry.Length == 0) continue;
+                        string file = Path.Combine(dir, "page" + (pages.Count + 1).ToString(CultureInfo.InvariantCulture) + ".png");
+                        using (Stream from = entry.Open())
+                        using (Stream to = File.Create(file)) from.CopyTo(to);
+                        pages.Add(file);
+                    }
+                }
+                return pages;
+            }).ConfigureAwait(true);
+        }
+
+        int _renders;
+
+        /// <summary>The page number in a name like image12.png, for sorting 2 before 10.</summary>
+        static int Order(string name)
+        {
+            string digits = "";
+            foreach (char c in name) if (char.IsDigit(c)) digits += c;
+            int n;
+            return int.TryParse(digits, out n) ? n : int.MaxValue;
+        }
+
         /// <summary>The document in the editor's binary format, as base64.</summary>
         Task<string> BinaryAsync()
         {

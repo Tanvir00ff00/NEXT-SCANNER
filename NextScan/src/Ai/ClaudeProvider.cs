@@ -149,7 +149,9 @@ namespace NextScan.Ai
 
                 // Adaptive: Claude decides when and how much to think, and
                 // effort sets how far it may go.
-                Thinking = new ThinkingConfigAdaptive(),
+                // Summarised, so the panel can show what it is thinking while
+                // it thinks; newer models otherwise send the block empty.
+                Thinking = new ThinkingConfigAdaptive { Display = Display.Summarized },
                 OutputConfig = new OutputConfig { Effort = EffortFor(request.Thinking) },
             };
 
@@ -175,6 +177,7 @@ namespace NextScan.Ai
 
             var reply = new AiReply { RawProvider = Info.Id };
             var text = new StringBuilder();
+            var thinking = new StringBuilder();
             var blocks = new SortedDictionary<long, Block>();
 
             await foreach (RawMessageStreamEvent e in client.Messages.CreateStreaming(parameters, cancellationToken: cancel))
@@ -194,8 +197,17 @@ namespace NextScan.Ai
                         text.Append(piece.Text);
                         if (onText != null) onText(piece.Text);
                     }
-                    else if (grew.Delta.TryPickInputJson(out var input)) block.Input.Append(input.PartialJson);
-                    else if (grew.Delta.TryPickThinking(out var thought)) block.Thinking.Append(thought.Thinking);
+                    else if (grew.Delta.TryPickInputJson(out var input))
+                    {
+                        block.Input.Append(input.PartialJson);
+                        if (request.OnToolProgress != null) request.OnToolProgress(block.Name, block.Input.Length);
+                    }
+                    else if (grew.Delta.TryPickThinking(out var thought))
+                    {
+                        block.Thinking.Append(thought.Thinking);
+                        thinking.Append(thought.Thinking);
+                        if (request.OnThinking != null) request.OnThinking(thought.Thinking);
+                    }
                     else if (grew.Delta.TryPickSignature(out var signed)) block.Signature.Append(signed.Signature);
                 }
                 else if (e.TryPickStart(out var start))
@@ -227,6 +239,7 @@ namespace NextScan.Ai
 
             reply.Raw = raw;
             reply.Text = text.ToString();
+            reply.Thinking = thinking.ToString();
             return reply;
         }
 
@@ -263,18 +276,18 @@ namespace NextScan.Ai
                 // is the stable part of the prefix and the question is not, and
                 // a cache breakpoint can only be placed after everything it
                 // covers.
-                blocks.Add(new ContentBlockParam(new ImageBlockParam(new Base64ImageSource
+                var picture = new ImageBlockParam(new Base64ImageSource
                 {
                     Data = Convert.ToBase64String(m.Image),
                     MediaType = MediaFor(m.ImageMediaType),
-                })
-                {
-                    // The whole point of sending the page once. Without this
-                    // the same scan is re-read at full price on every turn of
-                    // the conversation, and the only sign is an input count
-                    // that never drops.
-                    CacheControl = new CacheControlEphemeral(),
-                }, null));
+                });
+                // The whole point of sending the page once. Without this the
+                // same scan is re-read at full price on every turn of the
+                // conversation, and the only sign is an input count that never
+                // drops. Not on pictures a tool showed: a request may carry
+                // four breakpoints, and a rebuild looks at many pages.
+                if (!m.Attachment) picture = picture with { CacheControl = new CacheControlEphemeral() };
+                blocks.Add(new ContentBlockParam(picture, null));
             }
 
             if (!string.IsNullOrEmpty(m.Text))

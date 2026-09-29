@@ -20,16 +20,30 @@
 //   * the empty state offers named suggestions, not a toolbar of icons that
 //     have to be learned before they mean anything.
 //
-// Two decisions of our own are worth stating.
+// The second version drew everything as the same plain bubble, and the four of
+// them agree on more than that too, so this one does as well: the thinking is
+// shown as it happens (StudioChatView's NsThought), each step as a line with a
+// spinner, the answer formatted, and a status line saying what it is doing;
+// earlier conversations are a list that can be searched, and what the
+// assistant should remember about the shop is kept and can be seen (AiMemory).
+//
+// Three decisions of our own are worth stating.
 //
 // The model is sent the WHOLE page, never a crop. A model handed a rectangle
 // cut out of a form does not know it is looking at a form, and answers about
 // the rectangle. Measurements are a different job and are not asked of a model.
 //
-// And nothing is sent until the operator presses something. There is no pass
-// over the page when the panel opens and no background call while they look at
-// it. Every call here costs the shop money, and a cost they did not ask for is
-// one they cannot plan for.
+// Nothing is sent until the operator presses something. There is no pass over
+// the page when the panel opens and no background call while they look at it.
+// Every call here costs the shop money, and a cost they did not ask for is one
+// they cannot plan for.
+//
+// And each turn carries a short account of where the application is -- which
+// screen, whether anything has been scanned, what documents are open and
+// whether they are empty, what happened last -- so "put this in Word" means
+// the same thing to the model as it does to the operator looking at the screen.
+// It rides on the operator's turn, never in the standing instruction, which
+// must not change between turns or its cache never hits.
 // =============================================================================
 using System;
 using System.Collections.Generic;
@@ -60,12 +74,22 @@ namespace NextScan.App
         /// <summary>The shell's status line.</summary>
         public Action<string> Status;
 
+        /// <summary>
+        /// Where the application is now, in a few lines, for the model: the
+        /// screen, the scanner and the scans, the open documents. Asked for
+        /// at the moment of each turn. May be null.
+        /// </summary>
+        public Func<Task<string>> AppState;
+
         /// <summary>Raised when the provider, model or thinking level changes here.</summary>
         public event EventHandler ChoiceChanged;
 
         // ---- state ---------------------------------------------------------
 
         readonly List<AiMessage> _history = new List<AiMessage>();
+
+        /// <summary>What the transcript showed, in order, for writing the conversation out.</summary>
+        readonly List<AiChatItem> _log = new List<AiChatItem>();
 
         /// <summary>
         /// What the assistant may do in the document workspace (StudioDocTools).
@@ -76,26 +100,64 @@ namespace NextScan.App
         /// <summary>Runs one tool the model asked for, on the UI thread.</summary>
         public Func<AiToolCall, Task<AiToolResult>> ToolRunner;
 
-        /// <summary>Where the operator's latest turn starts in the history: a failed turn is taken back to here.</summary>
-        int _turnStart;
+        /// <summary>Where the operator's latest turn starts in the history and the log: a failed turn is taken back to here.</summary>
+        int _turnStart, _logStart;
 
         /// <summary>How many times the model has asked for tools in this turn.</summary>
         int _rounds;
 
         /// <summary>
         /// A turn that asks for more than this has lost its way. Enough for
-        /// "open these three files, total the column in each, and write a
-        /// summary document", which is the longest honest request in a shop.
+        /// "rebuild this three-page form, looking at each page and fixing what
+        /// differs", which is the longest honest request in a shop.
         /// </summary>
-        const int MaxRounds = 24;
-        readonly List<NsBubble> _bubbles = new List<NsBubble>();
+        const int MaxRounds = 40;
+
+        /// <summary>Pictures from tools kept in what is sent: the newest few. Older ones are dropped, with a note.</summary>
+        const int KeptPictures = 4;
+
+        readonly List<Control> _items = new List<Control>();
         readonly List<NsPill> _chips = new List<NsPill>();
 
-        Panel _bar;                 // the thin strip at the top: history, new conversation
+        Panel _bar;                 // the strip at the top: the title, copy, memory, history, new conversation
         NsIconButton _fresh;
         NsIconButton _past;
+        NsIconButton _memoryButton;
+        NsIconButton _copyButton;
         Panel _scroll;
         Panel _column;
+        NsPill _toEnd;              // "back to the newest", when the operator has scrolled up
+        NsPill _queuedChip;         // what was typed while it was busy, waiting its turn
+        string _queued;
+
+        // ---- the turn that can be asked again or taken back ------------------
+        AiMessage _lastTurn;        // exactly what was sent, page and all
+        string _lastText = "";      // what the operator meant, in full (a suggestion's whole question)
+        string _lastShown = "";     // what the bubble said
+        string _lastModel = "";     // the model that answered it
+        ChatItemBase _menuItem;     // the item a right-click was on
+        int _turnItemStart = -1;    // where its bubble is in _items
+        DateTime _turnStarted;
+        long _turnIn, _turnOut;
+        NsActions _actions;         // the row under the newest answer
+        NsFollowUps _followUps;     // and what to ask next, under that
+
+        // ---- what was sent, for the Up arrow -----------------------------------
+        readonly List<string> _sent = new List<string>();
+        int _recall = -1;
+
+        // ---- selection across the transcript -----------------------------------
+        bool _dragging;
+        ChatItemBase _anchorItem;
+        int _anchorIdx;
+        Point _dragPoint;
+        ContextMenuStrip _chatMenu;
+
+        // ---- motion -----------------------------------------------------------
+        bool _stick = true;         // following the newest text; off while the operator reads further up
+        int _scrollTarget = -1;     // where a smooth scroll is heading, or -1
+        bool _programmatic;         // we moved the scroll position, not the operator
+        bool _revealing;            // something is still arriving
         Panel _welcome;             // the empty state, shown until the first turn
         NsComposer _composer;
         NsPill _modelButton;
@@ -103,12 +165,25 @@ namespace NextScan.App
         NsIconButton _send;
         Label _meter;
 
+        // The overlays: earlier conversations, and memory.
+        Panel _overlay;
+        NsTextBox _overlaySearch;
+        NsTextBox _overlayAdd;
+        NsPill _overlayAddButton;
+        NsPill _overlayAll;
+        NsRowList _overlayList;
+        string _overlayKind = "";   // "", "history", "memory"
+
         readonly System.Windows.Forms.Timer _tick = new System.Windows.Forms.Timer();
         readonly ToolTip _tips = new ToolTip();
 
         CancellationTokenSource _cancel;
-        NsBubble _live;
+        NsWorking _working;
+        NsThought _thought;
+        NsReply _reply;
         readonly StringBuilder _streamed = new StringBuilder();
+        bool _replyDirty, _layoutDirty;
+        int _lastRender;
         bool _busy;
 
         string _providerId = "claude";
@@ -137,6 +212,9 @@ namespace NextScan.App
         /// </summary>
         string _chatId = "";
 
+        /// <summary>What the conversation is called: its first question, until the operator renames it.</summary>
+        string _title = "";
+
         // =====================================================================
         // The suggestions
         //
@@ -151,15 +229,31 @@ namespace NextScan.App
             public string Ask = "";
 
             /// <summary>
-            /// All of these are about a page. They stay pressable without one
-            /// anyway: a greyed button is a button that looks broken, and the
-            /// press is answered with the reason instead of with nothing.
+            /// Whether it is about a scanned page. Such a one stays pressable
+            /// without a page anyway: a greyed button is a button that looks
+            /// broken, and the press is answered with the reason instead.
             /// </summary>
             public bool NeedsPage = true;
         }
 
         static readonly Suggestion[] Suggestions =
         {
+            new Suggestion
+            {
+                Id = "rebuild", Title = "Rebuild this page in Word",
+                Ask = "Make a Word document that is a copy of the scanned page, as close to the original as you can get " +
+                      "it: the same text, word for word, the same fonts, sizes and weights, the same layout and spacing, the " +
+                      "same lines, boxes and tables, dots where it has dots and dashes where it has dashes. Leave out logos and " +
+                      "pictures for now. Look at the scan first, then write the document, then look at it next to the scan " +
+                      "and correct whatever differs until it matches."
+            },
+            new Suggestion
+            {
+                Id = "type", Title = "Type out the handwriting",
+                Ask = "Type out the handwritten text on this page into a new Word document, keeping its lines and " +
+                      "paragraphs. Do not correct or change the words. Put [?] where a word cannot be read rather than " +
+                      "guessing, and tell me how many there were."
+            },
             new Suggestion
             {
                 Id = "identify", Title = "What is this document?",
@@ -185,17 +279,9 @@ namespace NextScan.App
             },
             new Suggestion
             {
-                Id = "check", Title = "Check the scan",
-                Ask = "Look at this as a scan rather than as a document. Is any part cut off, out " +
-                      "of focus, crooked, or too dark or too light to read? Say what to change on " +
-                      "the scanner -- the crop, the resolution, straightening, the exposure. If " +
-                      "there is nothing wrong with it, say so in one line."
-            },
-            new Suggestion
-            {
-                Id = "summarise", Title = "Summarise it",
-                Ask = "Summarise what this document says: who it concerns, what it is for, and any " +
-                      "dates and amounts on it. A few lines."
+                Id = "letter", Title = "Write a letter in Word", NeedsPage = false,
+                Ask = "Help me write a letter in a new Word document. Ask me in one message what it is about, who it " +
+                      "is to and who it is from, then write it properly set out on A4."
             },
         };
 
@@ -207,16 +293,21 @@ namespace NextScan.App
         /// anywhere says so -- the only sign is a token count that stays high.
         /// </summary>
         public const string Instruction =
-            "You are the assistant inside NextScan Studio, a scanner application used in a print " +
-            "and copy shop. The operator scans identity papers, bills, forms and certificates, in " +
-            "Bengali, English, or both on one page.\n\n" +
+            "You are the assistant inside NextScan Studio, a scanner and document application used in a print " +
+            "and copy shop in Bangladesh. The operator scans identity papers, bills, forms, certificates and " +
+            "handwritten pages, in Bengali, English, or both on one page, and makes and edits Word, Excel and " +
+            "PowerPoint documents for customers.\n\n" +
             "When a scan is attached, answer about that page. If something is not on it, say so " +
             "rather than filling it in from what documents of that kind usually say -- an " +
             "invented field on an identity paper is worse than a missing one.\n\n" +
-            "When no scan is attached, simply answer the question.\n\n" +
+            "Each of the operator's messages starts with an <app> block: what the application is showing right now " +
+            "(the screen, whether anything is on the scanner or has been scanned, the open documents and whether " +
+            "they are empty, and what happened last). It is written by the application, not by the operator: use it " +
+            "to understand what they mean ('this', 'the document', 'the scan'), never answer it, and do not repeat it " +
+            "back.\n\n" +
             "Reply in the language the operator writes in, and keep names, numbers and dates " +
-            "exactly as they are written. Write plainly: no headings unless the page has them, " +
-            "and no preamble about what you are about to do.";
+            "exactly as they are written. Write plainly and briefly: Markdown is shown formatted, so use lists or a " +
+            "table where they help, headings only for long answers, and no preamble about what you are about to do.";
 
         /// <summary>
         /// Added to the instruction when the document tools are there. Stable
@@ -227,27 +318,35 @@ namespace NextScan.App
             "\n\nYou also work in NextScan's document workspace, where Word documents, Excel " +
             "workbooks, PowerPoint presentations and PDFs are open as tabs, through the tools you " +
             "are given. Use them whenever the operator talks about a document, a file, a bill, a " +
-            "letter, a sheet or a table, or asks you to make, fill, change, check, save or export " +
-            "one.\n\n" +
+            "letter, a form, a sheet or a table, or asks you to make, fill, change, check, save or export " +
+            "one. Do the work with the tools -- never paste a document into the chat for the operator to copy.\n\n" +
             "How to work:\n" +
-            "- Call list_documents first when you are not sure what is open.\n" +
-            "- Read a document before changing it, and read it again afterwards to check the " +
-            "change is what was asked. Never describe content you have not read.\n" +
-            "- Change documents with edit_document: a script for ONLYOFFICE's document API (the " +
-            "Office JavaScript API of ONLYOFFICE Document Builder), the body of a function given " +
-            "Api. Word: var d = Api.GetDocument(); d.GetElement(i); Api.CreateParagraph(); " +
-            "p.AddText(text); p.SetBold(true); p.SetJc('center'); d.Push(p); " +
-            "d.InsertContent([p1, p2]); Api.CreateTable(rows, cols) (rows first: this version changed the order); table.GetCell(r, c)" +
-            ".GetContent().GetElement(0).AddText(text); d.Push(table); a new table has no borders, so give it table.SetTableBorderAll('single', 4, 0, 0, 0, 0) and table.SetWidth('percent', 100); paragraph.Delete(). " +
-            "Excel: var s = Api.GetActiveSheet(); s.GetRange('A1').SetValue(v); " +
-            "s.GetRange('D2').SetValue('=B2*C2') for a formula; Api.GetSheets(); " +
-            "Api.AddSheet(name). PowerPoint: var p = Api.GetPresentation(); Api.CreateSlide(); " +
-            "p.AddSlide(slide); Api.CreateShape('rect', w, h, fill, stroke); " +
-            "shape.GetDocContent(); slide.AddObject(shape) (sizes in EMU, 1 cm = 360000). " +
-            "Keep each script small and return something that shows what it did. If a " +
-            "script fails you are told why: fix it and try again.\n" +
-            "- Save or export only when the operator asked. Never discard unsaved changes " +
-            "unless the operator said so.\n" +
+            "- The <app> block says what is open. Call list_documents when you need ids or are unsure.\n" +
+            "- To make a new Word document: create_document, then write_document with mode 'replace', giving page " +
+            "(size and margins) and defaults (font, size, spacing) as well as the blocks.\n" +
+            "- To change a Word document: read_document first (detail 'layout' when the look matters), then " +
+            "write_document with 'replace_range' or 'insert' for whole blocks, or edit_document with a small script " +
+            "for a targeted change (a word, a run's format, deleting a block). Read again afterwards to check.\n" +
+            "- To copy a scanned page into Word: look_at_scan; note the page size in mm it reports; work out the " +
+            "layout -- which lines sit side by side (a table without borders), which parts are boxed (a table with " +
+            "borders), the real proportions of each column and the gaps between blocks; write it with write_document " +
+            "in one go; then look_at_document and compare it with the scan line by line -- text, font size and " +
+            "weight, alignment, column widths, borders, dotted leaders, spacing -- and fix every difference with " +
+            "further writes. Keep going until they match. Measure from the scan, do not guess: a 90 mm wide slip is " +
+            "90 mm, and text that fills half its width is about 45 mm. Count what repeats -- boxes, columns, rows, " +
+            "dotted lines -- on the scan, and make exactly that many. Keep everything in the order it is in, top to " +
+            "bottom and left to right: a label printed under a row of boxes stays under it. Printed words are text " +
+            "even when they are large or styled, like a bank's name beside its emblem; only the emblem or picture " +
+            "itself is the logo.\n" +
+            "- Scripts (edit_document) are for ONLYOFFICE's document API, the body of a function given Api. Word: " +
+            "Api.GetDocument(), d.GetElement(i), Api.CreateParagraph(), p.AddText(t), d.Push(p), " +
+            "d.SearchAndReplace({searchString, replaceString}), paragraph.Delete(); lengths in twips (NS.tw(mm) " +
+            "converts). Excel: var s = Api.GetActiveSheet(); s.GetRange('A1').SetValue(v); " +
+            "s.GetRange('D2').SetValue('=B2*C2') for a formula; Api.GetSheets(); Api.AddSheet(name). PowerPoint: " +
+            "var p = Api.GetPresentation(); Api.CreateSlide(); p.AddSlide(slide); Api.CreateShape('rect', w, h, fill, " +
+            "stroke); shape.GetDocContent(); slide.AddObject(shape) (sizes in EMU, 1 cm = 360000). Keep each script " +
+            "small and return something that shows what it did. If one fails you are told why: fix it and try again.\n" +
+            "- Save or export only when the operator asked. Never discard unsaved changes unless the operator said so.\n" +
             "- Bengali: text in a paragraph whose fonts include SutonnyMJ or another Bijoy font " +
             "(names ending in MJ) is old ANSI Bijoy text -- 'Avwg evsjvq' is Bengali shown in " +
             "that font, not English. Leave such text as it is unless asked, and when you add " +
@@ -255,8 +354,19 @@ namespace NextScan.App
             "Kalpurush, unless the operator asks for Bijoy.\n" +
             "- When the jev_ask tool is offered, use it for quick typed judgements over text -- sorting, " +
             "checking or scoring many documents -- rather than reading each one yourself.\n" +
-            "- When you are done, say in one or two sentences what you did, in the " +
-            "operator's language.";
+            "- When you are done, say in one or two sentences what you did, in the operator's language.";
+
+        /// <summary>
+        /// How the model is told to use its memory. Stable, and before the facts
+        /// themselves, which change only when one is kept or forgotten.
+        /// </summary>
+        const string MemoryInstruction =
+            "\n\nYou have a memory that lasts between conversations, through the remember and forget tools. Keep a " +
+            "fact when the operator asks you to remember something, or tells you a lasting preference or fact about " +
+            "the shop and its work (their name, the shop's name and address, the fonts and page sizes they use, how " +
+            "they like documents set out). Do not keep anything from a customer's papers -- names, numbers or " +
+            "details on a scanned page -- nor anything that only matters to this conversation. Keep each fact to one " +
+            "short line, and forget one that turns out to be wrong.";
 
         // =====================================================================
         // Build
@@ -269,52 +379,157 @@ namespace NextScan.App
             BuildBar();
             BuildTranscript();
             BuildWelcome();
+            BuildOverlay();
             BuildComposer();
 
-            _tick.Interval = 60;
-            _tick.Tick += delegate { if (_live != null && _live.Pending) _live.Invalidate(); };
+            // 30 frames a second while anything moves, and nothing at all once
+            // nothing does: Tick stops the clock itself.
+            _tick.Interval = 33;
+            _tick.Tick += delegate { Tick(); };
 
             UpdateModelButton();
         }
 
+        /// <summary>A panel that paints without flicker: the bar is repainted every frame while it works.</summary>
+        class BufferedPanel : Panel
+        {
+            public BufferedPanel()
+            {
+                SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+            }
+        }
+
+        /// <summary>
+        /// The scrolling part of the transcript. It can take the focus, so
+        /// Ctrl+A and Ctrl+C mean something after a click on a gap or a step,
+        /// and the wheel is handed to the panel, which scrolls smoothly and
+        /// knows when the operator has scrolled away from the newest text.
+        /// </summary>
+        class ScrollPanel : Panel
+        {
+            public event MouseEventHandler Wheeled;
+
+            public ScrollPanel()
+            {
+                SetStyle(ControlStyles.Selectable, true);
+                SetStyle(ControlStyles.OptimizedDoubleBuffer, true);
+                TabStop = false;
+            }
+
+            protected override void OnMouseWheel(MouseEventArgs e)
+            {
+                if (Wheeled != null) Wheeled(this, e);
+            }
+        }
+
         void BuildBar()
         {
-            _bar = new Panel { BackColor = Theme.Surface };
+            _bar = new BufferedPanel { BackColor = Theme.Surface };
+            _bar.Paint += delegate (object sender, PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.Clear(Theme.Surface);
+                Theme.Smooth(g);
+
+                // The conversation's name: what it is about, or that it is new.
+                string title = _title.Length > 0 ? _title : "New conversation";
+                int right = _copyButton.Left - 6;
+                using (Font f = Theme.UiSemi(8.75f))
+                    TextRenderer.DrawText(g, title, f, new Rectangle(Pad, 0, Math.Max(10, right - Pad), BarHeight),
+                                          _title.Length > 0 ? Theme.Text : Theme.TextFaint,
+                                          TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+                using (Pen p = new Pen(Theme.LineSoft)) g.DrawLine(p, 0, BarHeight - 1, _bar.Width, BarHeight - 1);
+
+                // While it works, a band of light runs along the foot of the
+                // bar, left to right, over and over: the one thing that says
+                // "still going" from the corner of the eye, wherever the
+                // transcript is scrolled to.
+                if (_busy)
+                {
+                    int w = _bar.Width, band = Math.Max(80, w / 3);
+                    float phase = (Environment.TickCount % 1400) / 1400f;
+                    int x = (int)(-band + phase * (w + band));
+                    using (var brush = new LinearGradientBrush(new Rectangle(x - 1, BarHeight - 2, band + 2, 2), Theme.Accent, Theme.Accent, LinearGradientMode.Horizontal))
+                    {
+                        var blend = new ColorBlend(3);
+                        blend.Colors = new[] { Color.FromArgb(0, Theme.Accent), Theme.Accent, Color.FromArgb(0, Theme.Accent) };
+                        blend.Positions = new[] { 0f, 0.5f, 1f };
+                        brush.InterpolationColors = blend;
+                        g.FillRectangle(brush, x - 1, BarHeight - 2, band + 2, 2);
+                    }
+                }
+            };
             Controls.Add(_bar);
 
             _fresh = new NsIconButton { Icon = NsIcon.NewChat };
-            _fresh.Click += delegate { Reset(); };
+            _fresh.Click += delegate { CloseOverlay(); Reset(); };
             _tips.SetToolTip(_fresh, "New conversation");
             _bar.Controls.Add(_fresh);
 
             _past = new NsIconButton { Icon = NsIcon.History };
-            _past.Click += delegate { OpenHistory(); };
+            _past.Click += delegate { ToggleOverlay("history"); };
             _tips.SetToolTip(_past, "Earlier conversations");
             _bar.Controls.Add(_past);
+
+            _memoryButton = new NsIconButton { Icon = NsIcon.Memory };
+            _memoryButton.Click += delegate { ToggleOverlay("memory"); };
+            _tips.SetToolTip(_memoryButton, "What the assistant remembers");
+            _bar.Controls.Add(_memoryButton);
+
+            _copyButton = new NsIconButton { Icon = NsIcon.Copy };
+            _copyButton.Click += delegate { OpenExportMenu(_copyButton); };
+            _tips.SetToolTip(_copyButton, "Copy or save this conversation");
+            _bar.Controls.Add(_copyButton);
         }
 
         void BuildTranscript()
         {
-            _scroll = new Panel { BackColor = Theme.Surface, AutoScroll = true, Visible = false };
+            var scroll = new ScrollPanel { BackColor = Theme.Surface, AutoScroll = true, Visible = false };
+            scroll.Wheeled += OnTranscriptWheel;
+            scroll.Scroll += delegate
+            {
+                // The scroll bar, dragged. Our own moves are not the operator's.
+                if (_programmatic) return;
+                _scrollTarget = -1;
+                SyncStick();
+            };
+            _scroll = scroll;
             Controls.Add(_scroll);
 
-            // The bubbles go in a column inside the scrolling panel rather than
+            // The items go in a column inside the scrolling panel rather than
             // in the panel itself, so a re-layout -- which is every token that
             // arrives -- moves one control instead of all of them. The column
             // is placed at the scrolled origin, never at (0, 0); see
             // LayoutTranscript.
-            _column = new Panel { BackColor = Theme.Surface, Location = new Point(0, 0) };
+            _column = new BufferedPanel { BackColor = Theme.Surface, Location = new Point(0, 0) };
             _scroll.Controls.Add(_column);
 
-            // A wheel over the gaps needs nothing: the column does not handle
-            // it, so it climbs to the scrolling panel, which does. Only the text
-            // of a turn eats it, and the bubble hands that on (OnTranscriptWheel).
-            // Handling it here as well scrolled twice for every notch.
+            // A press between the items starts a selection there, so a drag
+            // can begin anywhere on the page and not only on a word.
+            foreach (Control gap in new Control[] { _column, _scroll })
+            {
+                gap.MouseDown += GapDown;
+                gap.MouseMove += GapMove;
+                gap.MouseUp += delegate { _dragging = false; };
+            }
+
+            _toEnd = new NsPill { Text = "Newest", Kind = PillKind.Normal, Radius = 13, Icon = NsIcon.ArrowDown, Visible = false };
+            _toEnd.Font = Theme.Ui(8f);
+            _toEnd.Click += delegate { _stick = true; ScrollToEnd(true); UpdateToEnd(); };
+            Controls.Add(_toEnd);
+
+            _queuedChip = new NsPill { Kind = PillKind.Quiet, Radius = 12, Icon = NsIcon.Send, Visible = false };
+            _queuedChip.Font = Theme.Ui(8f);
+            _queuedChip.Click += delegate { UnqueueToComposer(); };
+            _tips.SetToolTip(_queuedChip, "Waiting for the answer above. Click to take it back.");
+            Controls.Add(_queuedChip);
+
+            BuildChatMenu();
         }
 
         /// <summary>
-        /// The empty state: what this is for, and the questions worth asking
-        /// about a scanned page, by name.
+        /// The empty state: what this is for, and the questions worth asking,
+        /// by name.
         /// </summary>
         void BuildWelcome()
         {
@@ -326,23 +541,18 @@ namespace NextScan.App
                 Theme.Smooth(g);
 
                 int top = WelcomeTop();
-                NsIcon.Draw(g, NsIcon.Assist, new RectangleF(_welcome.Width / 2f - 16, top, 32, 32),
-                            Theme.Mix(Theme.TextFaint, Theme.Accent, 0.7));
+                NsIcon.Draw(g, NsIcon.Sparkle, new RectangleF(_welcome.Width / 2f - 16, top, 32, 32),
+                            Theme.Mix(Theme.TextFaint, Theme.Accent, 0.8));
 
                 bool page = HasPage();
                 using (Font f = Theme.UiSemi(12f))
-                    TextRenderer.DrawText(g, page ? "About this page" : "Ask anything", f,
+                    TextRenderer.DrawText(g, page ? "About this page" : "How can I help?", f,
                         new Rectangle(12, top + 40, Math.Max(1, _welcome.Width - 24), 26), Theme.Text,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
 
-                if (page) return;
-
-                // The five below are all about a page, and there is not one. The
-                // box still works, so the panel says which half is available
-                // rather than greying the whole thing out.
                 using (Font f = Theme.Ui(8.25f))
-                    TextRenderer.DrawText(g, "Scan a page to ask about it", f,
-                        new Rectangle(12, top + 62, Math.Max(1, _welcome.Width - 24), 20), Theme.TextFaint,
+                    TextRenderer.DrawText(g, page ? "Ask about it, or turn it into a document" : "Scan a page to ask about it, or ask anything",
+                        f, new Rectangle(12, top + 62, Math.Max(1, _welcome.Width - 24), 20), Theme.TextFaint,
                         TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPrefix);
             };
             Controls.Add(_welcome);
@@ -353,7 +563,7 @@ namespace NextScan.App
                 NsPill chip = new NsPill { Text = suggestion.Title, Kind = PillKind.Normal, Radius = 17 };
                 chip.Font = Theme.Ui(8.75f);
                 chip.Click += delegate { Send(which.Title, which.Ask, which.NeedsPage); };
-                _tips.SetToolTip(chip, "Needs a scanned page");
+                _tips.SetToolTip(chip, which.NeedsPage ? "Needs a scanned page" : "");
                 _welcome.Controls.Add(chip);
                 _chips.Add(chip);
             }
@@ -361,7 +571,7 @@ namespace NextScan.App
 
         int WelcomeTop()
         {
-            int block = 74 + _chips.Count * 40;
+            int block = 86 + _chips.Count * 40;
             return Math.Max(14, (_welcome.Height - block) / 2 - 10);
         }
 
@@ -386,6 +596,8 @@ namespace NextScan.App
             _composer.Typed += delegate { UpdateSend(); };
             _composer.HeightWanted += delegate { LayoutAll(); };
             _composer.FootChanged += delegate { LayoutComposer(); };
+            _composer.Recall += OnRecall;
+            _composer.Escape += delegate { if (_busy) Stop(); };
             Controls.Add(_composer);
 
             // Model and effort, beside the send button. This is the one place
@@ -520,7 +732,9 @@ namespace NextScan.App
                 {
                     AiModel which = model;
                     IAiProvider owner = provider;
-                    menu.Item(model.ToString(), "",
+                    string note = which.Thinking == true ? "thinks" : "";
+                    if (which.Vision == true) note = note.Length > 0 ? note + " · sees" : "sees";
+                    menu.Item(model.ToString(), note,
                               owner.Info.Id == _providerId && which.Id == _model,
                               new Chosen { Provider = owner.Info.Id, Model = which.Id });
                 }
@@ -529,11 +743,11 @@ namespace NextScan.App
             if (!anyKey)
             {
                 menu.Note("No key has been set.");
-                menu.Note("Settings, under Assistant.");
+                menu.Note("Settings, under AI providers.");
             }
 
             menu.Picked += delegate (object tag) { Took(tag); };
-            menu.Show(_modelButton, Math.Max(210, Width - 28));
+            menu.Show(_modelButton, Math.Max(250, Width - 28));
 
             if (anyMissing) Say("Asking the provider which models this key can reach");
         }
@@ -649,7 +863,7 @@ namespace NextScan.App
             if (!provider.Ready)
             {
                 _modelButton.Text = "Add a key";
-                _tips.SetToolTip(_modelButton, "Settings, under Assistant, takes the key");
+                _tips.SetToolTip(_modelButton, "Settings, under AI providers, takes the key");
             }
             else if (string.IsNullOrEmpty(_model))
             {
@@ -707,14 +921,19 @@ namespace NextScan.App
         /// from a suggestion, and null when the operator typed it, in which case
         /// <paramref name="shown"/> is both.
         /// </summary>
-        void Send(string shown, string ask) { Send(shown, ask, false); }
-
-        void Send(string shown, string ask, bool needsPage)
+        async void Send(string shown, string ask, bool needsPage)
         {
-            if (_busy) return;
-
             string text = (ask ?? shown ?? "").Trim();
             if (text.Length == 0) return;
+
+            // Typed while it is still answering: it waits its turn, shown above
+            // the box, instead of being thrown away or interrupting.
+            if (_busy)
+            {
+                if (ask == null) Enqueue(text);
+                return;
+            }
+            CloseOverlay();
 
             // Asked about a page, with no page. Say so rather than paying for an
             // answer that can only be "there is nothing here".
@@ -729,7 +948,7 @@ namespace NextScan.App
             if (!provider.Ready)
             {
                 AddNote("No key has been set for " + provider.Info.Name +
-                        ". Settings, under Assistant, takes one.", true);
+                        ". Settings, under AI providers, takes one.", true);
                 return;
             }
 
@@ -738,8 +957,12 @@ namespace NextScan.App
 
             // The page rides on one turn and is never sent again: it is the
             // largest cost in this panel, and the model already has it in the
-            // conversation afterwards.
-            if (!_pageSent && page != null)
+            // conversation afterwards. With the document tools there, a page is
+            // attached only when the question is about it: "make me a letter"
+            // with a scan of someone's ID still on the glass is not a question
+            // about their ID, and look_at_scan fetches it when it is.
+            bool tools = ToolsSource != null && ToolRunner != null;
+            if (!_pageSent && page != null && (!tools || needsPage))
             {
                 image = Encode(page);
                 if (image == null)
@@ -753,19 +976,88 @@ namespace NextScan.App
 
             _composer.Text = "";
             UpdateSend();
-            AddBubble(shown ?? text, true, false);
+            RemoveActions();
+            _stick = true;
+            NsBubble said = AddBubble(shown ?? text, true);
+            _turnItemStart = _items.IndexOf(said);
+            Busy(true);
 
-            AiMessage turn = AiMessage.FromUser(text);
+            _turnStart = _history.Count;
+            _logStart = _log.Count;
+            _rounds = 0;
+            _turnStarted = DateTime.Now;
+            _turnIn = _turnOut = 0;
+            _lastText = text;
+            _lastShown = shown ?? text;
+            if (ask == null && (_sent.Count == 0 || _sent[_sent.Count - 1] != text)) _sent.Add(text);
+            _recall = -1;
+            if (_title.Length == 0) { _title = Line(shown ?? text); _bar.Invalidate(); }
+            _log.Add(new AiChatItem { Kind = "user", Text = shown ?? text });
+
+            // Where the application is, at this moment.
+            string state = "";
+            if (AppState != null)
+            {
+                Task<string> asking = AppState();
+                Task first = await Task.WhenAny(asking, Task.Delay(4000));
+                if (first == asking && !asking.IsFaulted) state = asking.Result ?? "";
+            }
+            if (IsDisposed) return;
+
+            AiMessage turn = AiMessage.FromUser(state.Length > 0
+                ? "<app>\n(Written by NextScan for you, not by the operator. Never repeat it in your answer.)\n" + state.Trim() + "\n</app>\n\n" + text
+                : text);
             if (image != null)
             {
                 turn.Image = image;
                 turn.ImageMediaType = "image/jpeg";
             }
-            _turnStart = _history.Count;
-            _rounds = 0;
             _history.Add(turn);
+            _lastTurn = turn;
 
             Ask(provider);
+        }
+
+        // ---- typed while it works ---------------------------------------------
+
+        void Enqueue(string text)
+        {
+            _queued = string.IsNullOrEmpty(_queued) ? text : _queued + "\n" + text;
+            _composer.Text = "";
+            UpdateSend();
+            UpdateQueueChip();
+            LayoutAll();
+        }
+
+        void UpdateQueueChip()
+        {
+            bool has = !string.IsNullOrEmpty(_queued);
+            _queuedChip.Visible = has;
+            if (has) _queuedChip.Text = "Next: " + Line(_queued);
+        }
+
+        /// <summary>The turn is over and something was waiting: send it now.</summary>
+        void SendQueued()
+        {
+            if (string.IsNullOrEmpty(_queued)) return;
+            string next = _queued;
+            _queued = null;
+            UpdateQueueChip();
+            LayoutAll();
+            Send(next, null, false);
+        }
+
+        /// <summary>The operator changed their mind, or the turn failed: it goes back in the box.</summary>
+        void UnqueueToComposer()
+        {
+            if (string.IsNullOrEmpty(_queued)) return;
+            string back = _queued;
+            _queued = null;
+            UpdateQueueChip();
+            _composer.Text = _composer.Text.Length > 0 ? back + "\n" + _composer.Text : back;
+            UpdateSend();
+            LayoutAll();
+            _composer.TakeFocus();
         }
 
         void Ask(IAiProvider provider)
@@ -779,45 +1071,81 @@ namespace NextScan.App
                 // No list yet for this key, so there is nothing to send to.
                 // Fetch it and say so rather than guessing at a model name.
                 BeginFetch(provider);
+                Finish();
                 AddNote("Asking " + provider.Info.Name + " which models this key can reach. " +
                         "Try again in a moment.", true);
-                _history.RemoveAt(_history.Count - 1);
+                TakeBack();
                 return;
             }
 
-            List<AiTool> tools = ToolsSource != null && ToolRunner != null ? ToolsSource() : null;
+            _lastModel = model;
+            List<AiTool> tools = ToolsSource != null && ToolRunner != null ? ToolsSource() : new List<AiTool>();
             bool working = tools != null && tools.Count > 0;
+            if (tools == null) tools = new List<AiTool>();
+            tools.AddRange(MemoryTools());
 
             var request = new AiRequest
             {
                 Model = model,
                 Thinking = _thinking,
-                // Room for a script and its explanation; a reply that is cut
-                // off mid-script is a script that does not run.
-                MaxOutputTokens = working ? 8192 : 4096,
-                Instruction = working ? Instruction + DocumentInstruction : Instruction,
+                // Room for a whole document described at once; a reply cut off
+                // in the middle of one is a document that is not written.
+                MaxOutputTokens = working ? 16000 : 4096,
+                Instruction = (working ? Instruction + DocumentInstruction : Instruction) + MemoryInstruction + AiMemory.ForInstruction(),
             };
-            request.Messages.AddRange(_history);
-            if (working) request.Tools.AddRange(tools);
+            request.Messages.AddRange(Outgoing());
+            request.Tools.AddRange(tools);
 
             _streamed.Length = 0;
-            _live = AddBubble("", false, false);
-            _live.Pending = true;
+            _reply = null;
+            _thought = null;
+            if (_working == null) _working = AddItem(new NsWorking());
+            _working.What = _rounds == 0 ? "Thinking" : "Thinking about what it found";
             _tick.Start();
 
-            Busy(true);
             string note = provider.Info.Describe(_thinking);
             Say("Asking " + provider.Info.Name + (note.Length > 0 ? " — " + note : ""));
 
-            _cancel = new CancellationTokenSource();
+            _cancel = _cancel ?? new CancellationTokenSource();
             CancellationToken token = _cancel.Token;
+
+            // Which request this is. A stopped one is let go of at once, and
+            // whatever it still says on its way in is not for this turn.
+            int mine = ++_askId;
 
             AiTextArrived onText = delegate (string piece)
             {
                 // On a worker thread. The panel marshals; the provider has no
                 // business knowing there is a UI thread at all.
                 if (IsDisposed || !IsHandleCreated) return;
-                try { BeginInvoke((MethodInvoker)delegate { Grew(piece); }); }
+                try { BeginInvoke((MethodInvoker)delegate { if (mine == _askId) Grew(piece); }); }
+                catch (InvalidOperationException) { }
+            };
+            request.OnThinking = delegate (string piece)
+            {
+                if (IsDisposed || !IsHandleCreated) return;
+                try { BeginInvoke((MethodInvoker)delegate { if (mine == _askId) Thought(piece); }); }
+                catch (InvalidOperationException) { }
+            };
+
+            int reported = 0;
+            request.OnToolProgress = delegate (string name, int chars)
+            {
+                // Every few hundred characters, not every fragment.
+                if (chars - reported < 400 && chars > reported) return;
+                reported = chars;
+                if (IsDisposed || !IsHandleCreated) return;
+                try
+                {
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        if (_working == null || mine != _askId) return;
+                        string what = Describe(new AiToolCall { Name = name ?? "" });
+                        if (what.Length == 0) what = "The next step";
+                        _working.What = "Preparing: " + what.Substring(0, 1).ToLowerInvariant() + what.Substring(1) +
+                                        (chars >= 1000 ? " · " + (chars / 1000) + " kB" : "");
+                    });
+                }
                 catch (InvalidOperationException) { }
             };
 
@@ -825,10 +1153,99 @@ namespace NextScan.App
                 .ContinueWith(delegate (Task<AiReply> done)
                 {
                     if (IsDisposed || !IsHandleCreated) return;
-                    try { BeginInvoke((MethodInvoker)delegate { ReplyArrived(done); }); }
+                    try { BeginInvoke((MethodInvoker)delegate { if (mine == _askId) ReplyArrived(done); }); }
                     catch (InvalidOperationException) { }
                 });
         }
+
+        /// <summary>The number of the request now being waited on.</summary>
+        int _askId;
+
+        /// <summary>Counts the conversations begun with Reset, so work still running for an earlier one can tell.</summary>
+        int _generation;
+
+        /// <summary>Tools are running for the model: a document is being changed, and that is not stopped halfway.</summary>
+        bool _runningTools;
+
+        /// <summary>
+        /// The history as it is sent: the newest pictures a tool showed are
+        /// kept, older ones become a line saying they were there. A rebuilt
+        /// form looks at its pages again and again, and every look is a page
+        /// of tokens on every request after it.
+        /// </summary>
+        List<AiMessage> Outgoing()
+        {
+            // The newest picture of each page is kept -- the scan, and the
+            // document's page as last drawn -- and at most a few in all; an
+            // older picture of the same page is the one before a correction,
+            // and costs a page of tokens on every request after it. A first
+            // rebuild of a slip sent 590k tokens before this.
+            var sent = new List<AiMessage>(_history);
+            var seen = new HashSet<string>();
+            int kept = 0;
+            for (int i = sent.Count - 1; i >= 0; i--)
+            {
+                AiMessage m = sent[i];
+                if (!m.Attachment || m.Image == null) continue;
+                if (seen.Add(m.Text) && ++kept <= KeptPictures) continue;
+                sent[i] = new AiMessage { Role = AiRole.User, Text = m.Text + " [an older picture, no longer attached]", Attachment = true };
+            }
+            return sent;
+        }
+
+        // ---- memory ----------------------------------------------------------
+
+        static List<AiTool> MemoryTools()
+        {
+            return new List<AiTool>
+            {
+                new AiTool
+                {
+                    Name = "remember",
+                    Description = "Keeps a short fact for every later conversation: a lasting preference or fact about the operator or the shop. One line. Never anything from a customer's papers.",
+                    ParametersJson = "{\"type\":\"object\",\"properties\":{\"fact\":{\"type\":\"string\",\"description\":\"The fact, in one short line.\"}},\"required\":[\"fact\"]}",
+                },
+                new AiTool
+                {
+                    Name = "forget",
+                    Description = "Forgets a fact you remembered, by its id (such as m3), when it is wrong or the operator asks.",
+                    ParametersJson = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}",
+                },
+            };
+        }
+
+        static AiToolResult RunMemoryTool(AiToolCall call)
+        {
+            var result = new AiToolResult { CallId = call.Id, Name = call.Name };
+            Dictionary<string, object> args;
+            try { args = new System.Web.Script.Serialization.JavaScriptSerializer().Deserialize<Dictionary<string, object>>(string.IsNullOrWhiteSpace(call.ArgumentsJson) ? "{}" : call.ArgumentsJson) ?? new Dictionary<string, object>(); }
+            catch { args = new Dictionary<string, object>(); }
+            try
+            {
+                if (call.Name == "remember")
+                {
+                    object fact;
+                    args.TryGetValue("fact", out fact);
+                    AiFact kept = AiMemory.Remember(Convert.ToString(fact, CultureInfo.InvariantCulture));
+                    result.Content = "{\"remembered\":\"" + kept.Id + "\"}";
+                    result.Display = "Remembered: " + kept.Text;
+                }
+                else
+                {
+                    object id;
+                    args.TryGetValue("id", out id);
+                    string which = Convert.ToString(id, CultureInfo.InvariantCulture);
+                    bool gone = AiMemory.Forget(which);
+                    result.Content = gone ? "{\"forgot\":\"" + which + "\"}" : "There is no fact " + which + ".";
+                    result.IsError = !gone;
+                    result.Display = gone ? "Forgot " + which : "No fact " + which + " to forget";
+                }
+            }
+            catch (Exception ex) { result.IsError = true; result.Content = ex.Message; result.Display = ex.Message; }
+            return result;
+        }
+
+        // ---- tools -----------------------------------------------------------
 
         /// <summary>
         /// Runs what the model asked for, one call after another, each shown
@@ -838,9 +1255,17 @@ namespace NextScan.App
         /// </summary>
         async void RunTools(IAiProvider provider, List<AiToolCall> calls)
         {
-            Busy(true);
+            _runningTools = true;
+            try { await RunToolsCore(provider, calls); }
+            finally { _runningTools = false; }
+        }
+
+        async System.Threading.Tasks.Task RunToolsCore(IAiProvider provider, List<AiToolCall> calls)
+        {
             CancellationToken token = _cancel != null ? _cancel.Token : CancellationToken.None;
+            int generation = _generation;       // a new conversation started meanwhile is not this one
             var answered = new AiMessage { Role = AiRole.User };
+            var pictures = new List<AiMessage>();
 
             foreach (AiToolCall call in calls)
             {
@@ -850,35 +1275,67 @@ namespace NextScan.App
                     continue;
                 }
 
-                NsBubble step = AddBubble("… " + Describe(call), false, false, false);
-                step.Quiet = true;
-                step.Refresh_();
+                NsStep step = AddItem(new NsStep { Label = Describe(call) });
+                if (_working != null) _working.What = Describe(call);
                 Say(Describe(call));
 
                 AiToolResult result;
-                try { result = await ToolRunner(call); }
-                catch (Exception ex) { result = new AiToolResult { CallId = call.Id, Name = call.Name, IsError = true, Content = ex.Message, Display = ex.Message }; }
+                if (call.Name == "remember" || call.Name == "forget") result = RunMemoryTool(call);
+                else
+                {
+                    try { result = await ToolRunner(call); }
+                    catch (Exception ex) { result = new AiToolResult { CallId = call.Id, Name = call.Name, IsError = true, Content = ex.Message, Display = ex.Message }; }
+                }
                 if (result == null) result = new AiToolResult { CallId = call.Id, Name = call.Name, IsError = true, Content = "Nothing came back." };
                 result.CallId = call.Id;
                 result.Name = call.Name;
 
-                if (IsDisposed) return;
-                step.Text = (result.IsError ? "✕ " : "✓ ") + (result.Display.Length > 0 ? result.Display : Describe(call));
-                step.Trouble = result.IsError;
-                step.Refresh_();
+                if (IsDisposed || generation != _generation) return;
+                string label = result.Display.Length > 0 ? result.Display : Describe(call);
+                if (result.IsError)
+                {
+                    // The reason goes under the line, not into it.
+                    int dash = label.IndexOf(" — ", StringComparison.Ordinal);
+                    step.Label = dash > 0 ? label.Substring(0, dash) : Describe(call);
+                    step.Detail = result.Content ?? "";
+                    step.State = NsStep.StepState.Failed;
+                    _log.Add(new AiChatItem { Kind = "failed", Text = step.Label + "\n" + step.Detail });
+                }
+                else
+                {
+                    step.Label = label;
+                    step.State = NsStep.StepState.Done;
+                    _log.Add(new AiChatItem { Kind = "step", Text = label });
+                }
                 LayoutTranscript(true);
                 answered.ToolResults.Add(result);
+
+                for (int i = 0; i < result.Images.Count; i++)
+                {
+                    byte[] picture = result.Images[i];
+                    bool png = picture.Length > 4 && picture[0] == 0x89 && picture[1] == 0x50;
+                    pictures.Add(new AiMessage
+                    {
+                        Role = AiRole.User,
+                        Attachment = true,
+                        Text = "[Picture from " + call.Name + ": " + (i < result.ImageNotes.Count ? result.ImageNotes[i] : "") + "]",
+                        Image = picture,
+                        ImageMediaType = png ? "image/png" : "image/jpeg",
+                    });
+                }
             }
 
-            if (IsDisposed) return;
+            if (IsDisposed || generation != _generation) return;
             _history.Add(answered);
+            _history.AddRange(pictures);
 
             if (token.IsCancellationRequested)
             {
-                Busy(false);
+                Finish();
                 AddNote("Stopped.", false);
-                if (_turnStart >= 0 && _turnStart < _history.Count)
-                    _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+                TakeBack();
+                AddActions(true);
+                UnqueueToComposer();
                 Say("Stopped");
                 return;
             }
@@ -895,7 +1352,10 @@ namespace NextScan.App
                 case "open_document": return "Opening a file";
                 case "create_document": return "Starting a new document";
                 case "read_document": return "Reading the document";
+                case "write_document": return "Writing the document";
                 case "edit_document": return "Changing the document";
+                case "look_at_document": return "Looking at the pages";
+                case "look_at_scan": return "Looking at the scan";
                 case "get_selection": return "Reading the selection";
                 case "save_document": return "Saving";
                 case "export_document": return "Writing a copy";
@@ -903,58 +1363,155 @@ namespace NextScan.App
                 case "close_document": return "Closing a document";
                 case "pdf_from_scanned_pages": return "Making a PDF of the scanned pages";
                 case "jev_ask": return "Asking Jev";
+                case "remember": return "Remembering";
+                case "forget": return "Forgetting";
                 default: return call.Name;
             }
         }
 
-        void RemoveBubble(NsBubble bubble)
+        // ---- the stream ------------------------------------------------------
+
+        void Thought(string piece)
         {
-            if (bubble == null) return;
-            _bubbles.Remove(bubble);
-            _column.Controls.Remove(bubble);
-            bubble.Dispose();
-            LayoutTranscript(false);
+            if (string.IsNullOrEmpty(piece)) return;
+            if (_thought == null)
+            {
+                // Thinking that starts after text has begun (some models think
+                // between paragraphs) opens a fresh block after that text.
+                _thought = AddItem(new NsThought());
+                _thought.Toggled += delegate { LayoutTranscript(false); };
+            }
+            _thought.Add(piece);
+            if (_working != null) _working.What = "Thinking";
+            _layoutDirty = true;
         }
 
         void Grew(string piece)
         {
-            if (_live == null) return;
+            if (string.IsNullOrEmpty(piece)) return;
+            if (_reply == null)
+            {
+                EndThought();
+                _reply = NewReply(true);
+            }
             _streamed.Append(piece);
-            _live.Pending = false;
-            _live.Text = _streamed.ToString();
-            LayoutTranscript(true);
+            _replyDirty = true;
+            if (_working != null) _working.What = "Writing";
+        }
+
+        /// <summary>A new answer at the end of the transcript; being written now, it breathes at its end.</summary>
+        NsReply NewReply(bool streaming)
+        {
+            NsReply reply = AddItem(new NsReply());
+            reply.Streaming = streaming;
+            return reply;
+        }
+
+        /// <summary>Closes the thinking block, keeping how long it took.</summary>
+        void EndThought()
+        {
+            if (_thought == null) return;
+            if (_thought.Live)
+            {
+                _thought.Live = false;
+                _log.Add(new AiChatItem { Kind = "thought", Text = _thought.Thinking, Seconds = _thought.Took.TotalSeconds });
+            }
+            _thought = null;
+            _layoutDirty = true;
+        }
+
+        /// <summary>
+        /// The clock: repaints what moves (the dots, the spinners, the pulse)
+        /// and re-renders the answer at most a dozen times a second rather than
+        /// on every token, which on a long answer is the difference between a
+        /// panel that keeps up and one that does not.
+        /// </summary>
+        void Tick()
+        {
+            bool moving = false;
+            if (_working != null) _working.Invalidate();
+            foreach (Control c in _items)
+            {
+                var t = c as NsThought;
+                if (t != null && t.Live) t.Invalidate();
+                var s = c as NsStep;
+                if (s != null && s.Animating) { s.Invalidate(); moving = true; }
+            }
+            if (_reply != null) _reply.Breathe();
+
+            if (_replyDirty && _reply != null && unchecked(Environment.TickCount - _lastRender) > 80)
+            {
+                _reply.Markdown = Clean(_streamed.ToString());
+                _replyDirty = false;
+                _layoutDirty = true;
+                _lastRender = Environment.TickCount;
+            }
+
+            // Things still arriving are laid out every frame, so they grow into
+            // place rather than jump.
+            if (_revealing) { _layoutDirty = true; moving = true; }
+            if (_layoutDirty) { _layoutDirty = false; LayoutTranscript(true); }
+            if (StepScroll()) moving = true;
+
+            if (_dragging)
+            {
+                // A selection dragged past the top or the bottom keeps scrolling
+                // for as long as the button is held, even with the pointer still.
+                if ((Control.MouseButtons & MouseButtons.Left) == 0) _dragging = false;
+                else { AutoScrollDrag(); moving = true; }
+            }
+
+            if (_busy)
+            {
+                _bar.Invalidate();
+                _composer.Invalidate();
+            }
+
+            if (!_busy && !_replyDirty && !moving && _scrollTarget < 0)
+            {
+                _tick.Stop();
+                _bar.Invalidate();
+                _composer.Invalidate();
+            }
         }
 
         void ReplyArrived(Task<AiReply> done)
         {
-            _tick.Stop();
-            Busy(false);
-
             // A cancelled task is not a faulted one, and Result throws on
             // either. Stopping is something the operator did, so it reads as a
             // note on the turn rather than as a failure.
             if (done.IsCanceled || done.IsFaulted)
             {
                 string trouble = done.IsCanceled ? "Stopped." : Plain(done.Exception);
-                if (_live != null) { _live.Pending = false; _live.Trouble = true; _live.Text = trouble; }
-                else AddNote(trouble, true);
+                if (_reply != null) { _reply.Markdown = Clean(_streamed.ToString()); _reply.Streaming = false; }
+                Finish();
+                AddNote(trouble, !done.IsCanceled && !(done.Exception != null && done.Exception.GetBaseException() is OperationCanceledException));
 
                 // The turn did not happen, so it does not belong in the history
                 // the next one is built from -- all of it, tool calls included:
                 // a call left without its result is a history every provider
                 // refuses. What the tools already did to documents stays done,
                 // and on screen, where the operator can see and undo it.
-                if (_turnStart >= 0 && _turnStart < _history.Count)
-                    _history.RemoveRange(_turnStart, _history.Count - _turnStart);
-                _live = null;
-                LayoutTranscript(true);
-                // Not cleared: the status bar says what went wrong, in one line.
+                TakeBack();
+                AddActions(true);
+                UnqueueToComposer();
                 int cut = trouble.IndexOf('\n');
                 Say(cut > 0 ? trouble.Substring(0, cut) : trouble);
                 return;
             }
 
             AiReply reply = done.Result;
+            EndThought();
+
+            // A provider that gives the thinking only at the end (or a model
+            // that thought without streaming it) is shown the same way.
+            if (reply != null && reply.Thinking.Length > 0 && !LoggedThought(reply.Thinking))
+            {
+                var late = InsertBefore(new NsThought { Thinking = reply.Thinking }, _reply);
+                late.Live = false;
+                late.Toggled += delegate { LayoutTranscript(false); };
+                _log.Add(new AiChatItem { Kind = "thought", Text = reply.Thinking });
+            }
 
             // The model wants something done before it can answer.
             if (reply != null && reply.ToolCalls.Count > 0 && ToolRunner != null)
@@ -970,21 +1527,26 @@ namespace NextScan.App
                 asked.ToolCalls.AddRange(reply.ToolCalls);
                 _history.Add(asked);
 
-                // Whatever it said before asking stays as its own turn; a
-                // bubble with nothing in it goes.
-                if (_live != null)
+                // Whatever it said before asking stays as its own part of the
+                // turn; an empty one goes.
+                string said = Clean(reply.Text ?? "").Trim();
+                if (_reply != null)
                 {
-                    if ((reply.Text ?? "").Trim().Length == 0) RemoveBubble(_live);
-                    else { _live.Pending = false; _live.Text = reply.Text; }
-                    _live = null;
+                    _reply.Streaming = false;
+                    if (said.Length == 0) RemoveItem(_reply);
+                    else { _reply.Markdown = said; _log.Add(new AiChatItem { Kind = "interim", Text = said }); }
+                    _reply = null;
                 }
+                _replyDirty = false;
 
                 if (++_rounds > MaxRounds)
                 {
+                    Finish();
                     AddNote("Stopped after " + MaxRounds + " steps: this is taking more steps than it should. " +
                             "Ask again, perhaps in smaller parts.", true);
-                    if (_turnStart >= 0 && _turnStart < _history.Count)
-                        _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+                    TakeBack();
+                    AddActions(true);
+                    UnqueueToComposer();
                     return;
                 }
 
@@ -992,17 +1554,66 @@ namespace NextScan.App
                 return;
             }
 
-            string text = reply == null ? "" : (reply.Text ?? "");
+            string text = Clean(reply == null ? "" : (reply.Text ?? ""));
             if (text.Trim().Length == 0) text = "(the model returned nothing)";
 
-            if (_live != null) { _live.Pending = false; _live.Text = text; }
+            if (_reply == null) _reply = NewReply(false);
+            _reply.Streaming = false;
+            _reply.Markdown = text;
+            _replyDirty = false;
             _history.Add(AiMessage.FromAssistant(text));
-            _live = null;
+            _log.Add(new AiChatItem { Kind = "assistant", Text = text });
+            _reply = null;
 
             Count(reply);
+            Finish();
             Keep();
+            AddActions(false);
             LayoutTranscript(true);
             Say("");
+            SendQueued();
+        }
+
+        /// <summary>
+        /// An answer without the application's own note at its head. Told not
+        /// to, a model still sometimes begins by repeating the <app> block it
+        /// was given, and the operator is shown their own screen described back.
+        /// </summary>
+        static string Clean(string text)
+        {
+            string s = text ?? "";
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"^\s*<app>[\s\S]*?(</app>|$)\s*", "");
+            return s.TrimStart('\r', '\n');
+        }
+
+        bool LoggedThought(string text)
+        {
+            for (int i = _log.Count - 1; i >= _logStart && i >= 0; i--)
+                if (_log[i].Kind == "thought" && _log[i].Text.Length > 0 && text.StartsWith(_log[i].Text.Substring(0, Math.Min(40, _log[i].Text.Length)), StringComparison.Ordinal)) return true;
+            return false;
+        }
+
+        /// <summary>The turn is over, whichever way: the status line goes and the buttons come back.</summary>
+        void Finish()
+        {
+            EndThought();
+            if (_working != null) { RemoveItem(_working); _working = null; }
+            foreach (Control c in _items)
+            {
+                var s = c as NsStep;
+                if (s != null && s.State == NsStep.StepState.Running) s.State = NsStep.StepState.Failed;
+            }
+            if (_cancel != null) { _cancel.Dispose(); _cancel = null; }
+            Busy(false);
+        }
+
+        /// <summary>Takes a turn that did not happen out of the history and the log.</summary>
+        void TakeBack()
+        {
+            if (_turnStart >= 0 && _turnStart < _history.Count)
+                _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+            if (_logStart >= 0 && _logStart < _log.Count)
+                _log.RemoveRange(_logStart, _log.Count - _logStart);
         }
 
         /// <summary>
@@ -1014,106 +1625,877 @@ namespace NextScan.App
         void Keep()
         {
             if (_chatId.Length == 0) _chatId = AiHistory.NewId();
+            AiHistory.Save(_chatId, _log, Provider().Info.Name, AiModels.NameOf(Provider(), _model), _pageFor, _title);
+        }
 
-            // What was said, not the machinery: tool calls and their results
-            // are steps of a turn, and a conversation reopened later has no
-            // documents open for them to refer to.
-            var said = new List<AiMessage>();
-            foreach (AiMessage m in _history)
+        static string Line(string text)
+        {
+            string one = (text ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+            while (one.IndexOf("  ", StringComparison.Ordinal) >= 0) one = one.Replace("  ", " ");
+            return one.Length <= 60 ? one : one.Substring(0, 59).TrimEnd() + "…";
+        }
+
+        // =====================================================================
+        // Selecting and copying across the whole transcript
+        //
+        // The transcript is a column of controls, and a text box selects inside
+        // its own edges. A person drags from the first line to the last and
+        // expects the lot, so each item reports what it holds and what of it is
+        // selected (ChatItemBase) and this drives them together: the drag
+        // starts in one item, and every item between it and the pointer is
+        // selected whole, the one under the pointer as far as the pointer got.
+        // =====================================================================
+
+        IEnumerable<ChatItemBase> Chat()
+        {
+            foreach (Control c in _items)
             {
-                if (m.ToolResults.Count > 0 && string.IsNullOrEmpty(m.Text)) continue;
-                if (string.IsNullOrEmpty(m.Text)) continue;
-                said.Add(m.Role == AiRole.User ? AiMessage.FromUser(m.Text) : AiMessage.FromAssistant(m.Text));
+                var item = c as ChatItemBase;
+                if (item != null) yield return item;
             }
-            AiHistory.Save(_chatId, said, Provider().Info.Name,
-                           AiModels.NameOf(Provider(), _model), _pageFor);
+        }
+
+        List<ChatItemBase> Selectables()
+        {
+            var list = new List<ChatItemBase>();
+            foreach (ChatItemBase item in Chat()) if (item.Selectable) list.Add(item);
+            return list;
+        }
+
+        /// <summary>What every item raises, wired once when it joins the transcript.</summary>
+        void HookItem(ChatItemBase item)
+        {
+            item.SelectStarted += OnSelectStarted;
+            item.SelectDragged += OnSelectDragged;
+            item.SelectEnded += delegate { _dragging = false; };
+            item.Wheeled += OnTranscriptWheel;
+
+            var reply = item as NsReply;
+            if (reply != null)
+            {
+                reply.Menu = _chatMenu;
+                NsReply which = reply;
+                reply.CopyWanted += delegate { CopyRich(which.MarkdownText); };
+            }
+            var bubble = item as NsBubble;
+            if (bubble != null && !bubble.Quiet) bubble.Menu = _chatMenu;
+        }
+
+        struct SelPos { public int Item; public int Char; }
+
+        void OnSelectStarted(ChatItemBase item, int index)
+        {
+            foreach (ChatItemBase other in Chat()) if (other != item) other.ClearSelection();
+            _anchorItem = item;
+            _anchorIdx = index;
+            _dragging = true;
+            _dragPoint = Cursor.Position;
+            // A text box keeps the focus it just took (the caret and the keys
+            // belong to it); anything painted hands it to the transcript, so
+            // Ctrl+A and Ctrl+C mean something after a click on it.
+            if (!item.Native) _scroll.Focus();
+            _tick.Start();
+        }
+
+        void OnSelectDragged(ChatItemBase item, Point screen)
+        {
+            if (!_dragging) return;
+            _dragPoint = screen;
+            ExtendSelection(screen);
+        }
+
+        void GapDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+            Point screen = ((Control)sender).PointToScreen(e.Location);
+            ClearAllSelection();
+            _scroll.Focus();
+            List<ChatItemBase> list = Selectables();
+            SelPos pos = PositionAt(screen);
+            if (pos.Item < 0 || pos.Item >= list.Count) return;
+            _anchorItem = list[pos.Item];
+            _anchorIdx = pos.Char;
+            _dragging = true;
+            _dragPoint = screen;
+            _tick.Start();
+        }
+
+        void GapMove(object sender, MouseEventArgs e)
+        {
+            if (!_dragging) return;
+            Point screen = ((Control)sender).PointToScreen(e.Location);
+            _dragPoint = screen;
+            ExtendSelection(screen);
         }
 
         /// <summary>
-        /// Earlier conversations, newest first.
-        ///
-        /// What is reopened is what was said, not what was looked at: the page
-        /// is not kept, because a folder of scanned identity papers left on a
-        /// shop machine is a different thing from a folder of text about them.
-        /// The panel says so when one is opened.
+        /// Where a point on screen falls in the transcript, as an item and a
+        /// character in it: over an item, the character under it; in a gap or
+        /// above the first, the start of the next item; below the last, its end.
         /// </summary>
-        void OpenHistory()
+        SelPos PositionAt(Point screen)
         {
-            IList<AiChat> recent = AiHistory.Recent(30);
-            NsChoiceMenu menu = new NsChoiceMenu();
-
-            if (recent.Count == 0) menu.Note("Nothing yet.");
-            else
+            List<ChatItemBase> list = Selectables();
+            for (int i = 0; i < list.Count; i++)
             {
-                menu.Header("Earlier", recent.Count + "");
-                foreach (AiChat chat in recent)
-                {
-                    AiChat which = chat;
-                    menu.Item(chat.Title, When(chat.When), chat.Id == _chatId, which.Id);
-                }
-                menu.Rule();
-                menu.Item("Forget all of them", "", false, ForgetAll);
+                Rectangle r = list[i].RectangleToScreen(list[i].ClientRectangle);
+                if (screen.Y < r.Top) return new SelPos { Item = i, Char = 0 };
+                if (screen.Y <= r.Bottom) return new SelPos { Item = i, Char = list[i].CharAt(screen) };
             }
-
-            menu.Picked += delegate (object tag) { Reopen(tag); };
-            menu.Show(_past, Math.Max(240, Width - 28));
+            if (list.Count == 0) return new SelPos { Item = -1 };
+            return new SelPos { Item = list.Count - 1, Char = list[list.Count - 1].TextLength };
         }
 
-        static readonly object ForgetAll = new object();
+        void ExtendSelection(Point screen)
+        {
+            List<ChatItemBase> list = Selectables();
+            int a = list.IndexOf(_anchorItem);
+            if (a < 0) return;
+
+            SelPos anchor = new SelPos { Item = a, Char = _anchorIdx };
+            SelPos cur = PositionAt(screen);
+            if (cur.Item < 0) return;
+
+            if (cur.Item == anchor.Item)
+            {
+                // Still inside the item it began in: its own text box does the
+                // selecting. Whatever a wider drag had selected is let go of.
+                for (int i = 0; i < list.Count; i++) if (i != a) list[i].ClearSelection();
+                return;
+            }
+
+            bool forward = cur.Item > anchor.Item;
+            SelPos start = forward ? anchor : cur, end = forward ? cur : anchor;
+
+            // After the text box that has the mouse has finished with this
+            // move: it re-selects its own range on every one, and would undo
+            // what is set here.
+            BeginInvoke((MethodInvoker)delegate { ApplySelection(list, start, end); });
+        }
+
+        static void ApplySelection(List<ChatItemBase> list, SelPos start, SelPos end)
+        {
+            for (int i = 0; i < list.Count; i++)
+            {
+                ChatItemBase item = list[i];
+                if (i < start.Item || i > end.Item) { item.ClearSelection(); continue; }
+                if (i > start.Item && i < end.Item) { item.SelectAllText(); continue; }
+                int from = i == start.Item ? start.Char : 0;
+                int to = i == end.Item ? end.Char : item.TextLength;
+                if (to > from) item.SelectRange(from, to); else item.ClearSelection();
+            }
+        }
+
+        /// <summary>Held at the top or bottom edge, the transcript keeps scrolling and the selection keeps growing.</summary>
+        void AutoScrollDrag()
+        {
+            Rectangle r = _scroll.RectangleToScreen(_scroll.ClientRectangle);
+            int dy = 0;
+            if (_dragPoint.Y < r.Top + 18) dy = -Math.Max(6, (r.Top + 18 - _dragPoint.Y) / 2);
+            else if (_dragPoint.Y > r.Bottom - 18) dy = Math.Max(6, (_dragPoint.Y - (r.Bottom - 18)) / 2);
+            if (dy == 0) return;
+            _scrollTarget = -1;
+            SetScroll(CurrentScroll() + dy);
+            SyncStick();
+            ExtendSelection(_dragPoint);
+        }
+
+        void ClearAllSelection()
+        {
+            foreach (ChatItemBase item in Chat()) item.ClearSelection();
+        }
+
+        void SelectEverything()
+        {
+            if (_items.Count == 0) return;
+            foreach (ChatItemBase item in Selectables()) item.SelectAllText();
+            _scroll.Focus();
+            Say("Everything selected. Ctrl+C copies it.");
+        }
+
+        /// <summary>Something is selected that no single text box can copy on its own.</summary>
+        bool CrossActive()
+        {
+            int n = 0;
+            foreach (ChatItemBase item in Selectables())
+            {
+                if (!item.AnySelected) continue;
+                if (!item.Native) return true;
+                n++;
+            }
+            return n >= 2;
+        }
+
+        bool AnySelection()
+        {
+            foreach (ChatItemBase item in Selectables()) if (item.AnySelected) return true;
+            return false;
+        }
+
+        /// <summary>Copies what is selected across the items. The whole of it selected is the whole conversation.</summary>
+        bool CopySelection()
+        {
+            List<ChatItemBase> list = Selectables();
+            if (list.Count > 0 && list.TrueForAll(i => i.AllSelected)) { CopyConversation(); return true; }
+
+            var parts = new List<string>();
+            foreach (ChatItemBase item in list)
+            {
+                if (item.Kind == "thought") continue;
+                string text = item.SelectedText;
+                if (text.Length > 0) parts.Add(text);
+            }
+            if (parts.Count == 0) return false;
+            SetText(string.Join("\n\n", parts.ToArray()));
+            return true;
+        }
+
+        // =====================================================================
+        // Copying and saving
+        // =====================================================================
+
+        /// <summary>The conversation as Markdown, from what was logged (so a reopened one exports the same as a live one).</summary>
+        string ConversationMarkdown(bool header, bool thoughts)
+        {
+            var sb = new StringBuilder();
+            if (header)
+            {
+                sb.Append("# ").Append(_title.Length > 0 ? _title : "Conversation").Append("\n\n");
+                IAiProvider p = Provider();
+                sb.Append("*").Append(DateTime.Now.ToString("d MMMM yyyy, h:mm tt", CultureInfo.InvariantCulture));
+                if (_lastModel.Length > 0) sb.Append(" · ").Append(AiModels.NameOf(p, _lastModel));
+                sb.Append("*\n\n");
+            }
+
+            // "Assistant" heads whatever the assistant side of a turn begins
+            // with -- its steps, or its first words -- once per turn.
+            string prev = "";
+            bool labelled = false;
+            foreach (AiChatItem it in _log)
+            {
+                bool list = it.Kind == "step" || it.Kind == "failed";
+                if ((prev == "step" || prev == "failed") && !list) sb.Append('\n');
+
+                bool mine = it.Kind == "user";
+                bool theirs = it.Kind == "assistant" || it.Kind == "interim" || list ||
+                              (it.Kind == "thought" && thoughts && (it.Text ?? "").Trim().Length > 0);
+                if (mine) labelled = false;
+                if (theirs && !labelled) { sb.Append("**Assistant**\n\n"); labelled = true; }
+
+                switch (it.Kind)
+                {
+                    case "user":
+                        sb.Append("**You**\n\n").Append((it.Text ?? "").Trim()).Append("\n\n");
+                        break;
+                    case "assistant":
+                    case "interim":
+                        sb.Append((it.Text ?? "").Trim()).Append("\n\n");
+                        break;
+                    case "step":
+                        sb.Append("- ✓ ").Append(OneLine(it.Text)).Append('\n');
+                        break;
+                    case "failed":
+                    {
+                        string[] two = (it.Text ?? "").Split(new[] { '\n' }, 2);
+                        sb.Append("- ✗ ").Append(OneLine(two[0]));
+                        if (two.Length > 1 && two[1].Trim().Length > 0) sb.Append(" — ").Append(OneLine(two[1]));
+                        sb.Append('\n');
+                        break;
+                    }
+                    case "thought":
+                        if (thoughts && (it.Text ?? "").Trim().Length > 0)
+                            sb.Append("> *Thinking:* ").Append((it.Text ?? "").Trim().Replace("\n", "\n> ")).Append("\n\n");
+                        break;
+                    case "note":
+                        sb.Append('*').Append(OneLine(it.Text)).Append("*\n\n");
+                        break;
+                }
+                prev = it.Kind;
+            }
+            if ((prev == "step" || prev == "failed")) sb.Append('\n');
+
+            // What is still being written is part of the conversation too.
+            if (_reply != null && _streamed.Length > 0)
+            {
+                if (!labelled) sb.Append("**Assistant**\n\n");
+                sb.Append(Clean(_streamed.ToString()).Trim()).Append("\n\n");
+            }
+            return sb.ToString().TrimEnd() + "\n";
+        }
+
+        static string OneLine(string s) { return (s ?? "").Replace("\r", " ").Replace("\n", " ").Trim(); }
+
+        /// <summary>The Markdown as the text it reads as: the rich edit control does the rendering, so bullets are bullets and tables are lines.</summary>
+        static string PlainFromMarkdown(string markdown)
+        {
+            using (var box = new NsRichEdit())
+            {
+                box.Rtf = ChatMarkdown.ToRtf(markdown, 10f, Color.Black, Color.Gray, Color.RoyalBlue, Color.Gainsboro);
+                return (box.Text ?? "").Replace("\r\n", "\n").Replace("\n", "\r\n");
+            }
+        }
+
+        /// <summary>The Markdown as RTF in fixed dark colours: this goes into Word or an e-mail, on a white page, whatever the theme is.</summary>
+        static string PaperRtf(string markdown)
+        {
+            return ChatMarkdown.ToRtf(markdown, 10f, Color.Black, Color.FromArgb(90, 90, 90), Color.FromArgb(0, 90, 200), Color.FromArgb(235, 235, 235));
+        }
+
+        /// <summary>Plain text and formatted text together: pasted into Word it keeps its headings and bold, pasted into a text box it is text.</summary>
+        void CopyRich(string markdown)
+        {
+            if (string.IsNullOrWhiteSpace(markdown)) return;
+            try
+            {
+                var data = new DataObject();
+                data.SetData(DataFormats.UnicodeText, PlainFromMarkdown(markdown));
+                data.SetData(DataFormats.Rtf, PaperRtf(markdown));
+                Clipboard.SetDataObject(data, true);
+                Say("Copied");
+            }
+            catch (Exception ex) { Say("Could not copy: " + ex.Message); }
+        }
+
+        void SetText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            try { Clipboard.SetText(text); Say("Copied"); }
+            catch (Exception ex) { Say("Could not copy: " + ex.Message); }
+        }
+
+        void CopyConversation()
+        {
+            if (_log.Count == 0 && _reply == null) { Say("There is nothing to copy yet."); return; }
+            CopyRich(ConversationMarkdown(false, false));
+            Say("The whole conversation is copied");
+        }
+
+        string LastAnswer()
+        {
+            for (int i = _log.Count - 1; i >= 0; i--)
+                if (_log[i].Kind == "assistant") return _log[i].Text;
+            for (int i = _log.Count - 1; i >= 0; i--)
+                if (_log[i].Kind == "interim") return _log[i].Text;
+            return "";
+        }
+
+        void CopyLastAnswer()
+        {
+            string answer = LastAnswer();
+            if (answer.Length == 0) { Say("There is no answer to copy yet."); return; }
+            CopyRich(answer);
+        }
+
+        void SaveConversation()
+        {
+            if (_log.Count == 0) { Say("There is nothing to save yet."); return; }
+            string markdown = ConversationMarkdown(true, true);
+            string name = _title.Length > 0 ? _title : "Conversation";
+            foreach (char bad in Path.GetInvalidFileNameChars()) name = name.Replace(bad, ' ');
+            name = name.Trim();
+            if (name.Length > 60) name = name.Substring(0, 60).Trim();
+
+            using (var dialog = new SaveFileDialog
+            {
+                Title = "Save this conversation",
+                Filter = "Markdown (*.md)|*.md|Text (*.txt)|*.txt|Rich Text, opens in Word (*.rtf)|*.rtf",
+                FileName = name + " " + DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                OverwritePrompt = true,
+            })
+            {
+                if (dialog.ShowDialog(FindForm()) != DialogResult.OK) return;
+                try
+                {
+                    string ext = Path.GetExtension(dialog.FileName).ToLowerInvariant();
+                    if (ext == ".rtf") File.WriteAllText(dialog.FileName, PaperRtf(markdown), Encoding.ASCII);
+                    else if (ext == ".txt") File.WriteAllText(dialog.FileName, PlainFromMarkdown(markdown), new UTF8Encoding(true));
+                    else File.WriteAllText(dialog.FileName, markdown, new UTF8Encoding(true));
+                    Say("Saved " + dialog.FileName);
+                }
+                catch (Exception ex) { Say("Could not save: " + ex.Message); }
+            }
+        }
+
+        void OpenExportMenu(Control anchor)
+        {
+            var menu = new NsChoiceMenu();
+            menu.Header("This conversation", "");
+            if (_log.Count == 0) menu.Note("Nothing here yet.");
+            else
+            {
+                menu.Item("Copy the whole conversation", "", false, "copy-all");
+                menu.Item("Copy the last answer", "Ctrl+Shift+C", false, "copy-last");
+                menu.Item("Copy as Markdown", "", false, "copy-md");
+                menu.Item("Select everything", "Ctrl+A", false, "select-all");
+                menu.Rule();
+                menu.Item("Save as a file…", "", false, "save");
+            }
+            menu.Picked += delegate (object tag) { RunExport(tag as string); };
+            menu.Show(anchor, 250);
+        }
+
+        void RunExport(string what)
+        {
+            switch (what)
+            {
+                case "copy-all": CopyConversation(); break;
+                case "copy-last": CopyLastAnswer(); break;
+                case "copy-md": SetText(ConversationMarkdown(false, false)); break;
+                case "select-all": SelectEverything(); break;
+                case "save": SaveConversation(); break;
+            }
+        }
+
+        // ---- the right-click menu, on any answer or question -------------------
+
+        void BuildChatMenu()
+        {
+            _chatMenu = new ContextMenuStrip();
+            ToolStripItem copy = _chatMenu.Items.Add("Copy");
+            copy.Click += delegate
+            {
+                if (CrossActive()) CopySelection();
+                else if (_menuItem != null && _menuItem.SelectedText.Length > 0) SetText(_menuItem.SelectedText);
+                else CopyMessage();
+            };
+            _chatMenu.Items.Add("Copy this message", null, delegate { CopyMessage(); });
+            _chatMenu.Items.Add("Copy the whole conversation", null, delegate { CopyConversation(); });
+            _chatMenu.Items.Add(new ToolStripSeparator());
+            _chatMenu.Items.Add("Select everything", null, delegate { SelectEverything(); });
+            _chatMenu.Items.Add("Save the conversation as a file…", null, delegate { SaveConversation(); });
+            _chatMenu.Opening += delegate
+            {
+                Control source = _chatMenu.SourceControl;
+                _menuItem = source == null ? null : source.Parent as ChatItemBase;
+            };
+        }
+
+        void CopyMessage()
+        {
+            if (_menuItem == null) return;
+            if (_menuItem is NsReply) CopyRich(_menuItem.MarkdownText);
+            else SetText(_menuItem.PlainText);
+        }
+
+        // =====================================================================
+        // Under the newest answer: copy, try again, take a question back
+        // =====================================================================
+
+        void AddActions(bool failed)
+        {
+            RemoveActions();
+            if (_items.Count == 0) return;
+
+            IAiProvider provider = Provider();
+            double seconds = (DateTime.Now - _turnStarted).TotalSeconds;
+            var info = new StringBuilder();
+            info.Append(failed ? "Did not finish" : (_lastModel.Length > 0 ? AiModels.NameOf(provider, _lastModel) : provider.Info.Name));
+            info.Append(" · ").Append(seconds < 10 ? seconds.ToString("0.0", CultureInfo.InvariantCulture) : ((int)seconds).ToString(CultureInfo.InvariantCulture)).Append(" s");
+
+            _actions = AddItem(new NsActions { Info = info.ToString(), CanRetry = _lastTurn != null });
+            _actions.CopyClicked += CopyLastAnswer;
+            _actions.RetryClicked += Retry;
+            _actions.MoreClicked += delegate { OpenExportMenu(_actions); };
+            if (!failed) AddFollowUps();
+            RefreshEditable();
+        }
+
+        /// <summary>
+        /// Three things worth asking after any answer. "Put it in Word" only
+        /// where the document tools are there to do it.
+        /// </summary>
+        void AddFollowUps()
+        {
+            var chips = new List<NsFollowUps.Chip>();
+            if (ToolsSource != null && ToolRunner != null)
+                chips.Add(new NsFollowUps.Chip
+                {
+                    Text = "Put it in Word",
+                    Prompt = "Put your last answer into a new Word document, properly set out on A4, and tell me when it is ready.",
+                });
+            chips.Add(new NsFollowUps.Chip
+            {
+                Text = "Translate it",
+                Prompt = "Translate your last answer: into Bengali if it is in English, otherwise into English. Keep the layout and leave names and numbers as they are.",
+            });
+            chips.Add(new NsFollowUps.Chip { Text = "Shorter", Prompt = "Say that again, shorter." });
+            chips.Add(new NsFollowUps.Chip { Text = "Explain more", Prompt = "Explain that in more detail, with an example." });
+
+            _followUps = AddItem(new NsFollowUps());
+            _followUps.Chips.AddRange(chips);
+            _followUps.Chosen += delegate (string text, string prompt) { Send(text, prompt, false); };
+            LayoutTranscript(true);
+        }
+
+        void RemoveActions()
+        {
+            if (_followUps != null) { RemoveItem(_followUps); _followUps = null; }
+            if (_actions == null) return;
+            RemoveItem(_actions);
+            _actions = null;
+        }
+
+        /// <summary>Only the newest question can be taken back into the box, and not while it is being answered.</summary>
+        void RefreshEditable()
+        {
+            bool changed = false;
+            for (int i = 0; i < _items.Count; i++)
+            {
+                var bubble = _items[i] as NsBubble;
+                if (bubble == null || !bubble.Mine) continue;
+                bool can = !_busy && _lastTurn != null && i == _turnItemStart;
+                if (bubble.Editable == can) continue;
+                bubble.Editable = can;
+                bubble.Refresh_();
+                changed = true;
+            }
+            // Room for the pencil narrows the text, which can add a line.
+            if (changed) LayoutTranscript(false);
+        }
+
+        /// <summary>Asks the same question again: what the turn made goes, what was asked stays, and the model is asked as before.</summary>
+        void Retry()
+        {
+            if (_busy || _lastTurn == null || _turnItemStart < 0 || _turnItemStart >= _items.Count) return;
+            IAiProvider provider = Provider();
+            if (!provider.Ready) { AddNote("No key has been set for " + provider.Info.Name + ".", true); return; }
+
+            RemoveItemsAfter(_turnItemStart);
+            if (_turnStart >= 0 && _turnStart <= _history.Count) _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+            if (_logStart >= 0 && _logStart <= _log.Count) _log.RemoveRange(_logStart, _log.Count - _logStart);
+            _log.Add(new AiChatItem { Kind = "user", Text = _lastShown });
+            _turnStart = _history.Count;
+            _history.Add(_lastTurn);
+
+            _rounds = 0;
+            _turnStarted = DateTime.Now;
+            _turnIn = _turnOut = 0;
+            _stick = true;
+            Busy(true);
+            Ask(provider);
+        }
+
+        /// <summary>Takes the newest question back into the box, with whatever came after it removed, to be changed and sent again.</summary>
+        void EditLast()
+        {
+            if (_busy || _lastTurn == null || _turnItemStart < 0 || _turnItemStart >= _items.Count) return;
+
+            RemoveItemsAfter(_turnItemStart - 1);
+            if (_turnStart >= 0 && _turnStart <= _history.Count) _history.RemoveRange(_turnStart, _history.Count - _turnStart);
+            if (_logStart >= 0 && _logStart <= _log.Count) _log.RemoveRange(_logStart, _log.Count - _logStart);
+            if (_lastTurn.Image != null) { _pageSent = false; _pageFor = ""; }
+            if (_logStart == 0) { _title = ""; _bar.Invalidate(); }
+
+            _composer.Text = _lastText;
+            _lastTurn = null;
+            _turnItemStart = -1;
+            if (_items.Count == 0) ShowTranscript(false);
+            UpdateSend();
+            UpdateChip();
+            _composer.TakeFocus();
+            if (_log.Count == 0 && _chatId.Length > 0) { AiHistory.Forget(_chatId); _chatId = ""; }
+            else if (_log.Count > 0) Keep();
+            Say("Change it and send it again.");
+        }
+
+        // ---- the Up arrow: what was sent before --------------------------------
+
+        void OnRecall(int direction)
+        {
+            if (_sent.Count == 0) return;
+            if (direction < 0) _recall = _recall < 0 ? _sent.Count - 1 : Math.Max(0, _recall - 1);
+            else
+            {
+                if (_recall < 0) return;
+                _recall++;
+                if (_recall >= _sent.Count) { _recall = -1; _composer.Recalled(""); return; }
+            }
+            _composer.Recalled(_sent[_recall]);
+        }
+
+        // ---- the keyboard --------------------------------------------------------
+
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            bool inTranscript = _scroll != null && _scroll.ContainsFocus;
+
+            if (keyData == (Keys.Control | Keys.A) && inTranscript && _items.Count > 0) { SelectEverything(); return true; }
+            if (keyData == (Keys.Control | Keys.C) && inTranscript && CrossActive() && CopySelection()) return true;
+            if (keyData == (Keys.Control | Keys.Shift | Keys.C)) { CopyLastAnswer(); return true; }
+
+            // Text size: Ctrl and plus or minus, Ctrl+0 for the usual one.
+            if (keyData == (Keys.Control | Keys.Oemplus) || keyData == (Keys.Control | Keys.Add) || keyData == (Keys.Control | Keys.Shift | Keys.Oemplus))
+            { ChangeZoom(0.1f); return true; }
+            if (keyData == (Keys.Control | Keys.OemMinus) || keyData == (Keys.Control | Keys.Subtract)) { ChangeZoom(-0.1f); return true; }
+            if (keyData == (Keys.Control | Keys.D0) || keyData == (Keys.Control | Keys.NumPad0)) { ChangeZoom(0); return true; }
+
+            if (keyData == Keys.Escape)
+            {
+                if (_busy) { Stop(); return true; }
+                if (_overlayKind.Length > 0) { CloseOverlay(); return true; }
+                if (AnySelection()) { ClearAllSelection(); return true; }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        // =====================================================================
+        // Earlier conversations, and memory
+        // =====================================================================
+        void BuildOverlay()
+        {
+            _overlay = new Panel { BackColor = Theme.Surface, Visible = false };
+            Controls.Add(_overlay);
+
+            _overlaySearch = new NsTextBox { Icon = NsIcon.Search, Cue = "Search conversations" };
+            _overlaySearch.Edited += delegate { FillOverlay(); };
+            _overlay.Controls.Add(_overlaySearch);
+
+            _overlayAdd = new NsTextBox { Cue = "Something to remember…" };
+            _overlayAdd.TextCommitted += delegate { AddFact(); };
+            _overlay.Controls.Add(_overlayAdd);
+
+            _overlayAddButton = new NsPill { Text = "Keep", Kind = PillKind.Primary, Radius = 14 };
+            _overlayAddButton.Click += delegate { AddFact(); };
+            _overlay.Controls.Add(_overlayAddButton);
+
+            _overlayList = new NsRowList();
+            _overlayList.Opened += delegate (object tag) { OverlayOpened(tag); };
+            _overlayList.Deleted += delegate (object tag) { OverlayDeleted(tag); };
+            _overlay.Controls.Add(_overlayList);
+
+            _overlayAll = new NsPill { Kind = PillKind.Quiet, Radius = 12 };
+            _overlayAll.Font = Theme.Ui(8f);
+            _overlayAll.Click += delegate { OverlayForgetAll(); };
+            _overlay.Controls.Add(_overlayAll);
+        }
+
+        void ToggleOverlay(string kind)
+        {
+            if (_overlayKind == kind) { CloseOverlay(); return; }
+            _overlayKind = kind;
+            bool history = kind == "history";
+            _overlaySearch.Visible = history;
+            _overlayAdd.Visible = !history;
+            _overlayAddButton.Visible = !history;
+            _overlayAll.Text = history ? "Forget all conversations" : "Forget everything";
+            _overlayList.Empty = history ? "No conversations yet." : "Nothing remembered yet.\nTell the assistant \"remember that…\", or type a fact above.";
+            _overlaySearch.Text = "";
+            _overlay.Visible = true;
+            _overlay.BringToFront();
+            _past.Checked = history;
+            _memoryButton.Checked = !history;
+            LayoutAll();
+            FillOverlay();
+            if (history) _overlaySearch.Focus(); else _overlayAdd.Focus();
+        }
+
+        void CloseOverlay()
+        {
+            if (_overlayKind.Length == 0) return;
+            _overlayKind = "";
+            _overlay.Visible = false;
+            _past.Checked = false;
+            _memoryButton.Checked = false;
+        }
+
+        void FillOverlay()
+        {
+            var rows = new List<NsRowList.Row>();
+            if (_overlayKind == "history")
+            {
+                string q = _overlaySearch.Text.Trim();
+                string section = "";
+                foreach (AiChat chat in AiHistory.Recent(200))
+                {
+                    if (q.Length > 0 && chat.Title.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) < 0 &&
+                        !Mentions(chat.Id, q)) continue;
+                    string group = Group(chat.When);
+                    if (group != section) { rows.Add(new NsRowList.Row { Header = true, Title = group }); section = group; }
+                    string sub = When(chat.When);
+                    if (chat.Model.Length > 0) sub += " · " + chat.Model;
+                    if (chat.Turns > 1) sub += " · " + chat.Turns + " questions";
+                    rows.Add(new NsRowList.Row { Title = chat.Title, Sub = sub, Tag = chat.Id, Current = chat.Id == _chatId });
+                }
+            }
+            else if (_overlayKind == "memory")
+            {
+                foreach (AiFact fact in AiMemory.All())
+                    rows.Add(new NsRowList.Row { Title = fact.Text, Sub = fact.Id + " · kept " + When(fact.When), Tag = fact.Id });
+            }
+            _overlayList.SetRows(rows);
+        }
+
+        /// <summary>Whether a conversation says something, for the search. Read only when the title did not match.</summary>
+        static bool Mentions(string id, string q)
+        {
+            AiChat chat = AiHistory.Load(id);
+            if (chat == null) return false;
+            foreach (AiChatItem item in chat.Items)
+                if (item.Said && item.Text.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) >= 0) return true;
+            return false;
+        }
+
+        static string Group(DateTime when)
+        {
+            if (when == default(DateTime)) return "Older";
+            DateTime today = DateTime.Today;
+            if (when >= today) return "Today";
+            if (when >= today.AddDays(-1)) return "Yesterday";
+            if (when >= today.AddDays(-7)) return "This week";
+            if (when >= today.AddDays(-31)) return "This month";
+            return "Older";
+        }
+
+        void OverlayOpened(object tag)
+        {
+            if (_overlayKind == "history") { string id = tag as string; CloseOverlay(); if (id != null) Reopen(id); }
+        }
+
+        void OverlayDeleted(object tag)
+        {
+            string id = tag as string;
+            if (id == null) return;
+            if (_overlayKind == "history")
+            {
+                AiHistory.Forget(id);
+                if (id == _chatId) _chatId = "";
+                Say("Conversation forgotten");
+            }
+            else
+            {
+                AiMemory.Forget(id);
+                Say("Forgotten");
+            }
+            FillOverlay();
+        }
+
+        void OverlayForgetAll()
+        {
+            string what = _overlayKind == "history" ? "every earlier conversation" : "everything the assistant remembers";
+            if (MessageBox.Show(FindForm(), "Forget " + what + "? This cannot be undone.", "NextScan",
+                                MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) != DialogResult.OK) return;
+            if (_overlayKind == "history")
+            {
+                int gone = AiHistory.ForgetAll();
+                _chatId = "";
+                Say(gone + (gone == 1 ? " conversation forgotten" : " conversations forgotten"));
+            }
+            else { AiMemory.ForgetAll(); Say("Memory cleared"); }
+            FillOverlay();
+        }
+
+        void AddFact()
+        {
+            string text = _overlayAdd.Text.Trim();
+            if (text.Length == 0) return;
+            try { AiMemory.Remember(text); _overlayAdd.Text = ""; Say("Kept"); }
+            catch (Exception ex) { Say(ex.Message); }
+            FillOverlay();
+        }
 
         static string When(DateTime when)
         {
             if (when == default(DateTime)) return "";
             TimeSpan ago = DateTime.Now - when;
-            if (ago.TotalHours < 1) return Math.Max(1, (int)ago.TotalMinutes) + " min";
-            if (ago.TotalHours < 24) return (int)ago.TotalHours + " h";
-            if (ago.TotalDays < 7) return (int)ago.TotalDays + " d";
-            return when.ToString("d MMM");
+            if (ago.TotalMinutes < 1) return "just now";
+            if (ago.TotalHours < 1) return Math.Max(1, (int)ago.TotalMinutes) + " min ago";
+            if (ago.TotalHours < 24 && when.Date == DateTime.Today) return when.ToString("h:mm tt", CultureInfo.InvariantCulture);
+            if (ago.TotalDays < 7) return when.ToString("ddd h:mm tt", CultureInfo.InvariantCulture);
+            return when.ToString("d MMM yyyy", CultureInfo.InvariantCulture);
         }
 
-        void Reopen(object tag)
+        void Reopen(string id)
         {
-            if (tag == ForgetAll)
-            {
-                int gone = AiHistory.ForgetAll();
-                _chatId = "";
-                Say(gone + (gone == 1 ? " conversation forgotten" : " conversations forgotten"));
-                return;
-            }
-
-            string id = tag as string;
-            if (id == null) return;
-
             AiChat chat = AiHistory.Load(id);
             if (chat == null) { Say("That conversation could not be read."); return; }
 
             Reset();
             _chatId = chat.Id;
             _pageFor = chat.Page;
+            _title = chat.Title;
+            _bar.Invalidate();
 
             // Marked as sent so the page now on the canvas is not quietly
             // attached to a conversation that was about a different one.
             _pageSent = chat.Page.Length > 0;
 
-            foreach (AiMessage message in chat.Messages)
+            foreach (AiMessage message in chat.Messages) _history.Add(message);
+
+            // What was there is put back as it was, not brought in item by item.
+            _animate = false;
+            foreach (AiChatItem item in chat.Items)
             {
-                _history.Add(message);
-                AddBubble(message.Text, message.Role == AiRole.User, false);
+                _log.Add(item);
+                switch (item.Kind)
+                {
+                    case "user": AddBubble(item.Text, true); break;
+                    case "assistant":
+                    case "interim":
+                    {
+                        NsReply r = NewReply(false);
+                        r.Markdown = item.Text;
+                        break;
+                    }
+                    case "thought":
+                    {
+                        NsThought t = AddItem(new NsThought { Thinking = item.Text });
+                        t.Took = TimeSpan.FromSeconds(item.Seconds);
+                        t.Live = false;
+                        t.Toggled += delegate { LayoutTranscript(false); };
+                        break;
+                    }
+                    case "step":
+                        AddItem(new NsStep { Label = item.Text, State = NsStep.StepState.Done });
+                        break;
+                    case "failed":
+                    {
+                        int nl = item.Text.IndexOf('\n');
+                        AddItem(new NsStep
+                        {
+                            Label = nl > 0 ? item.Text.Substring(0, nl) : item.Text,
+                            Detail = nl > 0 ? item.Text.Substring(nl + 1) : "",
+                            State = NsStep.StepState.Failed,
+                        });
+                        break;
+                    }
+                }
             }
 
             AddNote("Reopened" + (chat.Page.Length > 0 ? " — this was about " + chat.Page + ". " : ". ") +
-                    "The page itself is not kept, so anything asked now is answered from what is " +
-                    "written above.", false);
+                    "Pages are not kept, so anything asked now is answered from what is written above.", false);
+            _animate = true;
 
             UpdateChip();
-            LayoutTranscript(true);
+            LayoutTranscript(false);
+            _stick = true;
+            ScrollToEnd(false);
             Say("");
         }
 
+        /// <summary>
+        /// Stops. While the model is being waited for that is at once -- the
+        /// connection is dropped in the background and whatever still comes
+        /// down it is thrown away -- rather than when the network gets round to
+        /// noticing. While a tool is changing a document it waits for that one
+        /// step to finish, and stops before the next: a document is not left
+        /// half written on purpose.
+        /// </summary>
         void Stop()
         {
             if (_cancel != null) { try { _cancel.Cancel(); } catch { } }
-            Say("Stopping");
+            if (!_busy) return;
+            if (_runningTools) { Say("Stopping after this step"); return; }
+
+            _askId++;
+            if (_reply != null) { _reply.Markdown = Clean(_streamed.ToString()); _reply.Streaming = false; }
+            _replyDirty = false;
+            Finish();
+            AddNote("Stopped.", false);
+            TakeBack();
+            AddActions(true);
+            UnqueueToComposer();
+            Say("Stopped");
         }
 
         void Busy(bool on)
@@ -1123,6 +2505,10 @@ namespace NextScan.App
             _tips.SetToolTip(_send, on ? "Stop" : "Send  (Enter)");
             _modelButton.Enabled = !on;
             _effortButton.Enabled = !on;
+            _composer.Busy = on;
+            if (on) _tick.Start();
+            RefreshEditable();
+            _bar.Invalidate();
             UpdateChip();
             UpdateSend();
         }
@@ -1160,14 +2546,21 @@ namespace NextScan.App
         }
 
         /// <summary>
-        /// What to do about the two failures that are about the model rather
-        /// than the question. The newest model is not always one a key may use:
-        /// Gemini 3.1 Pro answered a free key with a quota of zero, in a page of
-        /// JSON that did not say the other models would have worked.
+        /// What to do about the failures that are about the model or the
+        /// account rather than the question. The newest model is not always one
+        /// a key may use: Gemini 3.1 Pro answered a free key with a quota of
+        /// zero, in a page of JSON that did not say the other models would have
+        /// worked; a gateway's free model answers a plan without it with 403.
         /// </summary>
         static string Hint(string said)
         {
             string s = said.ToLowerInvariant();
+            if (s.Contains("plan does not include") || s.Contains("forbidden"))
+                return "Your plan on this server does not include this model. Choose another from the model button, " +
+                       "or change the plan on the server's website.";
+            if (s.Contains("insufficient credits") || s.Contains("payment_required") || s.Contains("402") || s.Contains("top up"))
+                return "The account on this server has no credit left for this model. Top it up on the server's " +
+                       "website, or choose a free model from the model button.";
             if (s.Contains("quota") || s.Contains("resource_exhausted") || s.Contains("rate limit") ||
                 s.Contains("rate_limit") || s.Contains("429") || s.Contains("too many requests"))
                 return "This model has no quota left on this key, or was asked too often. " +
@@ -1175,6 +2568,8 @@ namespace NextScan.App
             if (s.Contains("not_found") || s.Contains("404") || s.Contains("is not found") ||
                 s.Contains("not supported") || s.Contains("does not exist") || s.Contains("no longer available"))
                 return "This model is not available to this key. Choose another from the model button.";
+            if (s.Contains("image") && (s.Contains("support") || s.Contains("invalid")))
+                return "This model cannot look at pictures. Choose one marked 'sees' from the model button.";
             return "";
         }
 
@@ -1186,6 +2581,8 @@ namespace NextScan.App
         void Count(AiReply reply)
         {
             if (reply == null) return;
+            _turnIn += reply.Usage.InputTokens;
+            _turnOut += reply.Usage.OutputTokens;
             _inTotal += reply.Usage.InputTokens;
             _outTotal += reply.Usage.OutputTokens;
             _cachedTotal += reply.Usage.CachedInputTokens;
@@ -1227,57 +2624,191 @@ namespace NextScan.App
         // =====================================================================
         // The transcript
         // =====================================================================
-        NsBubble AddBubble(string text, bool mine, bool trouble, bool copyable = true)
+
+        /// <summary>
+        /// Adds something to the transcript -- before the status line, which
+        /// stays last for as long as the turn runs.
+        /// </summary>
+        T AddItem<T>(T item) where T : Control
         {
-            NsBubble bubble = new NsBubble { Text = text, Mine = mine, Trouble = trouble };
-            if (!mine && copyable)
+            return InsertBefore(item, _working != null && !(item is NsWorking) ? (Control)_working : null);
+        }
+
+        /// <summary>Whether things arrive with a short reveal. Off while a conversation is put back from disk.</summary>
+        bool _animate = true;
+
+        T InsertBefore<T>(T item, Control before) where T : Control
+        {
+            int at = before == null ? -1 : _items.IndexOf(before);
+            if (at < 0) _items.Add(item); else _items.Insert(at, item);
+            _column.Controls.Add(item);
+
+            var chat = item as ChatItemBase;
+            if (chat != null)
             {
-                NsBubble which = bubble;
-                bubble.CopyWanted += delegate { CopyOut(which.Text); };
+                HookItem(chat);
+                // Steps, thinking, the operator's own turn and the row under an
+                // answer grow into place; an answer is already growing by
+                // itself as it is written.
+                if (_animate && !(item is NsReply)) { chat.Born = Math.Max(1, Environment.TickCount); _tick.Start(); }
             }
-            bubble.Wheeled += OnTranscriptWheel;
-            _bubbles.Add(bubble);
-            _column.Controls.Add(bubble);
 
             // The suggestions are the empty state, and this is no longer empty.
-            if (_bubbles.Count == 1) ShowTranscript(true);
+            if (_items.Count == 1) ShowTranscript(true);
 
             LayoutTranscript(true);
-            return bubble;
+            return item;
+        }
+
+        NsBubble AddBubble(string text, bool mine)
+        {
+            NsBubble bubble = new NsBubble { Text = text, Mine = mine };
+            if (mine) bubble.EditWanted += delegate { EditLast(); };
+            return AddItem(bubble);
         }
 
         void AddNote(string text, bool trouble)
         {
-            AddBubble(text, false, trouble, false);
+            NsBubble note = AddItem(new NsBubble { Text = text, Trouble = trouble, Quiet = !trouble });
+            note.Refresh_();
+            _log.Add(new AiChatItem { Kind = "note", Text = text });
             if (trouble) Say(text);
         }
 
-        void CopyOut(string text)
+        void RemoveItem(Control item)
         {
-            if (string.IsNullOrEmpty(text)) return;
-            try { Clipboard.SetText(text); Say("Copied"); }
-            catch (Exception ex) { Say("Could not copy: " + ex.Message); }
+            if (item == null) return;
+            if (item == _actions) _actions = null;
+            if (item == _followUps) _followUps = null;
+            if (item == _working) _working = null;
+            if (item == _thought) _thought = null;
+            if (item == _reply) _reply = null;
+            _items.Remove(item);
+            _column.Controls.Remove(item);
+            item.Dispose();
+            LayoutTranscript(false);
+        }
+
+        /// <summary>Takes away everything after the item at <paramref name="index"/>: what a turn made, keeping what it was asked.</summary>
+        void RemoveItemsAfter(int index)
+        {
+            for (int i = _items.Count - 1; i > index && i >= 0; i--)
+            {
+                Control item = _items[i];
+                if (item == _actions) _actions = null;
+                if (item == _followUps) _followUps = null;
+                if (item == _working) _working = null;
+                if (item == _thought) _thought = null;
+                if (item == _reply) _reply = null;
+                _items.RemoveAt(i);
+                _column.Controls.Remove(item);
+                item.Dispose();
+            }
+            LayoutTranscript(false);
         }
 
         void OnTranscriptWheel(object sender, MouseEventArgs e)
         {
             // As far as the panel itself moves for a notch over a gap, so the
             // transcript does not change speed as the pointer crosses a turn.
+            // Reading upwards lets go of the newest text; getting back to the
+            // foot picks it up again.
+            // With Ctrl held it is the size of the text that changes.
+            if ((Control.ModifierKeys & Keys.Control) != 0) { ChangeZoom(e.Delta > 0 ? 0.1f : -0.1f); return; }
+
+            _scrollTarget = -1;
             Scroll_(-e.Delta);
+            SyncStick();
+        }
+
+        /// <summary>Makes the conversation's text larger or smaller (80 % to 180 %) and lays it out again, keeping the place.</summary>
+        void ChangeZoom(float by)
+        {
+            float was = ChatFx.Zoom;
+            ChatFx.Zoom = by == 0 ? 1f : Math.Max(0.8f, Math.Min(1.8f, (float)Math.Round(was + by, 1)));
+            if (Math.Abs(ChatFx.Zoom - was) < 0.001f) return;
+
+            int most = MostScroll();
+            double at = most > 0 ? (double)CurrentScroll() / most : 1.0;
+            foreach (Control item in _items)
+            {
+                var r = item as NsReply;
+                if (r != null) { r.ApplyZoom(); continue; }
+                var b = item as NsBubble;
+                if (b != null) b.ApplyZoom();
+            }
+            LayoutTranscript(false);
+            SetScroll((int)(MostScroll() * at));
+            SyncStick();
+            Say("Text size " + (int)Math.Round(ChatFx.Zoom * 100) + " %");
+        }
+
+        int MostScroll() { return Math.Max(0, _column.Height - _scroll.ClientSize.Height); }
+        int CurrentScroll() { return -_scroll.AutoScrollPosition.Y; }
+
+        /// <summary>Moves the transcript. Ours, not the operator's: the scroll bar's own event is told apart by this.</summary>
+        void SetScroll(int y)
+        {
+            _programmatic = true;
+            try { _scroll.AutoScrollPosition = new Point(0, Math.Max(0, Math.Min(MostScroll(), y))); }
+            finally { _programmatic = false; }
         }
 
         void Scroll_(int by)
         {
             if (_scroll == null || _column == null) return;
-
-            int most = Math.Max(0, _column.Height - _scroll.ClientSize.Height);
-            if (most <= 0) return;
+            if (MostScroll() <= 0) return;
 
             // AutoScrollPosition reads back negative and is set positive. It is
             // the one WinForms property that does not round-trip, and reading it
             // as given is how a transcript scrolls the wrong way.
-            int at = Math.Max(0, Math.Min(most, -_scroll.AutoScrollPosition.Y + by));
-            _scroll.AutoScrollPosition = new Point(0, at);
+            SetScroll(CurrentScroll() + by);
+        }
+
+        /// <summary>The operator moved the transcript: following the newest text is on only while they are at its foot.</summary>
+        void SyncStick()
+        {
+            _stick = CurrentScroll() >= MostScroll() - 40;
+            if (!_stick) _scrollTarget = -1;     // a smooth scroll to the end must not carry on against them
+            UpdateToEnd();
+        }
+
+        void ScrollToEnd(bool smooth)
+        {
+            if (smooth) { _scrollTarget = MostScroll(); _tick.Start(); }
+            else { _scrollTarget = -1; SetScroll(MostScroll()); }
+            UpdateToEnd();
+        }
+
+        /// <summary>
+        /// One frame of a smooth scroll: a third of the way there each time,
+        /// so it decelerates onto the end, and follows the end as it moves
+        /// while an answer is being written.
+        /// </summary>
+        bool StepScroll()
+        {
+            if (_scrollTarget < 0) return false;
+            if (_stick) _scrollTarget = MostScroll();
+            int diff = _scrollTarget - CurrentScroll();
+            if (Math.Abs(diff) <= 1)
+            {
+                SetScroll(_scrollTarget);
+                if (!_busy || !_stick) _scrollTarget = -1;
+                return _scrollTarget >= 0;
+            }
+            int step = (int)Math.Ceiling(Math.Abs(diff) * 0.34);
+            SetScroll(CurrentScroll() + (diff > 0 ? step : -step));
+            return true;
+        }
+
+        /// <summary>"Newest" shows while the operator has read up the page and there is more below.</summary>
+        void UpdateToEnd()
+        {
+            if (_toEnd == null || _scroll == null) return;
+            bool show = _scroll.Visible && !_stick && MostScroll() > 60;
+            if (_toEnd.Visible == show) return;
+            _toEnd.Visible = show;
+            if (show) _toEnd.BringToFront();
         }
 
         void ShowTranscript(bool on)
@@ -1290,21 +2821,41 @@ namespace NextScan.App
         public void Reset()
         {
             if (_busy) Stop();
+            _generation++;
+            _askId++;
+            _runningTools = false;
+            if (_busy) Busy(false);
 
             _history.Clear();
+            _log.Clear();
             _pageFor = "";
             _pageSent = false;
             _chatId = "";
-            _live = null;
+            _title = "";
+            _working = null;
+            _thought = null;
+            _reply = null;
+            _actions = null;
+            _followUps = null;
+            _lastTurn = null;
+            _turnItemStart = -1;
+            _queued = null;
+            _dragging = false;
+            _anchorItem = null;
+            _stick = true;
+            _scrollTarget = -1;
             _streamed.Length = 0;
             _inTotal = _outTotal = _cachedTotal = 0;
 
-            foreach (NsBubble bubble in _bubbles) { _column.Controls.Remove(bubble); bubble.Dispose(); }
-            _bubbles.Clear();
+            foreach (Control item in _items) { _column.Controls.Remove(item); item.Dispose(); }
+            _items.Clear();
 
+            if (_queuedChip != null) _queuedChip.Visible = false;
+            if (_toEnd != null) _toEnd.Visible = false;
             ShowTranscript(false);
             UpdateMeter();
             UpdateChip();
+            if (_bar != null) _bar.Invalidate();
             Say("");
         }
 
@@ -1404,7 +2955,7 @@ namespace NextScan.App
         }
 
         const int Pad = 14;
-        const int BarHeight = 32;
+        const int BarHeight = 34;
         const int MeterHeight = 16;
 
         void LayoutAll()
@@ -1412,8 +2963,11 @@ namespace NextScan.App
             if (_bar == null || Width <= 0 || Height <= 0) return;
 
             _bar.SetBounds(0, 0, Width, BarHeight);
-            _fresh.SetBounds(Width - Pad - 26, 4, 26, 24);
-            _past.SetBounds(Width - Pad - 58, 4, 26, 24);
+            _fresh.SetBounds(Width - Pad - 26, 5, 26, 24);
+            _past.SetBounds(Width - Pad - 56, 5, 26, 24);
+            _memoryButton.SetBounds(Width - Pad - 86, 5, 26, 24);
+            _copyButton.SetBounds(Width - Pad - 116, 5, 26, 24);
+            _bar.Invalidate();
 
             int bottom = Height - 8;
 
@@ -1428,13 +2982,46 @@ namespace NextScan.App
             LayoutComposer();
             bottom -= composerHeight + 8;
 
+            // What was typed while it was answering, waiting just above the box.
+            if (_queuedChip.Visible)
+            {
+                int w = Math.Min(Width - Pad * 2, TextRenderer.MeasureText(_queuedChip.Text ?? "", _queuedChip.Font).Width + 44);
+                _queuedChip.SetBounds(Pad, bottom - 24, Math.Max(80, w), 24);
+                _queuedChip.BringToFront();
+                bottom -= 30;
+            }
+
             int top = BarHeight;
             int middle = Math.Max(40, bottom - top);
             _scroll.SetBounds(0, top, Width, middle);
             _welcome.SetBounds(0, top, Width, middle);
+            _overlay.SetBounds(0, top, Width, middle);
+            LayoutOverlay();
+
+            // "Newest": floating over the foot of the transcript, in the middle.
+            int pill = 92;
+            _toEnd.SetBounds((Width - pill) / 2, top + middle - 36, pill, 26);
 
             LayoutWelcome();
             LayoutTranscript(false);
+            UpdateToEnd();
+        }
+
+        void LayoutOverlay()
+        {
+            if (_overlay == null) return;
+            int w = Math.Max(60, _overlay.Width - Pad * 2);
+            int y = 10;
+            if (_overlaySearch.Visible) { _overlaySearch.SetBounds(Pad, y, w, 30); y += 38; }
+            if (_overlayAdd.Visible)
+            {
+                _overlayAdd.SetBounds(Pad, y, Math.Max(40, w - 70), 30);
+                _overlayAddButton.SetBounds(Pad + w - 64, y + 1, 64, 28);
+                y += 38;
+            }
+            int foot = 32;
+            _overlayList.SetBounds(Pad - 6, y, w + 12, Math.Max(40, _overlay.Height - y - foot - 6));
+            _overlayAll.SetBounds(Pad, _overlay.Height - foot, Math.Min(w, TextRenderer.MeasureText(_overlayAll.Text ?? "", _overlayAll.Font).Width + 30), 26);
         }
 
         void LayoutComposer()
@@ -1483,7 +3070,7 @@ namespace NextScan.App
 
             // The box says what it will do with what you type, and that changes
             // when there is a page to attach to it.
-            _composer.Placeholder = has ? "Ask about this page" : "Ask anything";
+            _composer.Placeholder = has ? "Ask about this page, or what to make" : "Ask anything";
             if (_welcome != null) _welcome.Invalidate();
         }
 
@@ -1493,7 +3080,7 @@ namespace NextScan.App
 
             int inner = Math.Max(120, Math.Min(300, _welcome.Width - Pad * 2));
             int x = (_welcome.Width - inner) / 2;
-            int y = WelcomeTop() + 78;
+            int y = WelcomeTop() + 90;
 
             foreach (NsPill chip in _chips)
             {
@@ -1503,8 +3090,8 @@ namespace NextScan.App
         }
 
         /// <summary>
-        /// Places the bubbles down the column, measuring each at the width it
-        /// will actually be drawn at.
+        /// Places the transcript down the column, measuring each item at the
+        /// width it will actually be drawn at.
         /// </summary>
         void LayoutTranscript(bool toEnd)
         {
@@ -1519,25 +3106,67 @@ namespace NextScan.App
             int inner = Math.Max(80, width - Pad * 2);
 
             int y = 10;
+            bool arriving = false;
             _column.SuspendLayout();
-            foreach (NsBubble bubble in _bubbles)
+            Control previous = null;
+            foreach (Control item in _items)
             {
-                bubble.Width = inner;                       // measure at the width it will be drawn at
-                int h = bubble.MeasureHeight(inner);
-                bubble.SetBounds(Pad, y, inner, h);
-                y += h + 8;
+                item.Width = inner;                         // measure at the width it will be drawn at
+                var measured = item as ITranscriptItem;
+                int h = measured != null ? measured.MeasureHeight(inner) : item.Height;
+
+                // Something new grows into its place over a fifth of a second,
+                // easing out: its height is a fraction of what it will be, and
+                // everything below is pushed down as it opens.
+                double shown = 1.0;
+                var chat = item as ChatItemBase;
+                if (chat != null && chat.Born != 0)
+                {
+                    int age = unchecked(Environment.TickCount - chat.Born);
+                    if (age >= 200 || age < 0) chat.Born = 0;
+                    else { shown = ChatFx.EaseOut(age / 200.0); arriving = true; }
+                }
+                int visible = shown >= 1.0 ? h : Math.Max(1, (int)(h * shown));
+
+                // Steps and thinking sit close together; a new turn stands apart.
+                int gap = previous == null ? 0 : Gap(previous, item);
+                y += shown >= 1.0 ? gap : (int)(gap * shown);
+                item.SetBounds(Pad, y, inner, visible);
+                y += visible;
+                previous = item;
             }
+            y += 12;
+            _revealing = arriving;
 
             // A child of a scrolled panel is placed in what is on screen, not in
             // the whole of it. Put back at (0, 0) after the operator had scrolled,
             // the column moved down by however far that was, and a reopened
             // conversation was drawn below an empty screen of its own height.
-            Point shown = _scroll.AutoScrollPosition;
-            _column.SetBounds(shown.X, shown.Y, width, y + 4);
+            Point at = _scroll.AutoScrollPosition;
+            _column.SetBounds(at.X, at.Y, width, y);
             _column.ResumeLayout();
 
-            if (toEnd && _bubbles.Count > 0)
-                _scroll.AutoScrollPosition = new Point(0, Math.Max(0, _column.Height - _scroll.ClientSize.Height));
+            // Following the newest text is the operator's to give up, by
+            // scrolling up, and to take back, by scrolling down to the foot or
+            // pressing "Newest": a reply streaming in never pulls them away
+            // from what they scrolled up to read. Following is a smooth scroll.
+            if (toEnd && _stick && _items.Count > 0)
+            {
+                _scrollTarget = MostScroll();
+                _tick.Start();
+            }
+            UpdateToEnd();
+        }
+
+        static int Gap(Control before, Control item)
+        {
+            bool small = item is NsStep || item is NsThought || item is NsWorking;
+            bool afterSmall = before is NsStep || before is NsThought;
+            var bubble = item as NsBubble;
+            if (bubble != null && bubble.Mine) return 16;
+            if (small && afterSmall) return 2;
+            if (small || afterSmall) return 6;
+            return 10;
         }
 
         /// <summary>Re-reads the palette after a light/dark switch.</summary>
@@ -1548,8 +3177,17 @@ namespace NextScan.App
             if (_column != null) _column.BackColor = Theme.Surface;
             if (_welcome != null) _welcome.BackColor = Theme.Surface;
             if (_bar != null) _bar.BackColor = Theme.Surface;
+            if (_overlay != null) _overlay.BackColor = Theme.Surface;
             if (_composer != null) _composer.ApplyTheme();
             if (_meter != null) _meter.ForeColor = Theme.TextFaint;
+            foreach (Control item in _items)
+            {
+                var r = item as NsReply;
+                if (r != null) r.ApplyTheme();
+                var b = item as NsBubble;
+                if (b != null) b.Refresh_();
+                item.Invalidate();
+            }
             UpdateChip();
             Invalidate(true);
         }

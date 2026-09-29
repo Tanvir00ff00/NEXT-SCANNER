@@ -181,7 +181,9 @@ namespace NextScan.Ai
             var config = new Google.GenAI.Types.GenerateContentConfig
             {
                 MaxOutputTokens = request.MaxOutputTokens,
-                ThinkingConfig = new Google.GenAI.Types.ThinkingConfig { ThinkingLevel = LevelFor(request.Thinking) },
+                // Thought summaries on, so the panel can show the thinking as
+                // it happens. They come back as parts marked Thought.
+                ThinkingConfig = new Google.GenAI.Types.ThinkingConfig { ThinkingLevel = LevelFor(request.Thinking), IncludeThoughts = true },
             };
 
             if (!string.IsNullOrEmpty(request.Instruction))
@@ -209,6 +211,7 @@ namespace NextScan.Ai
             var reply = new AiReply { RawProvider = Info.Id };
             reply.Usage.Model = request.Model;
             var text = new System.Text.StringBuilder();
+            var thought = new System.Text.StringBuilder();
             var turn = new List<Google.GenAI.Types.Part>();
             int unnamed = 0;
 
@@ -234,7 +237,12 @@ namespace NextScan.Ai
                                 ArgumentsJson = part.FunctionCall.Args == null ? "{}" : AiJson.Serialize(part.FunctionCall.Args),
                             });
                         }
-                        else if (!string.IsNullOrEmpty(part.Text) && part.Thought != true)
+                        else if (!string.IsNullOrEmpty(part.Text) && part.Thought == true)
+                        {
+                            thought.Append(part.Text);
+                            if (request.OnThinking != null) request.OnThinking(part.Text);
+                        }
+                        else if (!string.IsNullOrEmpty(part.Text))
                         {
                             text.Append(part.Text);
                             if (onText != null) onText(part.Text);
@@ -252,6 +260,7 @@ namespace NextScan.Ai
 
             reply.Raw = turn;
             reply.Text = text.ToString();
+            reply.Thinking = thought.ToString();
             return reply;
         }
 
