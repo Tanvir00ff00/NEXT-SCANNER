@@ -520,6 +520,9 @@ namespace NextScan.App
             return null;
         }
 
+        /// <summary>A note that starts with this asks for all the text on the picture, not only the handwriting.</summary>
+        public const string AllText = "\u0001ALL\u0001";
+
         /// <summary>
         /// Has Gemini read the handwriting on a picture: the words as written, line by line, with what it
         /// cannot read marked rather than guessed. <paramref name="note"/> may say where to look or what language.
@@ -538,7 +541,17 @@ namespace NextScan.App
                 MaxOutputTokens = 8000,
                 Instruction = "You read handwriting, in Bengali and English and mixtures of them, more carefully than anyone, and write down exactly what is there.",
             };
-            string ask =
+            bool all = (note ?? "").StartsWith(AllText, StringComparison.Ordinal);
+            if (all) note = note.Substring(AllText.Length);
+            string ask = all
+              ? "Transcribe ALL the text in this picture, exactly.\n" +
+                "- Every word, number and digit as written or printed, in the script it is in (Bengali stays Bengali, English stays English); do not translate, correct, complete or summarise anything.\n" +
+                "- In reading order, with the lines and paragraphs as they are on the page. A table: one line per row, the cells separated by ' | '. A form field: its label, then its value.\n" +
+                "- Punctuation, brackets and the numbering of lists exactly as they are (1. 2. 3. or a) b) c)).\n" +
+                "- Handwriting among the print: write it in {curly braces}. Where something cannot be read with certainty write your best reading followed by [?]; where nothing can be read write [illegible]. Never fill a gap from what such a page usually says.\n" +
+                "- Leave out logos and pictures. Do not describe the page.\n" +
+                "Answer with the transcription only."
+              :
                 "Transcribe the handwriting in this picture.\n" +
                 "- Write the words exactly as written, in the script they are written in (Bengali stays Bengali, English stays English); do not translate, correct or complete them.\n" +
                 "- Keep the lines and paragraphs as they are on the page, in reading order.\n" +

@@ -9,6 +9,30 @@ as verified below, assume it does not work yet.
 
 ---
 
+## Word icon: write early, and exact text from Gemini — 2026-10-01
+
+"Every other icon works; the Word one is not accurate." Run through with the
+operator's own default model (Space Bunny Alpha, through NaraRouter) on a made-up
+slip: the page reached the model, but it measured for ten minutes (25 rounds of
+close-ups, some a millimetre high) and had written nothing. Now:
+- after five looks at the scan with nothing written, the result of the next look
+  carries a note telling it to write the first version now and correct it by
+  comparing (the counter is cleared by a write); the instruction says the same
+  (at most four looks, close-ups of 40 mm or more);
+- `transcribe_scan` has `scope: "all"`: Gemini reads every word on the page,
+  printed and handwritten, in reading order, tables as rows with " | ", with [?]
+  and [illegible], handwriting in {braces}, one region at a time for a long page.
+  The instruction says to get the words of a page being rebuilt from it, above all
+  Bengali, rather than from the model's own reading, which is where a rebuild goes
+  wrong on a dense Bengali page.
+Measured on the made-up slip with the same model: first write_document at 90 s
+(round 4) instead of never; after 24 rounds of corrections the page matched the
+scan closely (logo and photo block where and as large as they are, the box, six
+dotted lines, the heading). It is still slow (the model rewrites the whole page
+each round) and its accuracy on a dense Bengali page depends on the reader of
+the text: untested, since no such scan was available and the Gemini quota was
+spent.
+
 ## The assistant is given the page on screen, and can work the scanner — 2026-10-01
 
 Found by the operator: pressing the Word icon sent the question without the

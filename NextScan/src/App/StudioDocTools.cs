@@ -91,7 +91,10 @@ namespace NextScan.App
             }
             if (HandwritingReader != null && HandwritingAvailable != null && HandwritingAvailable())
                 tools.Add(Tool("transcribe_scan",
-                    "Has Gemini, the best reader of handwriting there is, read the handwriting on a scanned page and give you what it says, word for word, " +
+                    "Has Gemini, the best reader of handwriting and of Bengali there is, read the text on a scanned page and give you what it says, exactly, word for word, " +
+                    "with scope 'all' for everything on the page, printed and handwritten, in reading order with its line breaks and a table as rows with ' | ' between the cells " +
+                    "(use this to get the exact words of a page you are rebuilding, above all Bengali, which you misread more than Gemini does; give a region for a long page, " +
+                    "one block at a time, so nothing is skipped), or the default scope 'handwriting' for the handwriting alone. " +
                     "line by line, in the script it is written in, with a [?] after a word it is not sure of and [illegible] where nothing can be read. " +
                     "Use it for any page that has handwriting you are to read or copy -- a handwritten letter or note, the filled-in parts of a printed form, " +
                     "figures written by hand -- instead of reading the handwriting yourself, which you do less well. Printed text is not what it is for: you read " +
@@ -100,6 +103,7 @@ namespace NextScan.App
                     "{\"type\":\"object\",\"properties\":{" +
                     "\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, from 1. Leave out for the selected page or the preview.\"}," +
                     "\"region\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"[x, y, width, height] in mm from the page's top-left corner: only that part is read, at full resolution.\"}," +
+                    "\"scope\":{\"type\":\"string\",\"enum\":[\"handwriting\",\"all\"],\"description\":\"handwriting (default): only the handwritten parts. all: every word on the page, printed and handwritten.\"}," +
                     "\"note\":{\"type\":\"string\",\"description\":\"What to read or what it is, e.g. 'the handwritten amount and name', 'Bengali, a letter to a customer'.\"}}}"));
             return tools;
         }
@@ -264,6 +268,10 @@ namespace NextScan.App
         // =====================================================================
         // Doing it
         // =====================================================================
+        // How many times in a row the scan has been looked at with nothing written. A model asked to copy a page exactly
+        // can go on measuring for ten minutes and never write a word; past a few looks it is told to write.
+        int _looksWithoutWriting;
+
         public async Task<AiToolResult> Run(AiToolCall call)
         {
             var result = new AiToolResult { CallId = call.Id, Name = call.Name };
@@ -303,6 +311,17 @@ namespace NextScan.App
             catch (ToolTrouble ex) { Fail(result, ex.Message); }
             catch (Docs.DocsTrouble ex) { Fail(result, ex.Message); }
             catch (Exception ex) { Fail(result, ex.GetType().Name + ": " + ex.Message); }
+
+            if (call.Name == "write_document" || call.Name == "edit_document" || call.Name == "format_document") _looksWithoutWriting = 0;
+            else if (call.Name == "look_at_scan" || call.Name == "find_scan_pictures" || call.Name == "crop_scan")
+            {
+                _looksWithoutWriting++;
+                if (_looksWithoutWriting >= 5 && !result.IsError)
+                    result.Content = (result.Content ?? "") + "\n[NextScan: you have looked at the scan " + _looksWithoutWriting + " times and written nothing. " +
+                        "Stop measuring. Write the first version now with write_document, from what you already know; then look at the page next to the scan and " +
+                        "correct what differs. A first version that is nearly right is worth more than another close-up, and the corrections are where the " +
+                        "accuracy comes from.]";
+            }
             return result;
         }
 
@@ -976,7 +995,7 @@ namespace NextScan.App
 
             result.Display = "Gemini is reading the handwriting";
             string text;
-            try { text = await HandwritingReader(jpeg, Str(args, "note")); }
+            try { text = await HandwritingReader(jpeg, (Str(args, "scope") == "all" ? ScanKinds.AllText : "") + Str(args, "note")); }
             catch (Exception ex) { throw new ToolTrouble("The handwriting could not be read: " + ex.GetBaseException().Message.Split('\n')[0]); }
             if (text.Length == 0) text = "[illegible]";
 

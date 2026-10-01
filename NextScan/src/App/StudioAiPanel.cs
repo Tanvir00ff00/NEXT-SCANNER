@@ -484,6 +484,11 @@ namespace NextScan.App
             "value sits; for a bill the columns, rows and totals; for a letter the paragraphs, alignment and " +
             "spacing; for handwriting a faithful transcription, with what is unreadable marked as such. Then work " +
             "to that.\n" +
+            "- Do not look for ever: after at most four looks (the whole page with the grid, then close-ups of what is dense or " +
+            "unclear, in blocks of 40 mm or more, never a strip a few millimetres high) WRITE the first version with write_document, then " +
+            "compare it with the scan and correct it. The accuracy comes from the corrections. For the words themselves, above all " +
+            "Bengali, get them from transcribe_scan with scope 'all' (one block of the page at a time if it is long) when it is offered, " +
+            "rather than reading them yourself: it reads more exactly, and a document rebuilt from a misread is wrong however it looks.\n" +
             "- Measure a scan, do not estimate it: look_at_scan with grid:true puts a millimetre grid on the page so " +
             "positions and sizes are read off it, and with region:[x, y, w, h] gives a close-up at the scan's full " +
             "resolution, which is how you read small print, tell dotted from dashed, judge how heavy a line is and see " +
