@@ -82,6 +82,18 @@ namespace NextScan.App
         /// <summary>The name that server gives Jev, e.g. "jev".</summary>
         public string JevModel = "";
 
+        /// <summary>Look at every scanned page (and picture attached to a chat) once, to tell what kind of document it is, its language and whether it is handwritten (StudioScanKind.cs).</summary>
+        public bool ScanRecognise = true;
+
+        /// <summary>The provider that looks, or "" to choose automatically (Gemini first, as AI crop does).</summary>
+        public string ScanRecogniseVia = "";
+
+        /// <summary>A page that is mostly handwriting is answered by Gemini, whatever model the assistant is set to.</summary>
+        public bool HandwritingGemini = true;
+
+        /// <summary>The Gemini model that reads handwriting, or "" for the strongest on the account.</summary>
+        public string HandwritingModel = "";
+
         public int Dpi = 300;
         public ColorMode Mode = ColorMode.Color24;
 
@@ -350,6 +362,10 @@ namespace NextScan.App
                         case "aicropalways": s.AiCropAlways = IsOn(val); break;
                         case "aicropvia": s.AiCropVia = val; break;
                         case "aicropmodel": s.AiCropModel = val; break;
+                        case "scanrecognise": s.ScanRecognise = IsOn(val); break;
+                        case "scanrecognisevia": s.ScanRecogniseVia = val; break;
+                        case "handwritinggemini": s.HandwritingGemini = IsOn(val); break;
+                        case "handwritingmodel": s.HandwritingModel = val; break;
                         case "jevmodel": s.JevModel = val; break;
                         case "usemodel":
                             s.UseModel = !val.Equals("off", StringComparison.OrdinalIgnoreCase)
@@ -481,6 +497,10 @@ namespace NextScan.App
                 lines.Add("aicropalways=" + (AiCropAlways ? "on" : "off"));
                 lines.Add("aicropvia=" + AiCropVia);
                 lines.Add("aicropmodel=" + AiCropModel);
+                lines.Add("scanrecognise=" + (ScanRecognise ? "on" : "off"));
+                lines.Add("scanrecognisevia=" + ScanRecogniseVia);
+                lines.Add("handwritinggemini=" + (HandwritingGemini ? "on" : "off"));
+                lines.Add("handwritingmodel=" + HandwritingModel);
                 lines.Add("jevmodel=" + JevModel);
                 lines.Add("autotone=" + AutoTone);
                 lines.Add("saturation=" + Saturation.ToString(CultureInfo.InvariantCulture));

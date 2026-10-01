@@ -210,7 +210,7 @@ namespace NextScan.Ai
             return any.Length > 0 ? any : list[0].Id;
         }
 
-        static string Newest(IAiProvider provider, IList<AiModel> list, string wanted)
+        public static string Newest(IAiProvider provider, IList<AiModel> list, string wanted)
         {
             string best = "";
             double bestVersion = double.MinValue;

@@ -34,6 +34,12 @@ namespace NextScan.App
         /// <summary>Makes a PDF of the session's scanned pages and returns its path, or null.</summary>
         public Func<string> PdfFromPages;
 
+        /// <summary>Has Gemini read handwriting on a picture (JPEG, a note for it); null where there is no Gemini.</summary>
+        public Func<byte[], string, Task<string>> HandwritingReader;
+
+        /// <summary>True when the reader is there and worth offering: the assistant is not already Gemini.</summary>
+        public Func<bool> HandwritingAvailable;
+
         /// <summary>Where exports go when the assistant names no folder.</summary>
         public Func<string> OutputFolder;
 
@@ -66,6 +72,18 @@ namespace NextScan.App
                     "\\\"criteria\\\": {\\\"bill\\\": \\\"A bill or invoice\\\", \\\"letter\\\": \\\"A letter\\\"}}, " +
                     "\\\"paid\\\": {\\\"type\\\": \\\"noul\\\", \\\"instructions\\\": \\\"Is it marked as paid?\\\"}}\"}}," +
                     "\"required\":[\"questions\"]}"));
+            if (HandwritingReader != null && HandwritingAvailable != null && HandwritingAvailable())
+                tools.Add(Tool("transcribe_scan",
+                    "Has Gemini, the best reader of handwriting there is, read the handwriting on a scanned page and give you what it says, word for word, " +
+                    "line by line, in the script it is written in, with a [?] after a word it is not sure of and [illegible] where nothing can be read. " +
+                    "Use it for any page that has handwriting you are to read or copy -- a handwritten letter or note, the filled-in parts of a printed form, " +
+                    "figures written by hand -- instead of reading the handwriting yourself, which you do less well. Printed text is not what it is for: you read " +
+                    "that. For a form give a region (mm) for each handwritten area, or the whole page and say in note which part you want. Then use the " +
+                    "transcription as the text you type into the document, and say where it was uncertain.",
+                    "{\"type\":\"object\",\"properties\":{" +
+                    "\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, from 1. Leave out for the selected page or the preview.\"}," +
+                    "\"region\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"[x, y, width, height] in mm from the page's top-left corner: only that part is read, at full resolution.\"}," +
+                    "\"note\":{\"type\":\"string\",\"description\":\"What to read or what it is, e.g. 'the handwritten amount and name', 'Bengali, a letter to a customer'.\"}}}"));
             return tools;
         }
 
@@ -153,8 +171,16 @@ namespace NextScan.App
                      "{\"type\":\"object\",\"properties\":{}}"),
 
                 Tool("look_at_scan",
-                     "Shows you a page scanned on the scanner as a picture (not a file the operator attached: those pictures are already in their message): one of the pages scanned in this session (page, from 1), or with no page the one the operator has selected or, failing that, the preview on the scanner glass. Use it to read or copy a scanned document -- to type out handwriting, or to rebuild a form as a Word document -- and to compare your document with it. Says how many pages there are; the picture follows.",
+                     "Shows you a page scanned on the scanner as a picture (not a file the operator attached: those pictures are already in their message): one of the pages scanned in this session (page, from 1), or with no page the one the operator has selected or, failing that, the preview on the scanner glass. Use it to read or copy a scanned document -- to type out handwriting, or to rebuild a form as a Word document -- and to compare your document with it. With grid: true a blue millimetre grid is drawn over the page (a line every 10 mm from the top-left corner, numbered every 50) so you can read positions and sizes off it instead of estimating. With region: [x, y, width, height] in mm you get a close-up cut from the scan at its full resolution -- use it to read small print, to see whether a line is dotted or dashed, to measure a box, to see how a letter is shaped. Says how many pages there are and how big the page is; the picture follows.",
+                     "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, from 1. Leave out for the selected page or the preview.\"},\"grid\":{\"type\":\"boolean\",\"description\":\"Draw a millimetre grid over the page.\"},\"region\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"[x, y, width, height] in mm from the page's top-left corner: a close-up of that part.\"}}}"),
+
+                Tool("find_scan_pictures",
+                     "Finds the pictures on a scanned page -- a logo, an emblem, a stamp, a photograph -- as opposed to printed words, which are text to type. Returns each one's place and size in mm, and a picture of the page with each boxed and numbered so you can check. The application finds them by analysing the page (ink that is coloured or solid in a block too big to be a letter), which is more exact than estimating from a picture; but they are candidates: confirm each, and use crop_scan with a region of your own if one is missed or boxed wrongly. Use it whenever a scan you are copying has anything that is not type or lines.",
                      "{\"type\":\"object\",\"properties\":{\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, from 1. Leave out for the selected page or the preview.\"}}}"),
+
+                Tool("crop_scan",
+                     "Takes a picture out of a scanned page and saves it as a PNG file, to be placed in a Word document with write_document's image block. Give picture (a number from find_scan_pictures) or region [x, y, width, height] in mm. By default the white margin round it is trimmed off (trim: false keeps the region as given); transparent: true makes the white see-through, for a logo that will sit on shading or over other things. Returns the file's path and its real size in mm on the scan -- use that width and height, and the position you measured, so it comes out the size and place it has on the original -- and shows you the picture taken so you can check its edges.",
+                     "{\"type\":\"object\",\"properties\":{\"picture\":{\"type\":\"integer\",\"description\":\"A picture number from find_scan_pictures.\"},\"region\":{\"type\":\"array\",\"items\":{\"type\":\"number\"},\"description\":\"[x, y, width, height] in mm from the page's top-left corner. Instead of picture.\"},\"page\":{\"type\":\"integer\",\"description\":\"Which scanned page, for a region. Leave out for the selected page or the preview.\"},\"trim\":{\"type\":\"boolean\",\"description\":\"Cut off the white margin (default true).\"},\"transparent\":{\"type\":\"boolean\",\"description\":\"Make the white see-through.\"},\"name\":{\"type\":\"string\",\"description\":\"A short name for the file, e.g. bank-logo.\"}}}"),
             };
         }
 
@@ -237,7 +263,10 @@ namespace NextScan.App
                     case "look_at_document": await LookAtDocument(Pick(args), args, result); break;
                     case "format_document": await Format(Pick(args), args, result); break;
                     case "word_api": WordApi(Str(args, "topic"), result); break;
-                    case "look_at_scan": LookAtScan(args, result); break;
+                    case "look_at_scan": await LookAtScan(args, result); break;
+                    case "find_scan_pictures": await FindScanPictures(args, result); break;
+                    case "crop_scan": CropScan(args, result); break;
+                    case "transcribe_scan": await TranscribeScan(args, result); break;
                     case "open_document": await Open(Str(args, "path"), result); break;
                     case "create_document": await Create(Str(args, "kind"), result); break;
                     case "read_document": await Read(Pick(args), args, result); break;
@@ -813,41 +842,209 @@ namespace NextScan.App
             result.Display = "Looked at " + tab.Title + (shown.Count == 1 ? ", " + look.Unit + " " + shown[0] : "");
         }
 
-        void LookAtScan(Dictionary<string, object> args, AiToolResult result)
+        // ---- scanned pages -------------------------------------------------
+
+        /// <summary>The scanned page asked for: by number, or the one the operator has selected or the preview.</summary>
+        NextScan.Core.RawImage ScanFor(Dictionary<string, object> args, out string name, out int count)
         {
             if (ScanPage == null || ScanCount == null) throw new ToolTrouble("Scanned pages are not available here.");
-            int count = ScanCount();
+            count = ScanCount();
             object p;
-            NextScan.Core.RawImage page;
-            string name;
             if (args.TryGetValue("page", out p) && p != null)
             {
                 int n = Convert.ToInt32(p, CultureInfo.InvariantCulture);
                 if (n < 1 || n > count)
                     throw new ToolTrouble(count == 0 ? "Nothing has been scanned in this session." : "There are " + count + " scanned pages; ask for 1 to " + count + ".");
-                page = ScanPage(n - 1);
                 name = "Scanned page " + n + " of " + count;
+                return ScanPage(n - 1);
+            }
+            var current = CurrentScan == null ? null : CurrentScan();
+            if (current == null || current.Item1 == null)
+                throw new ToolTrouble("Nothing has been scanned or previewed yet. Ask the operator to scan the page.");
+            name = current.Item2;
+            return current.Item1;
+        }
+
+        /// <summary>[x, y, width, height] in mm from a tool's arguments, or null.</summary>
+        static double[] RegionOf(Dictionary<string, object> args)
+        {
+            object r;
+            if (!args.TryGetValue("region", out r) || !(r is System.Collections.IList) || ((System.Collections.IList)r).Count != 4) return null;
+            var region = new double[4];
+            for (int i = 0; i < 4; i++) region[i] = Convert.ToDouble(((System.Collections.IList)r)[i], CultureInfo.InvariantCulture);
+            if (region[2] <= 2 || region[3] <= 2) throw new ToolTrouble("region is [x, y, width, height] in mm from the page's top-left corner, at least a few mm wide.");
+            return region;
+        }
+
+        async Task LookAtScan(Dictionary<string, object> args, AiToolResult result)
+        {
+            string name; int count;
+            NextScan.Core.RawImage page = ScanFor(args, out name, out count);
+            if (page == null || !page.IsValid) throw new ToolTrouble("That page could not be prepared.");
+
+            double[] region = RegionOf(args);
+            bool grid = Bool(args, "grid");
+            double pxPerMm;
+            System.Drawing.Bitmap view;
+            try { view = ScanSight.View(page, region, grid, 1568, out pxPerMm); }
+            catch (ArgumentException ex) { throw new ToolTrouble(ex.Message); }
+            using (view) result.Images.Add(AttachReader.Jpeg(view, 1568));
+
+            double wmm = ScanSight.PageWidthMm(page), hmm = ScanSight.PageHeightMm(page);
+            var note = new StringBuilder(name);
+            if (region != null) note.Append(", close-up of x ").Append(region[0]).Append(", y ").Append(region[1]).Append(", ").Append(region[2]).Append(" x ").Append(region[3]).Append(" mm");
+            note.Append(" -- page ").Append(Math.Round(wmm, 1)).Append(" x ").Append(Math.Round(hmm, 1)).Append(" mm; 1 mm = ").Append(Math.Round(pxPerMm, 2).ToString(CultureInfo.InvariantCulture)).Append(" px");
+            if (grid) note.Append(" (blue grid in the page's millimetres: a line every 10 mm from its top-left corner, numbered every 50)");
+            result.ImageNotes.Add(note.ToString());
+            var content = new Dictionary<string, object>
+            {
+                { "shown", name }, { "scanned_pages", count },
+                { "size_mm", new object[] { Math.Round(wmm, 1), Math.Round(hmm, 1) } },
+                { "dpi", Math.Round(page.XDpi) },
+            };
+
+            // Looking at the whole page also finds the pictures on it, because where a logo is cannot be
+            // read reliably off a picture shrunk to fit a model, and a rebuild that puts the logo in the
+            // wrong place is wrong however good the rest is.
+            if (region == null)
+            {
+                try
+                {
+                    List<ScanPicture> found = await Task.Run(() => ScanSight.FindPictures(page));
+                    _found = found; _foundPage = page;
+                    var list = new List<object>();
+                    foreach (ScanPicture pic in found)
+                        list.Add(new Dictionary<string, object> { { "number", pic.Number }, { "kind", pic.Kind }, { "region_mm", new object[] { pic.X, pic.Y, pic.Width, pic.Height } } });
+                    content["pictures_found"] = list;
+                    content["pictures_note"] = found.Count == 0
+                        ? "The application found nothing on this page that looks like artwork (a logo, an emblem, a stamp, a photograph)."
+                        : "The application found these places that look like artwork, measured on the scan (candidates: a heavy heading can be mistaken for one). Take one with crop_scan picture:N -- do not estimate a logo's position from the picture; find_scan_pictures shows them boxed.";
+                }
+                catch { }
+            }
+            result.Content = Json(content);
+            result.Display = "Looked at " + name.ToLowerInvariant() + (region != null ? " (close-up)" : "");
+        }
+
+        async Task TranscribeScan(Dictionary<string, object> args, AiToolResult result)
+        {
+            if (HandwritingReader == null) throw new ToolTrouble("There is no handwriting reader set up (it needs a Gemini key).");
+            string name; int count;
+            NextScan.Core.RawImage page = ScanFor(args, out name, out count);
+            if (page == null || !page.IsValid) throw new ToolTrouble("That page could not be prepared.");
+
+            double[] region = RegionOf(args);
+            byte[] jpeg;
+            double pxPerMm;
+            try
+            {
+                // Handwriting is read at more than the usual size: thin pen strokes vanish when a page is shrunk.
+                using (System.Drawing.Bitmap view = ScanSight.View(page, region, false, 2400, out pxPerMm)) jpeg = AttachReader.Jpeg(view, 2400);
+            }
+            catch (ArgumentException ex) { throw new ToolTrouble(ex.Message); }
+
+            result.Display = "Gemini is reading the handwriting";
+            string text;
+            try { text = await HandwritingReader(jpeg, Str(args, "note")); }
+            catch (Exception ex) { throw new ToolTrouble("The handwriting could not be read: " + ex.GetBaseException().Message.Split('\n')[0]); }
+            if (text.Length == 0) text = "[illegible]";
+
+            result.Content = Json(new Dictionary<string, object>
+            {
+                { "read", name + (region != null ? ", region " + region[0] + ", " + region[1] + ", " + region[2] + " x " + region[3] + " mm" : "") },
+                { "transcription", text },
+                { "note", "Gemini's reading. [?] marks a word it was not sure of, [illegible] one it could not read: keep those marks visible to the operator or ask them, do not fill them in." },
+            });
+            result.Display = "Gemini read the handwriting (" + text.Length + " characters)";
+        }
+
+        // What find_scan_pictures last found, for crop_scan to take by number.
+        List<ScanPicture> _found;
+        NextScan.Core.RawImage _foundPage;
+
+        async Task FindScanPictures(Dictionary<string, object> args, AiToolResult result)
+        {
+            string name; int count;
+            NextScan.Core.RawImage page = ScanFor(args, out name, out count);
+            if (page == null || !page.IsValid) throw new ToolTrouble("That page could not be prepared.");
+            List<ScanPicture> found = await Task.Run(() => ScanSight.FindPictures(page));
+            _found = found; _foundPage = page;
+
+            double pxPerMm;
+            using (System.Drawing.Bitmap outline = ScanSight.Outline(page, found, 1568, out pxPerMm))
+                result.Images.Add(AttachReader.Jpeg(outline, 1568));
+            result.ImageNotes.Add(name + " -- the pictures found, boxed and numbered");
+
+            var list = new List<object>();
+            foreach (ScanPicture p in found)
+                list.Add(new Dictionary<string, object>
+                {
+                    { "number", p.Number }, { "kind", p.Kind }, { "region_mm", new object[] { p.X, p.Y, p.Width, p.Height } }, { "ink_fill", p.Fill },
+                });
+            result.Content = Json(new Dictionary<string, object>
+            {
+                { "pictures", list },
+                { "page_mm", new object[] { Math.Round(ScanSight.PageWidthMm(page), 1), Math.Round(ScanSight.PageHeightMm(page), 1) } },
+                { "note", found.Count == 0
+                    ? "Nothing that looks like artwork was found (a logo that is very faint or very small can be missed): look at the scan, and give crop_scan a region yourself if there is one."
+                    : "Candidates only: the picture shows each boxed. A heavy heading can be boxed as if it were artwork (type it as text instead); a logo can be boxed in two parts or too tight (give crop_scan a region of your own then). Words are text, to be typed, not cropped." },
+            });
+            result.Display = found.Count == 0 ? "Looked for pictures on the scan: none" : "Found " + found.Count + (found.Count == 1 ? " picture" : " pictures") + " on the scan";
+        }
+
+        void CropScan(Dictionary<string, object> args, AiToolResult result)
+        {
+            string name; int count;
+            NextScan.Core.RawImage page;
+            double[] region = RegionOf(args);
+            object pick;
+            if (region == null && args.TryGetValue("picture", out pick) && pick != null)
+            {
+                int n = Convert.ToInt32(pick, CultureInfo.InvariantCulture);
+                if (_found == null || _foundPage == null) throw new ToolTrouble("Call find_scan_pictures first, or give a region.");
+                ScanPicture hit = _found.Find(p => p.Number == n);
+                if (hit == null) throw new ToolTrouble("There is no picture " + n + " in what find_scan_pictures found.");
+                region = new[] { hit.X, hit.Y, hit.Width, hit.Height };
+                page = _foundPage;
+                name = "the scan";
             }
             else
             {
-                var current = CurrentScan == null ? null : CurrentScan();
-                if (current == null || current.Item1 == null)
-                    throw new ToolTrouble("Nothing has been scanned or previewed yet. Ask the operator to scan the page.");
-                page = current.Item1;
-                name = current.Item2;
+                if (region == null) throw new ToolTrouble("Give region [x, y, width, height] in mm, or picture (a number from find_scan_pictures).");
+                page = ScanFor(args, out name, out count);
             }
-            byte[] jpeg = StudioAiPanel.Encode(page);
-            if (jpeg == null) throw new ToolTrouble("That page could not be prepared.");
-            result.Images.Add(jpeg);
-            double wmm = page.XDpi > 1 ? page.Width / page.XDpi * 25.4 : 0, hmm = page.YDpi > 1 ? page.Height / page.YDpi * 25.4 : 0;
-            result.ImageNotes.Add(name);
+            if (page == null || !page.IsValid) throw new ToolTrouble("That page could not be prepared.");
+
+            bool trim = !args.ContainsKey("trim") || Bool(args, "trim");
+            bool transparent = Bool(args, "transparent");
+            double wmm, hmm;
+            System.Drawing.Bitmap taken;
+            try { taken = ScanSight.Take(page, region, trim, transparent, 1400, out wmm, out hmm); }
+            catch (ArgumentException ex) { throw new ToolTrouble(ex.Message); }
+
+            string label = Str(args, "name");
+            foreach (char bad in Path.GetInvalidFileNameChars()) label = label.Replace(bad, '_');
+            if (label.Trim().Length == 0) label = "scan-picture";
+            string folder = Path.Combine(Path.GetTempPath(), "NextScan", "crops");
+            Directory.CreateDirectory(folder);
+            string path = Path.Combine(folder, label.Trim() + "-" + DateTime.Now.ToString("HHmmss", CultureInfo.InvariantCulture) + ".png");
+            using (taken)
+            {
+                taken.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                // What was taken, shown on white so the model can check the edges.
+                using (var flat = new System.Drawing.Bitmap(taken.Width, taken.Height, System.Drawing.Imaging.PixelFormat.Format24bppRgb))
+                {
+                    using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(flat)) { g.Clear(System.Drawing.Color.White); g.DrawImage(taken, 0, 0, taken.Width, taken.Height); }
+                    result.Images.Add(AttachReader.Jpeg(flat, 900));
+                }
+            }
+            result.ImageNotes.Add("The picture taken from " + name + ": " + Math.Round(wmm, 1) + " x " + Math.Round(hmm, 1) + " mm");
             result.Content = Json(new Dictionary<string, object>
             {
-                { "shown", name }, { "scanned_pages", count },
-                { "size_mm", wmm > 0 ? new object[] { Math.Round(wmm, 1), Math.Round(hmm, 1) } : null },
-                { "dpi", Math.Round(page.XDpi) },
+                { "path", path }, { "width_mm", Math.Round(wmm, 1) }, { "height_mm", Math.Round(hmm, 1) },
+                { "use", "In write_document: {type:'image', src:'" + path.Replace('\\', '/') + "', width:" + Math.Round(wmm, 1).ToString(CultureInfo.InvariantCulture) + ", height:" + Math.Round(hmm, 1).ToString(CultureInfo.InvariantCulture) + ", x:.., y:..} (x and y in mm from the page's corner place it exactly; without them it sits in the text). Its real size on the scan is that width and height." },
             });
-            result.Display = "Looked at " + name.ToLowerInvariant();
+            result.Display = "Took a picture from the scan (" + Math.Round(wmm) + " x " + Math.Round(hmm) + " mm)";
         }
 
         async Task Selection(DocTab tab, AiToolResult result)

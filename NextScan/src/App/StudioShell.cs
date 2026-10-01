@@ -970,11 +970,35 @@ namespace NextScan.App
         /// here would be a bug; this one can be an install that lost a file, and
         /// it must cost the operator the Assist section rather than the window.
         /// </summary>
+        /// <summary>Looks at each scanned page once and says what it is (StudioScanKind.cs).</summary>
+        ScanKinds _kinds;
+
+        /// <summary>A page has been recognised: its card in the strip says what it is, and the status line says so if it is the one on screen.</summary>
+        void ScanRecognised(object key, ScanInfo info)
+        {
+            if (IsDisposed || info == null) return;
+            RawImage page = key as RawImage;
+            if (page == null) return;
+            if (!info.Ok) { Log("could not tell what a page is: " + info.Error); return; }
+
+            if (_film != null) _film.SetTag(page, info.Label, info.MostlyHandwriting ? 3 : info.SomeHandwriting ? 2 : 1);
+            if (_film != null && _film.SelectedImage == page)
+            {
+                string line = info.Label + (info.Languages.Count > 0 ? ", " + string.Join(", ", info.Languages.ToArray()) : "");
+                if (info.Orientation != "upright") line += " \u2014 it looks turned";
+                if (info.Quality.Length > 0) line += " \u2014 scan: " + info.Quality;
+                SetStatus("Page " + (_film.SelectedIndex + 1) + ": " + line);
+            }
+            if (_aiPanel != null) _aiPanel.PageRecognised();
+        }
+
         void BuildAiPanel()
         {
             try
             {
-                _aiPanel = new StudioAiPanel { Visible = false };
+                _kinds = new ScanKinds(delegate { return _settings; }, delegate { return _aiPanel != null ? _aiPanel.ProviderId : _settings.AiProvider; }, delegate { return _aiPanel != null ? _aiPanel.Model : _settings.AiModel; });
+                _kinds.Changed += ScanRecognised;
+                _aiPanel = new StudioAiPanel { Visible = false, Kinds = _kinds };
                 _aiPanel.PageSource = delegate { return PageForAssistant(); };
                 _aiPanel.PageNote = delegate { return AssistantPageNote(); };
                 // An empty message means the panel's last one is over. Ignored,
@@ -1047,9 +1071,10 @@ namespace NextScan.App
             if (page == null || !page.IsValid) return "";
 
             bool saved = _film != null && _film.SelectedImage == page;
+            ScanInfo what = _kinds == null ? null : _kinds.Peek(page);
             return (saved ? "Page " + (_film.SelectedIndex + 1) : "Preview") + "  " +
                    page.Width + " x " + page.Height + "  " +
-                   Math.Round(page.XDpi) + " dpi";
+                   Math.Round(page.XDpi) + " dpi" + (what != null ? "  \u00b7  " + what.Label : "");
         }
 
         /// <summary>The right-hand note on the panel header: state, not a label.</summary>
@@ -3910,6 +3935,7 @@ namespace NextScan.App
             y += 6;
 
             BuildAiCropModelCard(ref y);
+            BuildScanRecogniseCard(ref y);
 
             AddSectionLabel("Models", ref y);
 
@@ -4104,6 +4130,77 @@ namespace NextScan.App
             how.ForeColor = Theme.TextFaint;
             how.Size = new Size(Dw, 34);
             y += 22;
+        }
+
+        /// <summary>
+        /// Recognising scans: every scanned page is looked at once (kind, language, handwriting), a page that is
+        /// mostly handwriting is read by Gemini, and which Gemini model reads it can be chosen.
+        /// </summary>
+        void BuildScanRecogniseCard(ref int y)
+        {
+            _cardIcon = NsIcon.Detect;
+            _cardAccent = Theme.Parse("#14B8A6");
+            AddSectionLabel("Recognising scans", ref y);
+
+            Label says = AddFieldLabel(
+                "Every page you scan is looked at once by a model that can see: what kind of document it is, its language, " +
+                "whether it is handwritten. It shows on the page's card, the assistant is told, and a page that is mostly " +
+                "handwriting is answered by Gemini, which reads handwriting best, whatever model the assistant is set to.", ref y);
+            says.ForeColor = Theme.TextDim;
+            says.Size = new Size(Dw, 52);
+            y += 38;
+
+            NsToggle recognise = AddToggle("Recognise each scan", _settings.ScanRecognise, ref y);
+            recognise.CheckedChanged += delegate { _settings.ScanRecognise = recognise.Checked; };
+            NsToggle hand = AddToggle("Read handwriting with Gemini", _settings.HandwritingGemini, ref y);
+            hand.CheckedChanged += delegate { _settings.HandwritingGemini = hand.Checked; };
+
+            Ai.IAiProvider gemini = Ai.AiProviders.ById("gemini");
+            if (gemini == null || !gemini.Ready)
+            {
+                Label no = AddFieldLabel("Gemini has no key on this computer: add one under AI providers to use it for handwriting.", ref y);
+                no.ForeColor = Theme.Warn;
+                no.Size = new Size(Dw, 34);
+                y += 22;
+                return;
+            }
+
+            AddFieldLabel("Gemini model that reads handwriting", ref y);
+            var ids = new List<string> { "" };
+            var names = new List<string> { "Automatic: the strongest Gemini on your key" };
+            IList<Ai.AiModel> listed = Ai.AiModels.Cached(gemini);
+            if (listed == null)
+            {
+                names.Add("asking Gemini for its models…");
+                ids.Add("");
+                RefreshCropModels(gemini);
+            }
+            else
+            {
+                var ordered = new List<Ai.AiModel>();
+                foreach (Ai.AiModel m in listed) if (m.Likely && m.Vision != false) ordered.Add(m);
+                ordered.Sort((a, b) => string.Compare(b.Id, a.Id, StringComparison.OrdinalIgnoreCase));
+                foreach (Ai.AiModel m in ordered) { ids.Add(m.Id); names.Add(m.ToString()); }
+                if (_settings.HandwritingModel.Length > 0 && !ids.Contains(_settings.HandwritingModel)) { ids.Add(_settings.HandwritingModel); names.Add(_settings.HandwritingModel + "   (not listed)"); }
+            }
+            var pick = new NsDropdown { Location = new Point(Dx, y), Size = new Size(Dw, 34) };
+            pick.SetItems(names, Math.Max(0, ids.IndexOf(_settings.HandwritingModel)));
+            _drawerHost.Controls.Add(pick);
+            y += 42;
+            pick.SelectedIndexChanged += delegate
+            {
+                int i = pick.SelectedIndex;
+                if (i < 0 || i >= ids.Count) return;
+                _settings.HandwritingModel = ids[i];
+                SetStatus(ids[i].Length == 0 ? "Handwriting is read by the strongest Gemini model." : "Handwriting is read by " + ids[i] + ".");
+            };
+
+            Label cost = AddFieldLabel(
+                "Looking at a page is one small request to the fast model of the first provider that can see (Gemini first). " +
+                "Reading handwriting uses the model above, once per question about that page.", ref y);
+            cost.ForeColor = Theme.TextFaint;
+            cost.Size = new Size(Dw, 52);
+            y += 38;
         }
 
         /// <summary>Fetches a provider's models for the AI crop list, and rebuilds the page when they come.</summary>
@@ -4682,6 +4779,16 @@ namespace NextScan.App
                 ScanPage = delegate (int i) { var all = _film == null ? null : _film.AllImages(); return all != null && i >= 0 && i < all.Count ? all[i] : null; },
                 CurrentScan = CurrentScanForAssistant,
             };
+            // Handwriting is read by Gemini, whichever model the assistant is: a tool the assistant can call.
+            if (_kinds != null)
+            {
+                tools.HandwritingAvailable = delegate { return _kinds.HandwritingToGemini && _aiPanel != null && _aiPanel.ProviderId != "gemini"; };
+                tools.HandwritingReader = delegate (byte[] jpeg, string note)
+                {
+                    var cancel = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(180));
+                    return System.Threading.Tasks.Task.Run(() => _kinds.Transcribe(jpeg, note, cancel.Token));
+                };
+            }
             _aiPanel.ToolsSource = tools.Tools;
             _aiPanel.ToolRunner = tools.Run;
 
@@ -7600,6 +7707,7 @@ namespace NextScan.App
                 {
                     _film.AddPage(img);
                     _hasRealPage = true;
+                    if (_kinds != null) _kinds.Request(img);
 
                     // Only from the second page on. For a single-page scan the
                     // canvas placement is decided once the scan finishes - a

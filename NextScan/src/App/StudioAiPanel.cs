@@ -207,6 +207,84 @@ namespace NextScan.App
         /// </summary>
         bool _pageSent;
 
+        // ---- what the page is, and who reads it (StudioScanKind.cs) -------------
+        /// <summary>Set by the shell: looks at pages once and says what each is.</summary>
+        public ScanKinds Kinds;
+
+        /// <summary>
+        /// The provider and model this turn runs on when it is not the operator's own: Gemini, for a page
+        /// that is mostly handwriting. Empty otherwise. Lasts the turn, tool rounds included.
+        /// </summary>
+        string _turnProviderId = "", _turnModel = "";
+
+        /// <summary>True while it is being found out what the page is, so a second press of send does not start a second turn.</summary>
+        bool _deciding;
+
+        /// <summary>A page has been recognised: the note under the box says what it is.</summary>
+        public void PageRecognised() { if (!IsDisposed) UpdateChip(); }
+
+        /// <summary>
+        /// The Gemini model that was reading failed (a free key has no quota for the biggest; a model can be withdrawn):
+        /// the next Gemini is tried, and only when there is none the operator's own model, rather than the question lost.
+        /// </summary>
+        async void RerouteHandwriting(string why, string failedModel)
+        {
+            int line = why.IndexOf('\n');
+            string short_ = line > 0 ? why.Substring(0, line) : why;
+            if (short_.Length > 140) short_ = short_.Substring(0, 137) + "…";
+            string next = null;
+            try { if (Kinds != null) next = await Kinds.NextHandwritingModel(failedModel, System.Threading.CancellationToken.None); } catch { }
+            if (IsDisposed) return;
+            if (!string.IsNullOrEmpty(next))
+            {
+                _turnModel = next;
+                AddNote(AiModels.NameOf(AiProviders.ById("gemini"), failedModel) + " could not be used (" + short_ + "); trying " + AiModels.NameOf(AiProviders.ById("gemini"), next) + ".", false);
+                Ask(TurnProvider());
+                return;
+            }
+            _turnProviderId = ""; _turnModel = "";
+            AddNote("Gemini could not read it (" + short_ + "), so the model you chose is trying.", false);
+            Ask(Provider());
+        }
+
+        IAiProvider TurnProvider()
+        {
+            if (_turnProviderId.Length > 0)
+            {
+                IAiProvider routed = AiProviders.ById(_turnProviderId);
+                if (routed != null && routed.Ready) return routed;
+            }
+            return Provider();
+        }
+
+        /// <summary>
+        /// What the pages that go with this message are: the page itself when it is attached (or will be looked at),
+        /// and the pictures the operator attached. Waits a few seconds for the look rather than send a handwritten
+        /// page to the wrong reader; what has not come by then is not counted.
+        /// </summary>
+        async Task<List<ScanInfo>> LookedAt(RawImage page, bool pageGoes, List<ChatAttachment> attached)
+        {
+            var tasks = new List<Task<ScanInfo>>();
+            if (pageGoes && page != null) tasks.Add(Kinds.InfoAsync(page));
+            foreach (ChatAttachment a in attached)
+            {
+                if (!(a.Kind == "picture" || (a.Kind == "pdf" && a.Text.Length == 0))) continue;
+                for (int i = 0; i < a.Pictures.Count && i < 3 && tasks.Count < 6; i++) tasks.Add(Kinds.InfoAsync(a.Pictures[i].Bytes));
+            }
+            var seen = new List<ScanInfo>();
+            if (tasks.Count == 0) return seen;
+
+            Task all = Task.WhenAll(tasks.ToArray());
+            if (!all.IsCompleted)
+            {
+                Say("Checking what is on the page…");
+                await Task.WhenAny(all, Task.Delay(20000));
+            }
+            foreach (Task<ScanInfo> t in tasks)
+                if (t.IsCompleted && !t.IsFaulted && !t.IsCanceled && t.Result != null && t.Result.Ok) seen.Add(t.Result);
+            return seen;
+        }
+
         /// <summary>
         /// The file this conversation is written to, made at the first turn.
         /// Empty until then, because an empty conversation is not one.
@@ -348,6 +426,36 @@ namespace NextScan.App
             "bottom and left to right: a label printed under a row of boxes stays under it. Printed words are text " +
             "even when they are large or styled, like a bank's name beside its emblem; only the emblem or picture " +
             "itself is the logo.\n" +
+            "- Before you copy a scan, say in one line what kind of document it is and in what language(s) -- a bank " +
+            "slip or other form, an identity card, a bill or receipt, a certificate, a letter, a table or register, a " +
+            "handwritten page, or a mix -- because the kind decides what 'exact' means: for a form it is the " +
+            "positions, boxes, dotted lines and fixed text; for an identity card the photo, the labels and where each " +
+            "value sits; for a bill the columns, rows and totals; for a letter the paragraphs, alignment and " +
+            "spacing; for handwriting a faithful transcription, with what is unreadable marked as such. Then work " +
+            "to that.\n" +
+            "- Measure a scan, do not estimate it: look_at_scan with grid:true puts a millimetre grid on the page so " +
+            "positions and sizes are read off it, and with region:[x, y, w, h] gives a close-up at the scan's full " +
+            "resolution, which is how you read small print, tell dotted from dashed, judge how heavy a line is and see " +
+            "how a letter is shaped. Compare your Word page with the scan the same way, with the same grid, and " +
+            "correct what is off by the millimetres it is off by.\n" +
+            "- Logos, emblems, stamps, photographs and signatures are pictures, not text: find_scan_pictures finds " +
+            "them (candidates: look at the boxed picture and confirm; look_at_scan lists them too as pictures_found). " +
+            "Never estimate a logo's place or size by eye from the picture: it comes out wrong by many millimetres. " +
+            "crop_scan takes one out as a PNG (trimmed; " +
+            "transparent:true if it sits on shading), and write_document's image block places it -- give the " +
+            "width and height crop_scan reports and the x and y you measured, so it is the size and in the place it " +
+            "is on the scan. Printed words stay text even when large or stylised; if a logo contains the bank's name " +
+            "in its own lettering, the whole logo is the picture and you do not type that name again beside it. A " +
+            "photograph on an identity card is a picture of the person: leave the space or place it, but do not " +
+            "describe or identify the person.\n" +
+            "- The <app> block may say what the page was recognised as: its kind, language and whether it has " +
+            "handwriting. Use it. When transcribe_scan is offered, handwriting is read with it, not by you -- Gemini " +
+            "reads handwriting better than you do: for a printed form give it a region (mm) for each handwritten " +
+            "area, for a handwritten page the whole page. Type what it returns; where it marks [?] or [illegible], keep " +
+            "the mark and tell the operator, and never fill the gap from what such a page usually says. When the " +
+            "turn is already running on Gemini (a note on the conversation says so) you read the handwriting yourself.\n" +
+            "- When the operator says the result is right, offer to remember the settings that worked for that kind " +
+            "of document (page size, fonts, margins), never what was written on it.\n" +
             "- You can see what you make. Every write_document, format_document and edit_document shows you the pages " +
             "as they now look (look_at_document shows any page, a millimetre grid, or a close-up of a region). " +
             "Look at them the way a careful person proofreads a printout: is it what was asked? does anything run " +
@@ -982,6 +1090,7 @@ namespace NextScan.App
         /// </summary>
         async void Send(string shown, string ask, bool needsPage)
         {
+            if (_deciding) return;
             string typed = (ask ?? shown ?? "").Trim();
             bool files = _composer.Attachments.Count > 0;
             if (typed.Length == 0 && !files) return;
@@ -1072,6 +1181,43 @@ namespace NextScan.App
                 _pageFor = PageNote == null ? "" : PageNote();
             }
 
+            // Who reads it. A page that is mostly handwriting goes to Gemini, which reads handwriting best,
+            // whatever the operator's own model is; a printed page with some handwriting on it stays with
+            // their model, which is told and given a tool for the handwritten parts.
+            _turnProviderId = ""; _turnModel = "";
+            IAiProvider turnProvider = provider;
+            string routeNote = "", routeHint = "";
+            if (Kinds != null && Kinds.Enabled)
+            {
+                _deciding = true;
+                try
+                {
+                    List<ScanInfo> looked = await LookedAt(page, image != null || (tools && needsPage && page != null), attached);
+                    if (IsDisposed) return;
+                    ScanInfo hand = looked.Find(x => x.MostlyHandwriting), some = looked.Find(x => x.SomeHandwriting);
+                    IAiProvider gemini = Kinds.Gemini();
+                    if (hand != null && Kinds.HandwritingToGemini && provider.Info.Id != "gemini" && gemini != null)
+                    {
+                        try
+                        {
+                            string model = await Kinds.HandwritingModel(gemini, System.Threading.CancellationToken.None);
+                            if (!string.IsNullOrEmpty(model))
+                            {
+                                turnProvider = gemini;
+                                _turnProviderId = gemini.Info.Id; _turnModel = model;
+                                routeNote = "This is handwriting (" + hand.Label.ToLowerInvariant() + "), so Gemini reads it: " + AiModels.NameOf(gemini, model) + ".";
+                            }
+                        }
+                        catch { }
+                    }
+                    else if (hand != null && provider.Info.Id != "gemini" && gemini == null)
+                        routeHint = "This page is handwritten; Gemini reads handwriting best and has no key here, so the reading may be uncertain: say so where it is.";
+                    else if (some != null && provider.Info.Id != "gemini" && gemini != null)
+                        routeHint = "This page has handwriting on it (" + some.Label.ToLowerInvariant() + "): for the handwritten parts call transcribe_scan, which has Gemini read them exactly, rather than reading them yourself.";
+                }
+                finally { _deciding = false; }
+            }
+
             _composer.Text = "";
             // The tiles pass from the box to the conversation, which owns them now.
             _composer.Attachments.Clear();
@@ -1093,6 +1239,7 @@ namespace NextScan.App
             NsBubble said = AddBubble(shown ?? text, true);
             _turnItemStart = _items.IndexOf(said);
             _turnFirstItem = _turnAttachRow != null ? _items.IndexOf(_turnAttachRow) : _turnItemStart;
+            if (routeNote.Length > 0) AddNote(routeNote, false);
             Busy(true);
 
             _turnStart = _history.Count;
@@ -1116,6 +1263,7 @@ namespace NextScan.App
                 if (first == asking && !asking.IsFaulted) state = asking.Result ?? "";
             }
             if (IsDisposed) return;
+            if (routeHint.Length > 0) state = (state.Length > 0 ? state.TrimEnd() + "\n" : "") + routeHint;
 
             AiMessage turn = AiMessage.FromUser(
                 (state.Length > 0
@@ -1130,7 +1278,7 @@ namespace NextScan.App
             _history.Add(turn);
             _lastTurn = turn;
 
-            Ask(provider);
+            Ask(turnProvider);
         }
 
         // =====================================================================
@@ -1606,9 +1754,11 @@ namespace NextScan.App
 
         void Ask(IAiProvider provider)
         {
-            string model = string.IsNullOrEmpty(_model)
-                ? AiModels.Default(provider, AiModels.Cached(provider))
-                : _model;
+            string model = _turnModel.Length > 0 && provider.Info.Id == _turnProviderId
+                ? _turnModel
+                : string.IsNullOrEmpty(_model)
+                    ? AiModels.Default(provider, AiModels.Cached(provider))
+                    : _model;
 
             if (string.IsNullOrEmpty(model))
             {
@@ -1907,6 +2057,9 @@ namespace NextScan.App
                 case "format_document": return "Changing the formatting";
                 case "word_api": return "Looking up how Word does it";
                 case "look_at_scan": return "Looking at the scan";
+                case "find_scan_pictures": return "Looking for logos and pictures on the scan";
+                case "crop_scan": return "Taking a picture out of the scan";
+                case "transcribe_scan": return "Gemini is reading the handwriting";
                 case "get_selection": return "Reading the selection";
                 case "save_document": return "Saving";
                 case "export_document": return "Writing a copy";
@@ -2034,6 +2187,14 @@ namespace NextScan.App
             // A cancelled task is not a faulted one, and Result throws on
             // either. Stopping is something the operator did, so it reads as a
             // note on the turn rather than as a failure.
+            if (done.IsFaulted && _turnProviderId.Length > 0 && !(done.Exception != null && done.Exception.GetBaseException() is OperationCanceledException))
+            {
+                // The handwriting reader could not be reached (a limit, a model that is gone): the model the
+                // operator chose answers instead, rather than the question being lost.
+                if (_reply != null) { _reply.Markdown = ""; _reply.Streaming = false; }
+                RerouteHandwriting(Plain(done.Exception), _turnModel);
+                return;
+            }
             if (done.IsCanceled || done.IsFaulted)
             {
                 string trouble = done.IsCanceled ? "Stopped." : Plain(done.Exception);
@@ -2104,7 +2265,7 @@ namespace NextScan.App
                     return;
                 }
 
-                RunTools(Provider(), reply.ToolCalls);
+                RunTools(TurnProvider(), reply.ToolCalls);
                 return;
             }
 
@@ -2119,7 +2280,7 @@ namespace NextScan.App
                 _history.Add(AiMessage.FromUser("(From NextScan, not the operator: you finished without writing anything. " +
                                                 "In one or two sentences, in the operator's language, say what you did and what is left.)"));
                 if (_working != null) _working.What = "Writing a summary";
-                Ask(Provider());
+                Ask(TurnProvider());
                 return;
             }
             if (text.Trim().Length == 0) text = "(the model returned nothing)";
@@ -2754,7 +2915,7 @@ namespace NextScan.App
             _turnIn = _turnOut = 0;
             _stick = true;
             Busy(true);
-            Ask(provider);
+            Ask(TurnProvider());
         }
 
         /// <summary>Takes the newest question back into the box, with whatever came after it removed, to be changed and sent again.</summary>
@@ -3440,6 +3601,7 @@ namespace NextScan.App
 
             _history.Clear();
             _log.Clear();
+            _turnProviderId = ""; _turnModel = "";
             _pageFor = "";
             _pageSent = false;
             _chatId = "";

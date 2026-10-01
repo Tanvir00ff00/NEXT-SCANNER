@@ -80,6 +80,8 @@ namespace NextScan.App
                 s.Append("On screen to look at: ").Append(current.Item2);
                 if (w > 0) s.Append(", ").Append(Math.Round(w)).Append(" x ").Append(Math.Round(h)).Append(" mm");
                 s.Append(" (look_at_scan shows it)\n");
+                ScanInfo what = _kinds == null ? null : _kinds.Peek(p);
+                if (what != null) s.Append("Recognised as: ").Append(what.ForAssistant()).Append('\n');
             }
             else s.Append("Nothing has been scanned or previewed yet.\n");
 

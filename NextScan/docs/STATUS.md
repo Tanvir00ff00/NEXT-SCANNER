@@ -1,6 +1,6 @@
 ﻿# NextScan Studio — Build Status
 
-Last updated: 2026-09-30
+Last updated: 2026-10-01
 Plan of record: [`NEXTSCAN_STUDIO_MASTER_PLAN.md`](../../NEXTSCAN_STUDIO_MASTER_PLAN.md)
 
 This file records what is **actually built and verified on hardware**, versus what
@@ -8,6 +8,86 @@ is still only planned. It is deliberately conservative: if something is not list
 as verified below, assume it does not work yet.
 
 ---
+
+## Recognising scans, and Gemini for handwriting — 2026-10-01
+
+Every page that is scanned is looked at once, in the background, by a vision
+model (`StudioScanKind.cs`), and described in typed fields: kind (bill, receipt,
+bank slip, form, ID card, certificate, letter, prescription, table, handwritten
+note...), language(s), handwriting (none / some / mostly), pictures present,
+orientation, scan quality, one line on what it is (no names or numbers). The
+cheap fast tier of the first provider that can see does it (Gemini first, as
+AI crop does); if that provider refuses (a free key's quota), the model the
+operator chose for the assistant does, if it can see; a provider that has
+refused is left alone for five minutes.
+- Shown on the page's card in the strip (a coloured label: blue printed, teal
+  some handwriting, amber handwritten), on the status line for the page on
+  screen (with "it looks turned" or "scan: blurred" when so), on the note under
+  the chat box, and told to the assistant in `<app>` ("Recognised as: ...").
+- Routing: a page that is MOSTLY handwriting (the page that goes with the
+  question, or a picture or scanned PDF attached to it) makes the turn run on
+  Gemini, tool rounds included, whatever model the operator set; a note in the
+  chat says so. A printed page with SOME handwriting stays with the operator's
+  model, which is told and given `transcribe_scan`: Gemini reads the
+  handwritten parts (a region in mm for each, or the whole page) word for word,
+  with [?] and [illegible] marks, never filling a gap. The tool is offered only
+  when Gemini is not already the model.
+- Which Gemini: Settings, AI models, "Recognising scans" (recognise on/off;
+  read handwriting with Gemini on/off; the Gemini model, or automatic = the
+  strongest on the key, then its fast one). A model that is refused (found by
+  trying: a FREE key has quota 0 for the Pro models) is remembered for the
+  session and the next is tried, and only when Gemini has none left the
+  operator's own model answers, with a note saying why. No retries on a
+  refusal that cannot change (quota, withdrawn model).
+
+Verified with the real Gemini key: a printed bank-slip template -> form, English,
+no handwriting, pictures on it; a page of handwriting in a script font ->
+handwritten note, mostly handwriting, and the transcription matched every word
+and number; in the real panel with Agnes 3 Flash as the model, an attached
+handwritten note was recognised, the turn was routed to Gemini 3.1 Pro (refused:
+no quota on this key), then to Gemini 3.8 Flash (the day's free quota was spent
+by this testing), then answered by the operator's model, each step noted in the
+chat. Honest limits: recognition takes 5-20 s a page (first look at a page
+before the answer waits up to 20 s; a scanned page is usually done by the time
+a question is asked); it is one request per page on the operator's key (a free
+Gemini key runs out in a day of scanning: the toggle is in Settings); a real
+Bengali handwriting sample was not tried (none available, and the quota was
+gone).
+
+## Scan to exact Word: measuring and the logo — 2026-10-01
+
+Rebuilding a scan needs more than a picture shrunk to 1568 px: where things are
+cannot be read reliably off it (a first run put the logo 10 mm off), and a logo
+cannot be typed. New (`StudioScanSight.cs`, tools in `StudioDocTools.cs`):
+- `look_at_scan` takes `grid:true` (a millimetre grid in the page's own
+  millimetres) and `region:[x,y,w,h]` (a close-up cut from the scan at full
+  resolution), and says how many pixels a millimetre is. A look at the whole
+  page also lists the pictures the application found on it (`pictures_found`).
+- `find_scan_pictures`: finds artwork -- a logo, emblem, stamp, photograph --
+  by analysing the page (ink that is coloured or solid, in a block too big for
+  a letter, not a table's lines), returns each in mm and a picture of the page
+  with each boxed and numbered. Candidates; the model confirms.
+- `crop_scan`: takes one out (by number or by region) as a PNG, trimmed, white
+  made see-through if asked, at the scan's resolution, and returns its path and
+  its real size in mm, to be placed with write_document's image block at the
+  measured x, y.
+- The instruction now has the scan workflow: say what kind of document it is
+  (form, identity card, bill, certificate, letter, table, handwriting) because
+  that decides what "exact" means; measure with the grid and close-ups; logos
+  and photographs are pictures, never retyped (a logo with the bank's name in
+  its lettering is the picture, not text); offer to remember the settings that
+  worked for that kind of document, never what is written on it.
+
+Verified on a made-up 230 x 120 mm scan (logo, heading, a bordered box of dotted
+fields, a photo block): both pictures found (the heading's letters are not),
+the logo cut out to 26 x 25.9 mm and placed at its own place in Word. With
+Agnes 3 Flash, first run: it did not call the finder, guessed a region by eye
+and took a 2 mm sliver -- hence the automatic list in `look_at_scan` and the
+instruction "never estimate a logo's place by eye". Second run: used the
+numbers, logo and photo in the right place and size; it then called the page
+finished with its box overlapping them (a weak model not looking closely, not a
+tool fault). Not verified: a real scan of a bank slip (none was available this
+session -- only the one pasted in chat earlier), and Claude/GPT-class models.
 
 ## Seeing documents, and all of Word within reach — 2026-09-30
 

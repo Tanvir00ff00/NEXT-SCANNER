@@ -1317,6 +1317,10 @@ namespace NextScan.App
             public RawImage Image;
             public Bitmap Thumb;
             public string Caption = "";
+
+            /// <summary>What the page was recognised as ("Bank slip"), and 0 nothing, 1 printed, 2 some handwriting, 3 handwritten.</summary>
+            public string Tag = "";
+            public int TagKind;
         }
 
         readonly List<Page> _pages = new List<Page>();
@@ -1370,6 +1374,13 @@ namespace NextScan.App
 
             Invalidate();
             if (SelectionChanged != null) SelectionChanged(this, EventArgs.Empty);
+        }
+
+        /// <summary>Puts what a page was recognised as on its card.</summary>
+        public void SetTag(RawImage img, string text, int kind)
+        {
+            foreach (Page p in _pages)
+                if (ReferenceEquals(p.Image, img)) { p.Tag = text ?? ""; p.TagKind = kind; Invalidate(); return; }
         }
 
         public void ReplaceSelectedImage(RawImage img)
@@ -1561,6 +1572,18 @@ namespace NextScan.App
                     }
                 }
 
+                if (_pages[i].Tag.Length > 0)
+                {
+                    // A small label on the picture's foot: what it is, in the colour of what it holds.
+                    Color tone = _pages[i].TagKind >= 3 ? Theme.Warn : _pages[i].TagKind == 2 ? Theme.Info : Theme.Accent;
+                    Rectangle pill = new Rectangle(card.X + 6, card.Bottom - 21, card.Width - 12, 17);
+                    using (GraphicsPath pp = Theme.Round(pill, 8))
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(34, tone))) g.FillPath(b, pp);
+                    using (Font f = Theme.UiSemi(7f))
+                        TextRenderer.DrawText(g, _pages[i].Tag, f, pill, tone,
+                            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+                }
+                else
                 using (Font f = Theme.Ui(7f))
                     TextRenderer.DrawText(g, _pages[i].Caption, f,
                         new Rectangle(card.X, card.Bottom - 18, card.Width, 16),
