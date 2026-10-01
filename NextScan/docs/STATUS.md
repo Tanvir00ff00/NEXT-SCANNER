@@ -9,6 +9,106 @@ as verified below, assume it does not work yet.
 
 ---
 
+## The assistant is given the page on screen, and can work the scanner — 2026-10-01
+
+Found by the operator: pressing the Word icon sent the question without the
+scan. The cause: "the page has been sent" was remembered once per conversation,
+so once any page had gone in a conversation a new preview or scan was never
+attached again (and with the document tools the page was attached only to the
+suggestion chips). Now the page the model was last shown is remembered (a weak
+reference to the page itself), and
+- a question about the page (an icon, a chip) attaches the new page at full
+  size, as before, even when an earlier page was sent;
+- any other message, even a few typed words and no attachment, gets a small
+  picture (900 px) of the page on screen once, if it is new (Settings, Recognising
+  scans, "Let the assistant see the page on screen"), with a line saying what it
+  is, so "this", "it", "the scan" and "what is on the scanner" mean something;
+- the page that goes with a message shows in the conversation as a tile with its
+  picture (it opens larger), like any attachment, so it is plain it was sent.
+The `<app>` block now also says the scan settings and whether there is a preview
+of the glass. New tools: `preview_scan` (previews the whole glass, waits, puts it
+on screen) and `scan_page` (a real scan, optional dpi and colour mode for that
+scan only, put back afterwards, waits and says how many pages came); the
+instruction says to preview when asked about what is on the glass, and to scan
+when asked or agreed. They are offered only where there is a scanner side.
+
+Verified with a real model in the real panel: a bank slip identified; then a
+different page (a handwritten note) put on screen and "what is on the scanner
+now? describe it in one line" typed with no attachment: the new page was attached
+with its tile and described correctly. Not verified: preview_scan and scan_page
+against a scanner (none in this session): they call the same StartScan the
+buttons do and wait for it to finish.
+
+## The card made small; the model that stays; recognition that does not hang — 2026-10-01
+
+Found by the operator on the first real preview:
+- The card was too big and could sit over the page. Now: a small pill at the top
+  left with the document's name ("Recognising this page" shimmering, then the
+  name, kind and language, and a small x), and a column of small round colourful
+  icons at the right edge, each naming itself under the pointer. The canvas keeps
+  a band for them (36 px at the top, 58 at the right) while they show, so the page
+  is fitted in what is left: nothing is ever drawn over it.
+- Recognition never finished. The first provider (Gemini; this key's free quota
+  was spent) failed, and the next, the operator's own default, was slow or gave
+  empty answers; each was waited for in turn and retried. Now the providers are
+  asked together: the first at once, the next if five seconds have passed, and so
+  on; the first usable answer wins; one that fails (no quota, an empty answer,
+  over 28 s) is left alone for 1-10 minutes. A page is recognised in about the
+  time the quickest takes (5-12 s here: Gemini Flash about 5, Agnes 3 Flash 8-11).
+  The request is smaller (800 px, fewer fields). If nobody can, the pill says
+  why and pressing it tries again.
+- Pressing "Word" went to the Assist screen and nothing happened: the question
+  waited up to 20 s for the page to be recognised, with nothing on screen. It now
+  waits at most 1.2 s (the question goes to the operator's model if the page is not
+  known yet), and "Handwriting" goes to Gemini without waiting to be told. The
+  Word request is written to be exact (same to same, no mistakes, in English with
+  the line in Bengali, following the scan-to-Word method). Measured: the question
+  is in the chat 1 s after the icon is pressed, then the model works through the
+  scan alone (looks, measures, cuts out the logo and the photograph).
+- The chosen model did not survive a restart. At start the panel was given the
+  saved provider first, which clears its model (a model belongs to one provider)
+  and told the handler that stored it, which wrote the empty model over the saved
+  one; so aimodel= was always empty in scan.ini. Fixed (the saved values are read
+  first), the choice is also written at once, and a chosen model is no longer
+  replaced because a provider's list did not show it.
+- A test run can no longer touch the operator's settings: NEXTSCAN_INI names its
+  own file.
+
+Not done: a local model for instant recognition. TeleOCR (Qwen2.5-VL 1.2B,
+document parsing, Apache-2.0, GGUF/ONNX exist) reads text, tables and formulas,
+says nothing about Bengali or handwriting, and needs a GPU to be quick: it is a
+candidate for offline "scan to Word" later, not for the two-second name.
+
+## The card: what to do with the page you just scanned — 2026-10-01
+
+A floating card at the top right of the preview (`StudioSuggest.cs`, painted on
+the canvas so its edges and shadow are smooth over the page): a coloured title
+bar with the document's own name, a line under it (kind, language, handwriting),
+and colourful icons -- Word, Excel, PDF, Text, Translate, Handwriting -- that
+slide and pop in. It is there the moment a page lands, with the icons that suit
+any page and "Recognising this page" shimmering, and changes when the page has
+been recognised: the real name (the recogniser now also gives a `title`: the
+heading printed on the paper, or a short description, no personal names), the
+bar's colour by kind (green bills, violet ID cards, amber handwriting...), and
+the icons that suit it (a bill or slip gets Excel; a page with handwriting gets
+"Handwriting" first). If recognition fails (a spent quota) it says so and
+pressing it tries again, instead of showing nothing. Pressing an icon runs it:
+Word / Excel / Text / Translate / Handwriting go to the assistant (the Assist
+screen opens and the page and request are sent as if the chip had been pressed;
+a handwritten page is routed to Gemini as before), PDF writes the page at once
+(named from the title) and opens it. The x closes it for that page; Settings,
+Recognising scans, "Show what to do with a page after scanning it" turns it off.
+The recognition request is smaller (960 px, 1500 tokens) so the name arrives
+sooner.
+
+It is shown for a preview on the glass as well as for a page of the strip (the first version only did the strip, and a preview showed nothing: found by the operator). The assistant's "page" and the card follow what the canvas shows (a page of the strip, or the preview or scan just made).
+
+Not verified with a live recognition after this change: the day's free Gemini
+quota was spent by earlier testing (the recogniser then falls back to the
+assistant's own model, which is slower). Checked: the card's two states drawn
+off-screen over the page; that the icon presses reach the panel was checked by
+reading, not by clicking.
+
 ## Recognising scans, and Gemini for handwriting — 2026-10-01
 
 Every page that is scanned is looked at once, in the background, by a vision

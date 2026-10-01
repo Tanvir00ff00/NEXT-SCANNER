@@ -162,6 +162,16 @@ namespace NextScan.App
             SetStyle(ControlStyles.Selectable, true);
             TabStop = true;
             Animator.Attach(this, _sweep, _fade);
+            Suggest = new PageSuggestOverlay(this);
+        }
+
+        /// <summary>The floating card with what to do with this page (StudioSuggest.cs), painted over the page at the top right.</summary>
+        public readonly PageSuggestOverlay Suggest;
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            if (Suggest != null) Suggest.MouseLeave();
+            base.OnMouseLeave(e);
         }
 
         // ---------------------------------------------------------------- content
@@ -273,10 +283,16 @@ namespace NextScan.App
 
                 const int margin = 8;
 
-                int usableTop = margin + ReservedTop;
+                // While the pill and the icons for the page show (StudioSuggest.cs), a band at the top and at the
+                // right is theirs, and the page is fitted in what is left: nothing is drawn over it.
+                bool offer = Suggest != null && Suggest.Visible && Width >= 360;
+                int topBand = offer ? PageSuggestOverlay.TopBandHeight : 0;
+                int rightBand = offer ? PageSuggestOverlay.RightBandWidth : 0;
+
+                int usableTop = margin + ReservedTop + topBand;
                 int usableBottom = margin + ReservedBottom;
                 int usableH = Math.Max(40, Height - usableTop - usableBottom);
-                int usableW = Math.Max(40, Width - margin * 2);
+                int usableW = Math.Max(40, Width - margin * 2 - rightBand);
 
                 double scale;
                 if (_fitToWindow)
@@ -289,7 +305,7 @@ namespace NextScan.App
 
                 int w = Math.Max(1, (int)Math.Round(_display.Width * scale));
                 int h = Math.Max(1, (int)Math.Round(_display.Height * scale));
-                int x = (Width - w) / 2 + (int)_pan.X;
+                int x = (Width - rightBand - w) / 2 + (int)_pan.X;
                 // Centre inside the usable band, but never above it: when the page
                 // is taller than the band the centring term goes negative and the
                 // top of the page would slide under the floating HUD.
@@ -540,6 +556,7 @@ namespace NextScan.App
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (Suggest != null && Suggest.MouseDown(e.Location, e.Button)) return;
             if (_display == null) return;
 
             if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && _spaceHeld))
@@ -596,6 +613,7 @@ namespace NextScan.App
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (Suggest != null && !_panning && Suggest.MouseMove(e.Location)) return;
             if (_display == null) return;
 
             // Same lost-button guard the splitters needed.
@@ -888,6 +906,16 @@ namespace NextScan.App
 
         // ---------------------------------------------------------------- painting
         protected override void OnPaint(PaintEventArgs e)
+        {
+            PaintPage(e);
+            if (Suggest != null && Suggest.Visible)
+            {
+                Theme.Smooth(e.Graphics);
+                Suggest.Paint(e.Graphics, ClientRectangle, ReservedTop + 4);
+            }
+        }
+
+        void PaintPage(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             g.Clear(Theme.Ground);

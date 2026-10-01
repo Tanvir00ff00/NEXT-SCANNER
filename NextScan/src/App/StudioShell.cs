@@ -990,6 +990,169 @@ namespace NextScan.App
                 SetStatus("Page " + (_film.SelectedIndex + 1) + ": " + line);
             }
             if (_aiPanel != null) _aiPanel.PageRecognised();
+            UpdateSuggest();
+        }
+
+        // ---- the card: what to do with the page just scanned ---------------------------------------------
+
+        /// <summary>True when the canvas shows a page of the strip; false right after a preview or a scan, which it shows instead.</summary>
+        bool _showingFilm = true;
+
+        readonly System.Runtime.CompilerServices.ConditionalWeakTable<RawImage, object> _suggestDismissed = new System.Runtime.CompilerServices.ConditionalWeakTable<RawImage, object>();
+        bool _suggestWired;
+
+        static SuggestAction Act(string id, string label, string tip, string from, string to)
+        {
+            return new SuggestAction { Id = id, Label = label, Tip = tip, From = Theme.Parse(from), To = Theme.Parse(to) };
+        }
+
+        /// <summary>
+        /// Shows, changes or hides the floating card for the page on screen. It is there at once with the
+        /// actions that suit any page, and changes when the page has been recognised: its real name in the
+        /// bar, and the icons that suit what it is.
+        /// </summary>
+        void UpdateSuggest()
+        {
+            if (_canvas == null || _canvas.Suggest == null || IsDisposed) return;
+            PageSuggestOverlay card = _canvas.Suggest;
+            if (!_suggestWired)
+            {
+                _suggestWired = true;
+                card.Chosen += SuggestChosen;
+                card.Dismissed += delegate
+                {
+                    RawImage p = PageForAssistant();
+                    object marker;
+                    if (p != null && !_suggestDismissed.TryGetValue(p, out marker)) _suggestDismissed.Add(p, new object());
+                };
+                card.Retry += delegate { RawImage p = PageForAssistant(); if (_kinds != null && p != null) { _kinds.Again(p); UpdateSuggest(); } };
+            }
+
+            RawImage page = PageForAssistant();
+            bool ofStrip = _showingFilm && _film != null && _film.SelectedImage == page;
+            object dismissed;
+            if (page == null || _canvas.IsPlaceholder || !_settings.SuggestAfterScan || _suggestDismissed.TryGetValue(page, out dismissed)) { card.Hide(); return; }
+
+            ScanInfo info = _kinds == null || !_kinds.Enabled ? null : _kinds.Peek(page);
+            string failure = _kinds == null || !_kinds.Enabled ? "" : _kinds.Failure(page);
+            bool working = _kinds != null && _kinds.Enabled && info == null && failure.Length == 0;
+
+            string number = ofStrip ? "Page " + (_film.SelectedIndex + 1) : "Preview";
+            string title = info != null && info.Title.Length > 0 ? info.Title : info != null ? info.Label : number;
+            string subtitle;
+            if (info != null)
+            {
+                subtitle = info.Name.Length > 0 ? info.Name : ScanInfo.Pretty(info.Kind);
+                if (info.Languages.Count > 0) subtitle += "  \u00b7  " + string.Join(", ", info.Languages.ConvertAll(l => char.ToUpperInvariant(l[0]) + l.Substring(1)).ToArray());
+                if (info.Handwriting == "mostly") subtitle += "  \u00b7  handwritten";
+                else if (info.Handwriting == "some") subtitle += "  \u00b7  some handwriting";
+            }
+            else if (failure.Length > 0)
+            {
+                string why = failure.Replace('\r', ' ').Replace('\n', ' ');
+                int cut = why.IndexOf(". ", StringComparison.Ordinal);
+                if (cut > 0) why = why.Substring(0, cut);
+                if (why.Length > 60) why = why.Substring(0, 57) + "...";
+                subtitle = "Could not tell what it is (" + why + ")  \u00b7  press to try again";
+            }
+            else if (working) subtitle = "Recognising this page";
+            else subtitle = number + "  \u00b7  what would you like to do with it?";
+
+            var actions = new List<SuggestAction>();
+            SuggestAction word = Act("word", "Word", "Rebuild this page in Word", "#2B7CD3", "#185ABD");
+            SuggestAction excel = Act("excel", "Excel", "Put the table in Excel", "#21A366", "#107C41");
+            SuggestAction pdf = Act("pdf", "PDF", "Save this page as a PDF", "#F0524A", "#C1272D");
+            SuggestAction read = Act("read", "Text", "Read out all the text", "#14B8A6", "#0D9488");
+            SuggestAction translate = Act("translate", "Translate", "Translate it", "#A855F7", "#7C3AED");
+            SuggestAction hand = Act("type", "Handwriting", "Type out the handwriting", "#F59E0B", "#D97706");
+
+            string kind = info == null ? "" : info.Kind;
+            bool tabular = kind == "bill" || kind == "receipt" || kind == "table" || kind == "bank_slip" || kind == "form" || kind == "invoice";
+            if (info != null && info.Handwriting != "none") { actions.Add(hand); actions.Add(word); actions.Add(read); actions.Add(pdf); actions.Add(translate); }
+            else if (tabular) { actions.Add(word); actions.Add(excel); actions.Add(read); actions.Add(pdf); actions.Add(translate); }
+            else if (kind == "id_card" || kind == "passport") { actions.Add(read); actions.Add(pdf); actions.Add(translate); actions.Add(word); }
+            else { actions.Add(word); actions.Add(read); actions.Add(pdf); actions.Add(translate); }
+
+            Color from = Theme.Parse("#3B82F6"), to = Theme.Parse("#6366F1");
+            if (info != null)
+            {
+                if (info.Handwriting == "mostly") { from = Theme.Parse("#F59E0B"); to = Theme.Parse("#EA580C"); }
+                else if (kind == "bill" || kind == "receipt" || kind == "invoice") { from = Theme.Parse("#10B981"); to = Theme.Parse("#0D9488"); }
+                else if (kind == "id_card" || kind == "passport") { from = Theme.Parse("#8B5CF6"); to = Theme.Parse("#C026D3"); }
+                else if (kind == "certificate") { from = Theme.Parse("#F59E0B"); to = Theme.Parse("#E11D48"); }
+                else if (kind == "letter" || kind == "handwritten_note") { from = Theme.Parse("#06B6D4"); to = Theme.Parse("#2563EB"); }
+            }
+            card.Present(title, subtitle, working, failure.Length > 0, actions, from, to);
+        }
+
+        /// <summary>
+        /// The assistant previews the glass or scans, as the buttons do, and waits until it is done. The scan settings
+        /// it asks for apply to that scan only and are put back.
+        /// </summary>
+        async System.Threading.Tasks.Task<string> AssistantScan(bool preview, int dpi, string mode)
+        {
+            if (_busy) return "A scan is already running; wait for it to finish.";
+            if (_device == null) return "No scanner is connected, so nothing can be scanned or previewed.";
+
+            int before = _film == null ? 0 : _film.Count;
+            int oldDpi = _settings.Dpi;
+            ColorMode oldMode = _settings.Mode;
+            if (!preview)
+            {
+                if (dpi >= 75 && dpi <= 1200) _settings.Dpi = dpi;
+                string m = (mode ?? "").ToLowerInvariant();
+                if (m.StartsWith("gr", StringComparison.Ordinal)) _settings.Mode = ColorMode.Gray8;
+                else if (m.StartsWith("bl", StringComparison.Ordinal) || m == "bw") _settings.Mode = ColorMode.BlackWhite1;
+                else if (m.StartsWith("col", StringComparison.Ordinal)) _settings.Mode = ColorMode.Color24;
+            }
+            try
+            {
+                StartScan(preview, true);
+                DateTime until = DateTime.Now.AddSeconds(preview ? 100 : 260);
+                while (_busy && DateTime.Now < until && !IsDisposed) await System.Threading.Tasks.Task.Delay(250);
+            }
+            finally { _settings.Dpi = oldDpi; _settings.Mode = oldMode; }
+            if (IsDisposed) return "The window was closed.";
+            if (_busy) return "The scanner is still working after a long wait; ask the operator to check it.";
+
+            string status = _statusText == null ? "" : _statusText.Text;
+            if (preview)
+            {
+                RawImage p = _capturePage;
+                if (p == null || !p.IsValid) return "The preview did not come: " + status;
+                return "The preview of the whole glass is on screen (" + p.Width + " x " + p.Height + " px at " + Math.Round(p.XDpi) + " dpi). look_at_scan shows it; it is being recognised too.";
+            }
+            int added = (_film == null ? 0 : _film.Count) - before;
+            if (added <= 0) return "Nothing was scanned: " + status;
+            return "Scanned " + added + (added == 1 ? " page" : " pages") + "; " + (added == 1 ? "it is" : "the last is") + " on screen as page " + (_film.SelectedIndex + 1) + " of " + _film.Count + ". look_at_scan shows it.";
+        }
+
+        /// <summary>An icon on the card was pressed.</summary>
+        void SuggestChosen(string id)
+        {
+            RawImage page = PageForAssistant();
+            if (page == null) return;
+
+            if (id == "pdf")
+            {
+                try
+                {
+                    ScanInfo info = _kinds == null ? null : _kinds.Peek(page);
+                    string name = info != null && info.Title.Length > 0 ? info.Title : (_film != null && _film.SelectedImage == page ? "Page " + (_film.SelectedIndex + 1) : "Scan");
+                    foreach (char bad in Path.GetInvalidFileNameChars()) name = name.Replace(bad, '_');
+                    Directory.CreateDirectory(_settings.OutputDirectory);
+                    string path = Path.Combine(_settings.OutputDirectory, name.Trim() + " " + DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + ".pdf");
+                    if (!StudioExport.SavePdf(new List<RawImage> { page }, path)) { SetStatus("Could not write the PDF."); return; }
+                    SetStatus("Saved " + path);
+                    if (_workspace != null && Docs.DocsEngine.IsInstalled) { ShowSection(4); _workspace.Open(path); }
+                }
+                catch (Exception ex) { SetStatus("Could not write the PDF: " + ex.Message); }
+                return;
+            }
+
+            if (_aiPanel == null) { SetStatus("The assistant is not available here."); return; }
+            ShowSection(4);
+            _aiPanel.RunSuggestion(id);
         }
 
         void BuildAiPanel()
@@ -1000,6 +1163,7 @@ namespace NextScan.App
                 _kinds.Changed += ScanRecognised;
                 _aiPanel = new StudioAiPanel { Visible = false, Kinds = _kinds };
                 _aiPanel.PageSource = delegate { return PageForAssistant(); };
+                _aiPanel.SeesPage = delegate { return _settings.AssistSeesPage; };
                 _aiPanel.PageNote = delegate { return AssistantPageNote(); };
                 // An empty message means the panel's last one is over. Ignored,
                 // "Asking Gemini…" stayed in the status bar after the reply.
@@ -1011,16 +1175,25 @@ namespace NextScan.App
                 };
                 _aiPanel.AppState = AssistantState;
                 _aiPanel.SessionPages = delegate { return _film == null ? null : _film.AllImages(); };
+                // What was chosen last time is read BEFORE the panel is given it: giving it the provider clears its
+                // model (a model belongs to one provider) and tells this handler, which wrote that empty model over
+                // the saved one at every start -- so the choice never survived a restart.
+                string startProvider = _settings.AiProvider, startModel = _settings.AiModel;
+                bool starting = true;
                 _aiPanel.ChoiceChanged += delegate
                 {
+                    if (starting) return;
                     _settings.AiProvider = _aiPanel.ProviderId;
                     _settings.AiModel = _aiPanel.Model;
                     _settings.AiThinking = _aiPanel.Thinking.ToString();
+                    // At once: the last model used is the one the next start opens on, however the window is closed.
+                    try { _settings.Save(); } catch { }
                 };
 
                 _aiPanel.Allowed = Ai.AiAllowed.Read(_settings.AiAllowedModels);
-                _aiPanel.ProviderId = _settings.AiProvider;
-                _aiPanel.Model = _settings.AiModel;
+                _aiPanel.ProviderId = startProvider;
+                _aiPanel.Model = startModel;
+                starting = false;
                 _aiPanel.Thinking = ThinkingFromSettings();
 
                 _inspector.Controls.Add(_aiPanel);
@@ -1053,8 +1226,9 @@ namespace NextScan.App
         /// </summary>
         RawImage PageForAssistant()
         {
-            if (_film != null && _film.SelectedImage != null) return _film.SelectedImage;
+            if (_showingFilm && _film != null && _film.SelectedImage != null) return _film.SelectedImage;
             if (_capturePage != null && _capturePage.IsValid) return _capturePage;
+            if (_film != null && _film.SelectedImage != null) return _film.SelectedImage;
 
             // Deliberately not PageToCutFrom. Before the first preview the
             // canvas holds a blank sheet, which is a perfectly valid RawImage of
@@ -4151,7 +4325,11 @@ namespace NextScan.App
             y += 38;
 
             NsToggle recognise = AddToggle("Recognise each scan", _settings.ScanRecognise, ref y);
-            recognise.CheckedChanged += delegate { _settings.ScanRecognise = recognise.Checked; };
+            recognise.CheckedChanged += delegate { _settings.ScanRecognise = recognise.Checked; UpdateSuggest(); };
+            NsToggle sees = AddToggle("Let the assistant see the page on screen", _settings.AssistSeesPage, ref y);
+            sees.CheckedChanged += delegate { _settings.AssistSeesPage = sees.Checked; };
+            NsToggle suggest = AddToggle("Show what to do with a page after scanning it", _settings.SuggestAfterScan, ref y);
+            suggest.CheckedChanged += delegate { _settings.SuggestAfterScan = suggest.Checked; UpdateSuggest(); };
             NsToggle hand = AddToggle("Read handwriting with Gemini", _settings.HandwritingGemini, ref y);
             hand.CheckedChanged += delegate { _settings.HandwritingGemini = hand.Checked; };
 
@@ -4604,6 +4782,7 @@ namespace NextScan.App
             _film = new StudioFilmstripView();
             _film.SelectionChanged += delegate
             {
+                _showingFilm = true;
                 RawImage img = _film.SelectedImage;
                 if (img != null)
                 {
@@ -4613,6 +4792,7 @@ namespace NextScan.App
                     UpdateProcessedPreview();
                 }
                 else _canvas.SetImage(null);
+                UpdateSuggest();
             };
 
             // Deliberately NOT added to the form: the filmstrip is parented to
@@ -4779,6 +4959,8 @@ namespace NextScan.App
                 ScanPage = delegate (int i) { var all = _film == null ? null : _film.AllImages(); return all != null && i >= 0 && i < all.Count ? all[i] : null; },
                 CurrentScan = CurrentScanForAssistant,
             };
+            tools.ScannerRun = AssistantScan;
+
             // Handwriting is read by Gemini, whichever model the assistant is: a tool the assistant can call.
             if (_kinds != null)
             {
@@ -7708,6 +7890,7 @@ namespace NextScan.App
                     _film.AddPage(img);
                     _hasRealPage = true;
                     if (_kinds != null) _kinds.Request(img);
+                    UpdateSuggest();
 
                     // Only from the second page on. For a single-page scan the
                     // canvas placement is decided once the scan finishes - a
@@ -7787,6 +7970,9 @@ namespace NextScan.App
 
                 _capturePage = pages[0];
                 _captureBedRect = _previewBedRect;
+                _showingFilm = false;
+                if (_kinds != null) _kinds.Request(_capturePage);
+                UpdateSuggest();
 
                 bool partial = reg.Width > 0.05f && reg.Height > 0.05f &&
                                (reg.Width < _activeBedW - 0.05 || reg.Height < _activeBedH - 0.05);
@@ -7850,6 +8036,8 @@ namespace NextScan.App
                 // with the whole platen.
                 _capturePage = last;
                 _captureBedRect = _pageBedRect;
+                if (_kinds != null) _kinds.Request(_capturePage);
+                UpdateSuggest();
 
                 // A partial scan is shown back in its place on the glass, so the
                 // selection can be widened and re-scanned without another preview.

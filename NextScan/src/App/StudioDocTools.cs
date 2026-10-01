@@ -34,6 +34,9 @@ namespace NextScan.App
         /// <summary>Makes a PDF of the session's scanned pages and returns its path, or null.</summary>
         public Func<string> PdfFromPages;
 
+        /// <summary>Previews the glass or scans, waits until it is done and says how it went: (preview?, dpi or 0, mode or ""). Null where there is no scanner side.</summary>
+        public Func<bool, int, string, Task<string>> ScannerRun;
+
         /// <summary>Has Gemini read handwriting on a picture (JPEG, a note for it); null where there is no Gemini.</summary>
         public Func<byte[], string, Task<string>> HandwritingReader;
 
@@ -72,6 +75,20 @@ namespace NextScan.App
                     "\\\"criteria\\\": {\\\"bill\\\": \\\"A bill or invoice\\\", \\\"letter\\\": \\\"A letter\\\"}}, " +
                     "\\\"paid\\\": {\\\"type\\\": \\\"noul\\\", \\\"instructions\\\": \\\"Is it marked as paid?\\\"}}\"}}," +
                     "\"required\":[\"questions\"]}"));
+            if (ScannerRun != null)
+            {
+                tools.Add(Tool("preview_scan",
+                    "Previews the whole scanner glass -- a quick, low-resolution look at what lies on it -- and puts it on screen, as the operator's Preview button does. " +
+                    "Use it when the operator asks about what is on the scanner, or you need to see what is on the glass and nothing is previewed (the <app> block says). " +
+                    "It waits until the preview is done; then look_at_scan shows it and find_scan_pictures and the rest work on it. Harmless: it scans nothing to disk.",
+                    "{\"type\":\"object\",\"properties\":{}}"));
+                tools.Add(Tool("scan_page",
+                    "Scans what is on the glass now, at full quality, and adds the page to the session, as the operator's Scan button does (several seconds to a minute; " +
+                    "it uses the scanner's current settings and the selection, if one is drawn). Do it when the operator asks you to scan, or agrees after you offer. " +
+                    "dpi (75 to 1200) and mode ('colour', 'gray' or 'black_white') are optional and apply to this scan only. When it is done the page is on screen and " +
+                    "look_at_scan shows it. To scan several pages, scan one, then ask the operator to put the next on the glass.",
+                    "{\"type\":\"object\",\"properties\":{\"dpi\":{\"type\":\"integer\",\"description\":\"Resolution for this scan only.\"},\"mode\":{\"type\":\"string\",\"enum\":[\"colour\",\"gray\",\"black_white\"],\"description\":\"Colour mode for this scan only.\"}}}"));
+            }
             if (HandwritingReader != null && HandwritingAvailable != null && HandwritingAvailable())
                 tools.Add(Tool("transcribe_scan",
                     "Has Gemini, the best reader of handwriting there is, read the handwriting on a scanned page and give you what it says, word for word, " +
@@ -267,6 +284,8 @@ namespace NextScan.App
                     case "find_scan_pictures": await FindScanPictures(args, result); break;
                     case "crop_scan": CropScan(args, result); break;
                     case "transcribe_scan": await TranscribeScan(args, result); break;
+                    case "preview_scan": await RunScanner(true, args, result); break;
+                    case "scan_page": await RunScanner(false, args, result); break;
                     case "open_document": await Open(Str(args, "path"), result); break;
                     case "create_document": await Create(Str(args, "kind"), result); break;
                     case "read_document": await Read(Pick(args), args, result); break;
@@ -924,6 +943,18 @@ namespace NextScan.App
             }
             result.Content = Json(content);
             result.Display = "Looked at " + name.ToLowerInvariant() + (region != null ? " (close-up)" : "");
+        }
+
+        async Task RunScanner(bool preview, Dictionary<string, object> args, AiToolResult result)
+        {
+            if (ScannerRun == null) throw new ToolTrouble("The scanner is not available here.");
+            int dpi = 0;
+            object d;
+            if (args.TryGetValue("dpi", out d) && d != null) { try { dpi = Convert.ToInt32(d, CultureInfo.InvariantCulture); } catch { } }
+            result.Display = preview ? "Previewing the glass" : "Scanning";
+            string said = await ScannerRun(preview, dpi, Str(args, "mode"));
+            result.Content = Json(new Dictionary<string, object> { { preview ? "preview" : "scan", said } });
+            result.Display = preview ? "Previewed the glass" : "Scanned a page";
         }
 
         async Task TranscribeScan(Dictionary<string, object> args, AiToolResult result)

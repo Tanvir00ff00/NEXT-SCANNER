@@ -207,6 +207,18 @@ namespace NextScan.App
         /// </summary>
         bool _pageSent;
 
+        // The page the model was last shown. Not "a page has been sent in this conversation": that kept a NEW scan from
+        // being attached once any earlier page had gone, so a Word icon pressed on a new preview sent the question
+        // without its picture.
+        WeakReference _pageShown;
+
+        bool SentBefore(RawImage page) { return _pageShown != null && ReferenceEquals(_pageShown.Target, page); }
+
+        void MarkSent(RawImage page) { _pageShown = new WeakReference(page); }
+
+        /// <summary>Whether the assistant is shown the page on screen with a message that is not about it (Settings: Recognising scans). Set by the shell.</summary>
+        public Func<bool> SeesPage;
+
         // ---- what the page is, and who reads it (StudioScanKind.cs) -------------
         /// <summary>Set by the shell: looks at pages once and says what each is.</summary>
         public ScanKinds Kinds;
@@ -219,6 +231,35 @@ namespace NextScan.App
 
         /// <summary>True while it is being found out what the page is, so a second press of send does not start a second turn.</summary>
         bool _deciding;
+
+        bool _askedForHandwriting;
+
+        /// <summary>The tile that stands for the page in the conversation: its picture, and what it is.</summary>
+        ChatAttachment TileOfPage(RawImage page, byte[] sent)
+        {
+            string name = (PageNote == null ? "" : (PageNote() ?? "")).Trim();
+            if (name.Length == 0) name = "The page on screen";
+            var tile = new ChatAttachment { Name = name, Kind = "picture", State = AttachState.Ready, Note = "The page was sent with the message." };
+            try
+            {
+                using (Bitmap full = page.ToBitmap()) tile.Thumb = AttachReader.Square(full, 96);
+                tile.Pictures.Add(new AiPicture { Bytes = sent, MediaType = "image/jpeg", Name = name });
+            }
+            catch { }
+            return tile;
+        }
+
+        /// <summary>Does one of the suggestions (rebuild, excel, type, read, translate, identify) as if its chip had been pressed.</summary>
+        public void RunSuggestion(string id)
+        {
+            foreach (Suggestion s in Suggestions)
+                if (s.Id == id)
+                {
+                    _askedForHandwriting = id == "type";
+                    Send(s.Title, s.Ask, s.NeedsPage);
+                    return;
+                }
+        }
 
         /// <summary>A page has been recognised: the note under the box says what it is.</summary>
         public void PageRecognised() { if (!IsDisposed) UpdateChip(); }
@@ -274,12 +315,10 @@ namespace NextScan.App
             var seen = new List<ScanInfo>();
             if (tasks.Count == 0) return seen;
 
+            // Never held up for long: a page scanned a moment ago has been looked at already, and one that has
+            // not is not worth making the operator wait for -- the question goes to the model they chose.
             Task all = Task.WhenAll(tasks.ToArray());
-            if (!all.IsCompleted)
-            {
-                Say("Checking what is on the page…");
-                await Task.WhenAny(all, Task.Delay(20000));
-            }
+            if (!all.IsCompleted) await Task.WhenAny(all, Task.Delay(1200));
             foreach (Task<ScanInfo> t in tasks)
                 if (t.IsCompleted && !t.IsFaulted && !t.IsCanceled && t.Result != null && t.Result.Ok) seen.Add(t.Result);
             return seen;
@@ -320,11 +359,23 @@ namespace NextScan.App
             new Suggestion
             {
                 Id = "rebuild", Title = "Rebuild this page in Word",
-                Ask = "Make a Word document that is a copy of the scanned page, as close to the original as you can get " +
-                      "it: the same text, word for word, the same fonts, sizes and weights, the same layout and spacing, the " +
-                      "same lines, boxes and tables, dots where it has dots and dashes where it has dashes. Leave out logos and " +
-                      "pictures for now. Look at the scan first, then write the document, then look at it next to the scan " +
-                      "and correct whatever differs until it matches."
+                Ask = "Make this scanned page into a Word document, same to same -- an exact copy, with no mistakes. " +
+                      "(\u098f\u0987 \u09b8\u09cd\u0995\u09cd\u09af\u09be\u09a8 \u0995\u09b0\u09be \u09aa\u09be\u09a4\u09be\u099f\u09be\u0995\u09c7 \u09b9\u09c1\u09ac\u09b9\u09c1 Word-\u098f \u09ac\u09be\u09a8\u09be\u0993, \u0995\u09cb\u09a8\u09cb \u09ad\u09c1\u09b2 \u099b\u09be\u09a1\u09bc\u09be\u0987.) " +
+                      "Every word, number and digit exactly as printed, in its own script; the same fonts, sizes and weights; the same " +
+                      "layout, columns, tables, boxes, lines and spacing -- dots where it has dots and dashes where it has dashes; the " +
+                      "logo and any pictures as pictures, in their place and size. Follow your scan-to-Word method: say what kind of " +
+                      "document it is, measure it on the grid, find and cut out the pictures, read any handwriting with transcribe_scan, " +
+                      "write the document, then look at it next to the scan part by part and correct every difference until nothing " +
+                      "differs. Reply in my language, and say plainly anything you could not match."
+            },
+            new Suggestion
+            {
+                Id = "excel", Title = "Put the table in Excel",
+                Ask = "Make an Excel workbook from the table or tables on the scanned page: one sheet, the same columns and " +
+                      "rows in the same order, the same headings, numbers as numbers and not as text, a formula for every " +
+                      "total or sum the page shows (and check it comes to the figure printed), column widths that fit, and " +
+                      "the header row in bold. Look at the scan first, then build it, then look at the sheet next to the " +
+                      "scan and correct what differs. Say if anything on the page was not a table and was left out."
             },
             new Suggestion
             {
@@ -456,6 +507,13 @@ namespace NextScan.App
             "turn is already running on Gemini (a note on the conversation says so) you read the handwriting yourself.\n" +
             "- When the operator says the result is right, offer to remember the settings that worked for that kind " +
             "of document (page size, fonts, margins), never what was written on it.\n" +
+            "- You know what the scanner has: the <app> block says what is on screen, whether there is a preview of the " +
+            "glass, how many pages are scanned and what each was recognised as, and a small picture of the page on screen " +
+            "comes with a message when it is new, even when the operator attached nothing and typed only a few words -- " +
+            "'this', 'it', 'the scan', 'the preview' mean that page. look_at_scan shows it larger, with a grid and " +
+            "close-ups. You can also work the scanner: preview_scan previews the glass when nothing is previewed and the " +
+            "operator asks about what is on it; scan_page scans (a real scan) when the operator asks you to, or agrees " +
+            "when you offer. Say what you are about to scan.\n" +
             "- You can see what you make. Every write_document, format_document and edit_document shows you the pages " +
             "as they now look (look_at_document shows any page, a millimetre grid, or a close-up of a region). " +
             "Look at them the way a careful person proofreads a printout: is it what was asked? does anything run " +
@@ -1002,8 +1060,10 @@ namespace NextScan.App
                 return;
             }
 
-            // Nothing was chosen yet, or what was chosen is not on this key.
-            if (provider.Info.Id == _providerId && !Has(done.Result, _model))
+            // Nothing was chosen yet. (What was chosen stays, even when this list does not show it: a gateway's list
+            // changes from one asking to the next, and a model the operator picked is not changed behind their back.
+            // If it has gone, the request says so, and they pick another.)
+            if (provider.Info.Id == _providerId && string.IsNullOrEmpty(_model))
             {
                 _model = AiModels.Default(provider, done.Result);
                 Raise();
@@ -1169,7 +1229,10 @@ namespace NextScan.App
             // with a scan of someone's ID still on the glass is not a question
             // about their ID, and look_at_scan fetches it when it is. And with
             // pictures attached by the operator, those are what it is about.
-            if (!_pageSent && page != null && (!tools || needsPage) && attachedPictures.Count == 0)
+            ChatAttachment pageTile = null;
+            string seeHint = "";
+            bool fresh = page != null && !SentBefore(page);
+            if (fresh && attachedPictures.Count == 0 && (!tools || needsPage))
             {
                 image = Encode(page);
                 if (image == null)
@@ -1177,8 +1240,26 @@ namespace NextScan.App
                     AddNote("That page could not be prepared for sending.", true);
                     return;
                 }
+                MarkSent(page);
                 _pageSent = true;
                 _pageFor = PageNote == null ? "" : PageNote();
+                pageTile = TileOfPage(page, image);
+            }
+            else if (fresh && tools && attachedPictures.Count == 0 && SeesPage != null && SeesPage())
+            {
+                // A message that is not about the page still gets a small picture of what is on screen, once: so that
+                // "what is this", "do the same for the next one" and "make it in Word" need no attachment and the
+                // assistant knows what is on the glass or has just been scanned. look_at_scan has it larger.
+                image = Encode(page, 900);
+                if (image != null)
+                {
+                    MarkSent(page);
+                    _pageSent = true;
+                    _pageFor = PageNote == null ? "" : PageNote();
+                    pageTile = TileOfPage(page, image);
+                    seeHint = "A small picture of the page on screen is attached to this message (" + _pageFor.Trim() + "). " +
+                              "It is there so you know what is on the glass or was just scanned; look_at_scan shows it larger and measures it.";
+                }
             }
 
             // Who reads it. A page that is mostly handwriting goes to Gemini, which reads handwriting best,
@@ -1187,7 +1268,23 @@ namespace NextScan.App
             _turnProviderId = ""; _turnModel = "";
             IAiProvider turnProvider = provider;
             string routeNote = "", routeHint = "";
-            if (Kinds != null && Kinds.Enabled)
+            bool asked = _askedForHandwriting;
+            _askedForHandwriting = false;
+            if (asked && Kinds != null && Kinds.HandwritingToGemini && provider.Info.Id != "gemini")
+            {
+                IAiProvider g = Kinds.Gemini();
+                try
+                {
+                    string m = await Kinds.HandwritingModel(g, System.Threading.CancellationToken.None);
+                    if (!string.IsNullOrEmpty(m))
+                    {
+                        turnProvider = g; _turnProviderId = g.Info.Id; _turnModel = m;
+                        routeNote = "Handwriting: Gemini reads it (" + AiModels.NameOf(g, m) + ").";
+                    }
+                }
+                catch { }
+            }
+            else if (Kinds != null && Kinds.Enabled)
             {
                 _deciding = true;
                 try
@@ -1230,10 +1327,15 @@ namespace NextScan.App
             _logStart = _log.Count;
             _turnAttachRow = null;
             _lastAttachedLog = "";
-            if (attached.Count > 0)
+
+            // The page that goes with the question shows in the conversation like any attachment: a tile with its
+            // picture, so it is plain that the model was given it.
+            var shownTiles = new List<ChatAttachment>(attached);
+            if (pageTile != null) shownTiles.Insert(0, pageTile);
+            if (shownTiles.Count > 0)
             {
-                _turnAttachRow = AddAttachRow(attached);
-                _lastAttachedLog = AttachedLog(attached);
+                _turnAttachRow = AddAttachRow(shownTiles);
+                _lastAttachedLog = AttachedLog(shownTiles);
                 _log.Add(new AiChatItem { Kind = "attached", Text = _lastAttachedLog });
             }
             NsBubble said = AddBubble(shown ?? text, true);
@@ -1263,6 +1365,7 @@ namespace NextScan.App
                 if (first == asking && !asking.IsFaulted) state = asking.Result ?? "";
             }
             if (IsDisposed) return;
+            if (seeHint.Length > 0) routeHint = seeHint + (routeHint.Length > 0 ? " " + routeHint : "");
             if (routeHint.Length > 0) state = (state.Length > 0 ? state.TrimEnd() + "\n" : "") + routeHint;
 
             AiMessage turn = AiMessage.FromUser(
@@ -2060,6 +2163,8 @@ namespace NextScan.App
                 case "find_scan_pictures": return "Looking for logos and pictures on the scan";
                 case "crop_scan": return "Taking a picture out of the scan";
                 case "transcribe_scan": return "Gemini is reading the handwriting";
+                case "preview_scan": return "Previewing the scanner glass";
+                case "scan_page": return "Scanning a page";
                 case "get_selection": return "Reading the selection";
                 case "save_document": return "Saving";
                 case "export_document": return "Writing a copy";
@@ -2936,7 +3041,7 @@ namespace NextScan.App
             if (handedBack != null) foreach (ChatAttachment a in handedBack) a.Released = false;
             if (_turnStart >= 0 && _turnStart <= _history.Count) _history.RemoveRange(_turnStart, _history.Count - _turnStart);
             if (_logStart >= 0 && _logStart <= _log.Count) _log.RemoveRange(_logStart, _log.Count - _logStart);
-            if (_lastTurn.Image != null) { _pageSent = false; _pageFor = ""; }
+            if (_lastTurn.Image != null) { _pageSent = false; _pageFor = ""; _pageShown = null; }
             if (_logStart == 0) { _title = ""; _bar.Invalidate(); }
 
             _composer.Text = _lastText;
@@ -3604,6 +3709,7 @@ namespace NextScan.App
             _turnProviderId = ""; _turnModel = "";
             _pageFor = "";
             _pageSent = false;
+            _pageShown = null;
             _chatId = "";
             _title = "";
             _working = null;
@@ -3651,7 +3757,7 @@ namespace NextScan.App
         /// </summary>
         const int LongestEdge = 1568;
 
-        internal static byte[] Encode(RawImage page)
+        internal static byte[] Encode(RawImage page, int longest = LongestEdge)
         {
             if (page == null || !page.IsValid) return null;
 
@@ -3662,7 +3768,7 @@ namespace NextScan.App
                     if (full == null) return null;
 
                     int w = full.Width, h = full.Height;
-                    double shrink = Math.Min(1.0, (double)LongestEdge / Math.Max(w, h));
+                    double shrink = Math.Min(1.0, (double)longest / Math.Max(w, h));
                     int tw = Math.Max(1, (int)Math.Round(w * shrink));
                     int th = Math.Max(1, (int)Math.Round(h * shrink));
 

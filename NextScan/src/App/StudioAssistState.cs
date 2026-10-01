@@ -45,7 +45,7 @@ namespace NextScan.App
         /// <summary>The page the operator is looking at, and what to call it: the selected scan, else the preview.</summary>
         Tuple<RawImage, string> CurrentScanForAssistant()
         {
-            if (_film != null && _film.SelectedImage != null)
+            if (_showingFilm && _film != null && _film.SelectedImage != null)
                 return Tuple.Create(_film.SelectedImage, "Scanned page " + (_film.SelectedIndex + 1) + " of " + _film.Count);
             if (_capturePage != null && _capturePage.IsValid) return Tuple.Create(_capturePage, "The preview on the scanner glass");
             if (_canvas != null && !_canvas.IsPlaceholder && _canvas.Image != null) return Tuple.Create(_canvas.Image, "The page on the scanner screen");
@@ -66,6 +66,9 @@ namespace NextScan.App
             s.Append("Screen: ").Append(screen == "Assist" ? "the document workspace (Assist)" : screen + " (the scanner)").Append('\n');
 
             s.Append("Scanner: ").Append(_device != null ? _device.FriendlyName : "none connected").Append('\n');
+            if (_device != null)
+                s.Append("Scan settings: ").Append(_settings.Dpi).Append(" dpi, ").Append(_settings.Mode).Append(". You can preview the glass (preview_scan) or scan (scan_page) yourself.\n");
+            s.Append("Preview of the glass: ").Append(_capturePage != null && _capturePage.IsValid ? "there is one on screen" : "none taken yet").Append('\n');
 
             int pages = _film == null ? 0 : _film.Count;
             s.Append("Scanned pages this session: ").Append(pages);

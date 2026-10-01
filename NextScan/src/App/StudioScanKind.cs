@@ -47,6 +47,9 @@ namespace NextScan.App
         /// <summary>The kind in plain words, as the model put it: "Bank deposit slip".</summary>
         public string Name = "";
 
+        /// <summary>The document's own name, as printed on it or as it would be filed: "Islami Bank - SMS banking and conditions".</summary>
+        public string Title = "";
+
         public List<string> Languages = new List<string>();
 
         /// <summary>none, some (a printed page with handwriting on it) or mostly (what is to be read is handwritten).</summary>
@@ -124,7 +127,7 @@ namespace NextScan.App
         readonly Func<string> _panelProvider;
         readonly Func<string> _panelModel;
         readonly SynchronizationContext _ui;
-        readonly SemaphoreSlim _gate = new SemaphoreSlim(2);
+        readonly SemaphoreSlim _gate = new SemaphoreSlim(4);
 
         class Entry { public Task<ScanInfo> Task; public DateTime At = DateTime.Now; }
         readonly ConditionalWeakTable<RawImage, Entry> _pages = new ConditionalWeakTable<RawImage, Entry>();
@@ -165,6 +168,31 @@ namespace NextScan.App
             return info != null && info.Ok ? info : null;
         }
 
+        /// <summary>Why a page could not be recognised, or "" when it has been, is being looked at, or was not asked.</summary>
+        public string Failure(RawImage page)
+        {
+            Entry e;
+            if (page == null || !_pages.TryGetValue(page, out e) || !e.Task.IsCompleted) return "";
+            if (e.Task.IsFaulted || e.Task.IsCanceled) return "it could not be looked at";
+            ScanInfo info = e.Task.Result;
+            return info != null && !info.Ok ? (info.Error.Length > 0 ? info.Error : "it could not be looked at") : "";
+        }
+
+        /// <summary>Whether a page is being looked at now.</summary>
+        public bool Pending(RawImage page)
+        {
+            Entry e;
+            return page != null && _pages.TryGetValue(page, out e) && !e.Task.IsCompleted;
+        }
+
+        /// <summary>Looks again at a page that could not be recognised.</summary>
+        public void Again(RawImage page)
+        {
+            if (page == null) return;
+            lock (_pages) { _pages.Remove(page); }
+            Request(page);
+        }
+
         /// <summary>Starts looking at a scanned page, if it is not being looked at already.</summary>
         public void Request(RawImage page)
         {
@@ -181,7 +209,7 @@ namespace NextScan.App
             entry.Task = Task.Run(async () =>
             {
                 byte[] jpeg;
-                using (Bitmap bmp = page.ToBitmap()) jpeg = AttachReader.Jpeg(bmp, 1280);
+                using (Bitmap bmp = page.ToBitmap()) jpeg = AttachReader.Jpeg(bmp, 800);
                 ScanInfo info = await Look(jpeg).ConfigureAwait(false);
                 Raise(page, info);
                 return info;
@@ -227,25 +255,25 @@ namespace NextScan.App
         }
 
         const string Question =
-            "This is one scanned page or photograph of a document, from a print and copy shop in Bangladesh. Say what it is. " +
+            "This is one scanned page or photograph of a document, from a print and copy shop in Bangladesh. It may be a preview " +
+            "of the whole scanner glass with the document lying on part of it: describe the document, never the empty glass. Say what it is. " +
             "Answer with JSON only, no other text, exactly these fields:\n" +
             "{\"kind\": one of \"bill\", \"receipt\", \"bank_slip\", \"form\", \"id_card\", \"passport\", \"certificate\", \"letter\", " +
             "\"prescription\", \"table\", \"handwritten_note\", \"book_page\", \"photo\", \"drawing\", \"other\",\n" +
             " \"name\": the kind in two to four plain words, e.g. \"Bank deposit slip\" or \"Handwritten letter\",\n" +
+            " \"title\": what to call this document, two to six words, in the language it is mostly in: the heading printed on it if it has one (the bank's or office's name and what the paper is), otherwise a short description. No personal names or numbers,\n" +
             " \"languages\": [\"bengali\", \"english\", ...] -- the languages of the text on it, most used first,\n" +
             " \"handwriting\": \"none\", \"some\" or \"mostly\",\n" +
-            " \"printed\": true if there is printed or typed text,\n" +
             " \"pictures\": true if there is a logo, photograph, stamp, seal or signature,\n" +
             " \"orientation\": \"upright\", \"rotated_90_cw\", \"rotated_180\" or \"rotated_90_ccw\" -- how the page is turned now,\n" +
-            " \"quality\": \"\" if the scan is good, otherwise what is wrong in a few words (blurred, cut off, skewed, shadow, faint),\n" +
-            " \"summary\": one short sentence on what the page is, with NO names, numbers, addresses or other personal details,\n" +
-            " \"confidence\": 0 to 1}\n\n" +
+            " \"quality\": \"\" if the scan is good, otherwise what is wrong in a few words (blurred, cut off, skewed, shadow, faint)}\n\n" +
             "Handwriting: \"mostly\" means what a reader would need to read is handwritten (a handwritten letter, notes, an exam " +
             "script, a prescription written by hand); \"some\" means a printed page with handwriting on it (a printed form filled in " +
             "by hand, a printed page with notes in the margin); \"none\" means no handwriting. A signature on its own is not " +
             "handwriting; say pictures: true for it. Look at the letters themselves, in whatever script.";
 
-        // A provider whose quota is spent is left alone for a while, so every page does not wait to be refused.
+        // A provider that has just failed (no quota, an empty answer, too slow) is left alone for a while, so that
+        // every page does not wait to be refused again.
         static readonly Dictionary<string, DateTime> Resting = new Dictionary<string, DateTime>();
 
         static bool IsResting(string providerId) { lock (Resting) { DateTime until; return Resting.TryGetValue(providerId, out until) && until > DateTime.Now; } }
@@ -253,16 +281,17 @@ namespace NextScan.App
         static void Rest(string providerId, TimeSpan how) { lock (Resting) Resting[providerId] = DateTime.Now + how; }
 
         /// <summary>
-        /// Looks at the picture with the first provider that can: the one chosen in Settings (Gemini, automatically),
-        /// and when it refuses -- no quota left, the model gone -- the model the operator chose for the assistant,
-        /// if it can see. A page is not left unrecognised because one key ran out.
+        /// Looks at the picture with the providers that can see, never waiting long on one: the first (Gemini's fast
+        /// model, as AI crop does) is asked at once; if it has not answered in five seconds the next is asked as well,
+        /// and so on, and the first usable answer wins. A provider that fails -- no quota left, an empty answer, too
+        /// slow -- is left alone for a while. So a page is recognised in about the time the quickest of them takes, and
+        /// one key running out costs nothing but its own turn.
         /// </summary>
         async Task<ScanInfo> Look(byte[] jpeg)
         {
             var info = new ScanInfo();
             StudioSettings settings = _settings();
-            var tried = new List<string>();
-            var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            var overall = new CancellationTokenSource(TimeSpan.FromSeconds(45));
             try
             {
                 var order = new List<IAiProvider>();
@@ -270,53 +299,97 @@ namespace NextScan.App
                 if (first != null) order.Add(first);
                 IAiProvider panel = AiProviders.ById(_panelProvider() ?? "");
                 if (panel != null && panel.Ready && !order.Contains(panel)) order.Add(panel);
+                foreach (string id in new[] { "gemini", "claude", "openai" })
+                {
+                    IAiProvider p = AiProviders.ById(id);
+                    if (p != null && p.Ready && !order.Contains(p)) order.Add(p);
+                }
                 if (order.Count == 0) { info.Error = "No AI provider that can see pictures is set up."; return info; }
 
-                foreach (IAiProvider looker in order)
+                // Those that are resting go to the back, not out: when nothing else is left they are tried.
+                var rested = order.FindAll(p => IsResting(p.Info.Id));
+                order.RemoveAll(p => rested.Contains(p));
+                order.AddRange(rested);
+
+                var errors = new List<string>();
+                var pending = new List<Task<ScanInfo>>();
+                int started = 0;
+                Func<bool> startNext = delegate
                 {
-                    if (IsResting(looker.Info.Id) && order.Count > 1 && looker != order[order.Count - 1]) continue;
+                    if (started >= order.Count) return false;
+                    pending.Add(Attempt(order[started++], first, panel, jpeg, overall.Token));
+                    return true;
+                };
+                startNext();
 
-                    string model;
-                    if (looker == panel && looker != first)
-                    {
-                        // The operator's own model: used if it is known not to be blind.
-                        model = _panelModel == null ? "" : _panelModel();
-                        if (string.IsNullOrEmpty(model)) model = AiModels.Default(looker, AiModels.Cached(looker));
-                        IList<AiModel> listed = AiModels.Cached(looker);
-                        if (listed != null) foreach (AiModel m in listed) if (m.Id == model && m.Vision == false) model = "";
-                        if (string.IsNullOrEmpty(model)) continue;
-                    }
-                    else model = await AiCrop.Model(looker, settings.ScanRecogniseVia, "", "", cancel.Token).ConfigureAwait(false);
-                    if (string.IsNullOrEmpty(model)) { tried.Add(looker.Info.Name + " has no model to look with"); continue; }
+                while (pending.Count > 0)
+                {
+                    Task hedge = started < order.Count ? Task.Delay(5000, overall.Token) : null;
+                    var waiting = new List<Task>(pending.ToArray());
+                    if (hedge != null) waiting.Add(hedge);
+                    Task finished = await Task.WhenAny(waiting).ConfigureAwait(false);
+                    if (finished == hedge) { startNext(); continue; }
 
-                    await _gate.WaitAsync(cancel.Token).ConfigureAwait(false);
-                    try
-                    {
-                        var request = new AiRequest { Model = model, Thinking = ThinkingLevel.Low, MaxOutputTokens = 2500, Instruction = "You describe scanned documents and answer with JSON only." };
-                        AiMessage turn = AiMessage.FromUser(Question);
-                        turn.Image = jpeg;
-                        turn.ImageMediaType = "image/jpeg";
-                        request.Messages.Add(turn);
-                        AiReply reply = await Retry(looker, request, cancel.Token).ConfigureAwait(false);
-                        if (!string.IsNullOrEmpty(reply.Trouble)) { tried.Add(reply.Trouble); continue; }
-                        var got = new ScanInfo();
-                        Parse(reply.Text ?? "", got);
-                        if (got.Ok) { got.Via = looker.Info.Name + " " + model; return got; }
-                        tried.Add(got.Error);
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex)
-                    {
-                        string why = ex.GetBaseException().Message ?? "";
-                        tried.Add(why);
-                        if (Permanent(ex)) Rest(looker.Info.Id, TimeSpan.FromMinutes(5));
-                    }
-                    finally { _gate.Release(); }
+                    var done = (Task<ScanInfo>)finished;
+                    pending.Remove(done);
+                    ScanInfo got = done.IsFaulted || done.IsCanceled ? new ScanInfo { Error = "no answer" } : done.Result;
+                    if (got.Ok) { overall.Cancel(); return got; }
+                    errors.Add(got.Error);
+                    if (pending.Count == 0) startNext();
                 }
-                info.Error = tried.Count > 0 ? tried[tried.Count - 1] : "The page could not be looked at.";
+                info.Error = errors.Count > 0 ? errors[errors.Count - 1] : "The page could not be looked at.";
             }
             catch (OperationCanceledException) { info.Error = "Looking at the page took too long."; }
             catch (Exception ex) { info.Error = ex.GetBaseException().Message; }
+            return info;
+        }
+
+        /// <summary>One provider's try: its fast model, one request, no retries (the next provider is the retry), a time limit.</summary>
+        async Task<ScanInfo> Attempt(IAiProvider looker, IAiProvider first, IAiProvider panel, byte[] jpeg, CancellationToken overall)
+        {
+            var info = new ScanInfo();
+            var own = CancellationTokenSource.CreateLinkedTokenSource(overall);
+            own.CancelAfter(TimeSpan.FromSeconds(28));
+            bool gate = false;
+            try
+            {
+                StudioSettings settings = _settings();
+                string model;
+                if (looker == panel && looker != first)
+                {
+                    // The operator's own model: used if it is not known to be blind.
+                    model = _panelModel == null ? "" : _panelModel();
+                    if (string.IsNullOrEmpty(model)) model = AiModels.Default(looker, AiModels.Cached(looker));
+                    IList<AiModel> listed = AiModels.Cached(looker);
+                    if (listed != null) foreach (AiModel m in listed) if (m.Id == model && m.Vision == false) model = "";
+                }
+                else model = await AiCrop.Model(looker, looker == first ? settings.ScanRecogniseVia : "", "", "", own.Token).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(model)) { info.Error = looker.Info.Name + " has no model to look with"; return info; }
+
+                await _gate.WaitAsync(own.Token).ConfigureAwait(false);
+                gate = true;
+                var request = new AiRequest { Model = model, Thinking = ThinkingLevel.Low, MaxOutputTokens = 1500, Instruction = "You describe scanned documents and answer with JSON only." };
+                AiMessage turn = AiMessage.FromUser(Question);
+                turn.Image = jpeg;
+                turn.ImageMediaType = "image/jpeg";
+                request.Messages.Add(turn);
+                AiReply reply = await looker.Ask(request, null, own.Token).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(reply.Trouble)) { info.Error = reply.Trouble; Rest(looker.Info.Id, TimeSpan.FromMinutes(2)); return info; }
+                if (string.IsNullOrWhiteSpace(reply.Text)) { info.Error = looker.Info.Name + " gave no answer"; Rest(looker.Info.Id, TimeSpan.FromMinutes(2)); return info; }
+                Parse(reply.Text, info);
+                if (info.Ok) info.Via = looker.Info.Name + " " + model; else Rest(looker.Info.Id, TimeSpan.FromMinutes(1));
+            }
+            catch (OperationCanceledException)
+            {
+                if (!overall.IsCancellationRequested) { info.Error = looker.Info.Name + " was too slow"; Rest(looker.Info.Id, TimeSpan.FromMinutes(2)); }
+                else info.Error = "stopped";
+            }
+            catch (Exception ex)
+            {
+                info.Error = ex.GetBaseException().Message ?? "failed";
+                Rest(looker.Info.Id, Permanent(ex) ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(1));
+            }
+            finally { if (gate) _gate.Release(); own.Dispose(); }
             return info;
         }
 
@@ -360,6 +433,7 @@ namespace NextScan.App
 
             info.Kind = Text(d, "kind", "other").ToLowerInvariant().Replace(' ', '_');
             info.Name = Text(d, "name", "");
+            info.Title = Text(d, "title", "");
             info.Summary = Text(d, "summary", "");
             info.Quality = Text(d, "quality", "");
             string hw = Text(d, "handwriting", "none").ToLowerInvariant();
