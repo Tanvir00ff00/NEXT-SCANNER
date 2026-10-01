@@ -147,7 +147,7 @@ namespace NextScan.App
         public bool Enabled { get { return _settings().ScanRecognise; } }
 
         /// <summary>Handwriting goes to Gemini when the operator allows it and a Gemini key is set.</summary>
-        public bool HandwritingToGemini { get { return _settings().HandwritingGemini && Gemini() != null; } }
+        public bool HandwritingToGemini { get { return _settings().HandwritingGemini && Gemini() != null && !IsResting("gemini"); } }
 
         public IAiProvider Gemini()
         {
@@ -580,7 +580,13 @@ namespace NextScan.App
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { last = ex; MarkFailed(model); }
             }
-            if (last != null) throw last;
+            if (last != null)
+            {
+                // No quota or no such model: Gemini is not offered, or routed to, for a while, so each question does not
+                // pay for finding that out again; the model that is working reads the text itself meanwhile.
+                if (Permanent(last)) Rest("gemini", TimeSpan.FromMinutes(10));
+                throw new InvalidOperationException("Gemini cannot be used for now (" + (last.GetBaseException().Message ?? "refused").Split('\n')[0].Trim() + "). Read the text yourself from close-ups of the page.");
+            }
             return "";
         }
     }

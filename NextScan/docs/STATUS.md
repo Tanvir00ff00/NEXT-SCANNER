@@ -9,6 +9,10 @@ as verified below, assume it does not work yet.
 
 ---
 
+## The Word icon sent nothing -- 2026-10-01
+
+The Word icon opened the Assist screen and nothing was sent. The card calls it "word"; the request it stands for is called "rebuild", so the lookup found nothing and returned without a word. (Every other icon has the same name on both sides, which is why they worked; the tests pressed "rebuild" directly.) Fixed: "word" means "rebuild", and an unknown action now says so instead of doing nothing. Checked by pressing the icon's own id in the panel: the question is in the chat at once and the model starts on the scan.
+
 ## Word icon: write early, and exact text from Gemini — 2026-10-01
 
 "Every other icon works; the Word one is not accurate." Run through with the

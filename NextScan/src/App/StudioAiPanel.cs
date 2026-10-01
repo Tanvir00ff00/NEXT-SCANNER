@@ -252,6 +252,9 @@ namespace NextScan.App
         /// <summary>Does one of the suggestions (rebuild, excel, type, read, translate, identify) as if its chip had been pressed.</summary>
         public void RunSuggestion(string id)
         {
+            // The card's Word icon is "word"; the request it stands for is "rebuild". With no match nothing was sent,
+            // which is what the operator saw: the Assist screen opened and nothing happened.
+            if (id == "word") id = "rebuild";
             foreach (Suggestion s in Suggestions)
                 if (s.Id == id)
                 {
@@ -259,6 +262,7 @@ namespace NextScan.App
                     Send(s.Title, s.Ask, s.NeedsPage);
                     return;
                 }
+            AddNote("That action is not available (" + id + ").", true);
         }
 
         /// <summary>A page has been recognised: the note under the box says what it is.</summary>
